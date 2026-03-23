@@ -5,7 +5,7 @@ import {
   parseNestbankEmail,
   detectEmailSource,
   parseEmail,
-} from "./emailParsers";
+} from "../workers/emailParsers";
 
 // ─── Slowhop parser tests ─────────────────────────────────────────────────────
 

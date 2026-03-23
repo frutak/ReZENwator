@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import {
@@ -35,88 +35,8 @@ import {
   Trash2,
 } from "lucide-react";
 import { format } from "date-fns";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export type Booking = {
-  id: number;
-  property: string;
-  channel: string;
-  checkIn: Date | string;
-  checkOut: Date | string;
-  status: string;
-  depositStatus: string;
-  guestName: string | null;
-  guestEmail: string | null;
-  guestPhone: string | null;
-  guestCount: number | null;
-  adultsCount: number | null;
-  childrenCount: number | null;
-  animalsCount: number | null;
-  amountPaid: string | null;
-  totalPrice: string | null;
-  hostRevenue: string | null;
-  currency: string | null;
-  transferAmount: string | null;
-  transferSender: string | null;
-  transferTitle: string | null;
-  transferDate: Date | string | null;
-  matchScore: number | null;
-  notes: string | null;
-  createdAt: Date | string;
-};
-
-// ─── Badge helpers ────────────────────────────────────────────────────────────
-
-export function StatusBadge({ status }: { status: string }) {
-  const labels: Record<string, string> = {
-    pending: "Pending",
-    confirmed: "Confirmed",
-    paid_to_intermediary: "Paid to Intermediary",
-    paid: "Paid",
-    finished: "Finished",
-  };
-  return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border status-${status}`}
-    >
-      {labels[status] ?? status}
-    </span>
-  );
-}
-
-export function DepositBadge({ status }: { status: string }) {
-  const labels: Record<string, string> = {
-    pending: "Dep: Pending",
-    paid: "Dep: Paid",
-    returned: "Dep: Returned",
-    not_applicable: "Dep: N/A",
-  };
-  return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border deposit-${status}`}
-    >
-      {labels[status] ?? status}
-    </span>
-  );
-}
-
-export function ChannelBadge({ channel }: { channel: string }) {
-  const labels: Record<string, string> = {
-    slowhop: "Slowhop",
-    airbnb: "Airbnb",
-    booking: "Booking.com",
-    alohacamp: "Alohacamp",
-    direct: "Direct",
-  };
-  return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium channel-${channel}`}
-    >
-      {labels[channel] ?? channel}
-    </span>
-  );
-}
+import { Booking } from "@shared/types";
+import { StatusBadge, DepositBadge, ChannelBadge } from "@/components/ui/Badges";
 
 // ─── Booking Detail Modal ─────────────────────────────────────────────────────
 
@@ -181,13 +101,22 @@ export default function BookingDetailModal({
   const [totalPrice, setTotalPrice] = useState(booking.totalPrice ?? "");
   const [hostRevenue, setHostRevenue] = useState(booking.hostRevenue ?? "");
   const [amountPaid, setAmountPaid] = useState(booking.amountPaid ?? "0.00");
+  const [depositAmount, setDepositAmount] = useState(booking.depositAmount ?? "500.00");
   const [currency, setCurrency] = useState(booking.currency ?? "PLN");
   const [channel, setChannel] = useState(booking.channel);
+  const [localStatus, setLocalStatus] = useState(booking.status);
+  const [localDepositStatus, setLocalDepositStatus] = useState(booking.depositStatus);
 
   const nights = Math.round(
     (new Date(booking.checkOut).getTime() - new Date(booking.checkIn).getTime()) /
       (1000 * 60 * 60 * 24)
   );
+
+  const toBePaid = useMemo(() => {
+    const total = parseFloat(totalPrice) || 0;
+    const paid = parseFloat(amountPaid) || 0;
+    return Math.max(0, total - paid).toFixed(2);
+  }, [totalPrice, amountPaid]);
 
   const handleSaveDetails = () => {
     updateDetails.mutate({
@@ -202,8 +131,11 @@ export default function BookingDetailModal({
       totalPrice,
       hostRevenue,
       amountPaid,
+      depositAmount,
       currency,
       channel: channel as "slowhop" | "airbnb" | "booking" | "alohacamp" | "direct",
+      status: localStatus as any,
+      depositStatus: localDepositStatus as any,
     });
   };
 
@@ -277,7 +209,7 @@ export default function BookingDetailModal({
         </div>
         <div>
           <p className="text-xs text-muted-foreground mb-1">Status</p>
-          <StatusBadge status={booking.status} />
+          <StatusBadge status={localStatus} />
         </div>
 
         {/* Guest details form */}
@@ -361,7 +293,7 @@ export default function BookingDetailModal({
           </h3>
           <div className="grid grid-cols-4 gap-3">
             <div>
-              <label className="text-[10px] uppercase font-bold text-muted-foreground">Total Price</label>
+              <label className="text-[10px] uppercase font-bold text-muted-foreground">Total Price (PLN)</label>
               <input
                 className="w-full border rounded-md px-2 py-1 text-sm bg-background"
                 value={totalPrice}
@@ -370,29 +302,27 @@ export default function BookingDetailModal({
               />
             </div>
             <div>
-              <label className="text-[10px] uppercase font-bold text-muted-foreground">Amount Paid</label>
+              <label className="text-[10px] uppercase font-bold text-muted-foreground">Amount Paid (PLN)</label>
               <input
-                className="w-full border rounded-md px-2 py-1 text-sm bg-green-50 dark:bg-green-900/10"
+                className="w-full border rounded-md px-2 py-1 text-sm bg-background"
                 value={amountPaid}
                 onChange={(e) => setAmountPaid(e.target.value)}
                 placeholder="0.00"
               />
             </div>
             <div>
-              <label className="text-[10px] uppercase font-bold text-muted-foreground">Host Revenue</label>
+              <label className="text-[10px] uppercase font-bold text-muted-foreground">To be paid (PLN)</label>
+              <div className="w-full border rounded-md px-2 py-1 text-sm bg-background font-bold">
+                {toBePaid}
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] uppercase font-bold text-muted-foreground">Host pay PLN</label>
               <input
                 className="w-full border rounded-md px-2 py-1 text-sm bg-background"
                 value={hostRevenue}
                 onChange={(e) => setHostRevenue(e.target.value)}
                 placeholder="0.00"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] uppercase font-bold text-muted-foreground">Currency</label>
-              <input
-                className="w-full border rounded-md px-2 py-1 text-sm bg-background"
-                value={currency}
-                onChange={(e) => setCurrency(e.target.value)}
               />
             </div>
           </div>
@@ -440,51 +370,63 @@ export default function BookingDetailModal({
         )}
 
         {/* Status controls */}
-        <div>
-          <p className="text-xs text-muted-foreground mb-1">Booking Status</p>
-          <Select
-            value={booking.status}
-            onValueChange={(v) =>
-              updateStatus.mutate({
-                id: booking.id,
-                status: v as "pending" | "confirmed" | "paid_to_intermediary" | "paid" | "finished",
-              })
-            }
-          >
-            <SelectTrigger className="h-8 text-sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="pending">Pending</SelectItem>
-              <SelectItem value="confirmed">Confirmed</SelectItem>
-              <SelectItem value="paid_to_intermediary">Paid to Intermediary</SelectItem>
-              <SelectItem value="paid">Paid</SelectItem>
-              <SelectItem value="finished">Finished</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        <div className="grid grid-cols-2 gap-4 col-span-2 border-t pt-4">
+          <div>
+            <p className="text-xs text-muted-foreground mb-1 font-bold uppercase">Booking Status</p>
+            <Select
+              value={localStatus}
+              onValueChange={(v) => {
+                const newStatus = v as any;
+                setLocalStatus(newStatus);
+                updateStatus.mutate({ id: booking.id, status: newStatus });
+              }}
+            >
+              <SelectTrigger className="h-9 text-sm">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="pending">Pending</SelectItem>
+                <SelectItem value="confirmed">Confirmed</SelectItem>
+                <SelectItem value="paid_to_intermediary">Paid to Intermediary</SelectItem>
+                <SelectItem value="paid">Paid</SelectItem>
+                <SelectItem value="finished">Finished</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
 
-        <div>
-          <p className="text-xs text-muted-foreground mb-1">Deposit Status</p>
-          <Select
-            value={booking.depositStatus}
-            onValueChange={(v) =>
-              updateDeposit.mutate({
-                id: booking.id,
-                depositStatus: v as "pending" | "paid" | "returned" | "not_applicable",
-              })
-            }
-          >
-            <SelectTrigger className="h-8 text-sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="pending">Pending</SelectItem>
-              <SelectItem value="paid">Paid</SelectItem>
-              <SelectItem value="returned">Returned</SelectItem>
-              <SelectItem value="not_applicable">Not Applicable</SelectItem>
-            </SelectContent>
-          </Select>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <p className="text-xs text-muted-foreground mb-1 font-bold uppercase">Deposit Status</p>
+              <Select
+                value={localDepositStatus}
+                onValueChange={(v) => {
+                  const newStatus = v as any;
+                  setLocalDepositStatus(newStatus);
+                  updateDeposit.mutate({ id: booking.id, depositStatus: newStatus });
+                }}
+              >
+                <SelectTrigger className="h-9 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="pending">Pending</SelectItem>
+                  <SelectItem value="paid">Paid</SelectItem>
+                  <SelectItem value="returned">Returned</SelectItem>
+                  <SelectItem value="not_applicable">N/A</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <p className="text-xs text-muted-foreground mb-1 font-bold uppercase">Deposit PLN</p>
+              <input
+                type="number"
+                disabled={localDepositStatus === "not_applicable"}
+                className="w-full border h-9 rounded-md px-2 py-1 text-sm bg-background disabled:opacity-50"
+                value={depositAmount}
+                onChange={(e) => setDepositAmount(e.target.value)}
+              />
+            </div>
+          </div>
         </div>
 
         {/* Notes */}

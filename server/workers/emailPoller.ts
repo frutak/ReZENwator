@@ -224,8 +224,8 @@ async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boole
       childrenCount: parsed.childrenCount ?? match.childrenCount,
       animalsCount: parsed.animalsCount ?? match.animalsCount,
       totalPrice: parsed.totalPrice ? String(parsed.totalPrice) : match.totalPrice,
-      hostRevenue: parsed.hostRevenue ? String(parsed.hostRevenue) : match.hostRevenue,
-      amountPaid: parsed.amountPaid ? String(parsed.amountPaid) : match.amountPaid,
+      hostRevenue: parsed.hostRevenue != null ? String(parsed.hostRevenue) : match.hostRevenue,
+      amountPaid: parsed.amountPaid != null ? String(parsed.amountPaid) : match.amountPaid,
       currency: parsed.currency ?? match.currency,
     })
     .where(eq(bookings.id, match.id));
