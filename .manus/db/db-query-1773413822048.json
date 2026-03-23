@@ -1,0 +1,60 @@
+{
+  "query": "SELECT id, property, channel, checkIn, checkOut, status, icalUid, guestName FROM bookings WHERE property = 'Sadoles' AND checkIn >= '2026-03-12' AND checkIn <= '2026-03-21' ORDER BY checkIn, channel;",
+  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway04.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3XBZvXM4G6JtM76.root --database aAcY4FV4snu2KkCthGFbUA --execute SELECT id, property, channel, checkIn, checkOut, status, icalUid, guestName FROM bookings WHERE property = 'Sadoles' AND checkIn >= '2026-03-12' AND checkIn <= '2026-03-21' ORDER BY checkIn, channel;",
+  "rows": [
+    {
+      "id": "26",
+      "property": "Sadoles",
+      "channel": "airbnb",
+      "checkIn": "2026-03-12 23:00:00",
+      "checkOut": "2026-03-13 23:00:00",
+      "status": "confirmed",
+      "icalUid": "7f662ec65913-2bc5a0ca5121c063422a0e130db6c01a@airbnb.com",
+      "guestName": "NULL"
+    },
+    {
+      "id": "5",
+      "property": "Sadoles",
+      "channel": "booking",
+      "checkIn": "2026-03-12 23:00:00",
+      "checkOut": "2026-03-14 23:00:00",
+      "status": "confirmed",
+      "icalUid": "8714b4b377d1e4e789add7f74ddd7c11@slowhop.com",
+      "guestName": "NULL"
+    },
+    {
+      "id": "9",
+      "property": "Sadoles",
+      "channel": "booking",
+      "checkIn": "2026-03-12 23:00:00",
+      "checkOut": "2026-03-14 23:00:00",
+      "status": "confirmed",
+      "icalUid": "9f55814feb9fe899d88181e07982f161@booking.com",
+      "guestName": "NULL"
+    },
+    {
+      "id": "6",
+      "property": "Sadoles",
+      "channel": "booking",
+      "checkIn": "2026-03-19 23:00:00",
+      "checkOut": "2026-03-21 23:00:00",
+      "status": "confirmed",
+      "icalUid": "5de86499ca3d7b52fdd78c2fd8a3ce16@slowhop.com",
+      "guestName": "NULL"
+    },
+    {
+      "id": "10",
+      "property": "Sadoles",
+      "channel": "booking",
+      "checkIn": "2026-03-19 23:00:00",
+      "checkOut": "2026-03-21 23:00:00",
+      "status": "confirmed",
+      "icalUid": "fbc889d75ae8c7208005bedb8e92bb77@booking.com",
+      "guestName": "NULL"
+    }
+  ],
+  "messages": [],
+  "stdout": "id\tproperty\tchannel\tcheckIn\tcheckOut\tstatus\ticalUid\tguestName\n26\tSadoles\tairbnb\t2026-03-12 23:00:00\t2026-03-13 23:00:00\tconfirmed\t7f662ec65913-2bc5a0ca5121c063422a0e130db6c01a@airbnb.com\tNULL\n5\tSadoles\tbooking\t2026-03-12 23:00:00\t2026-03-14 23:00:00\tconfirmed\t8714b4b377d1e4e789add7f74ddd7c11@slowhop.com\tNULL\n9\tSadoles\tbooking\t2026-03-12 23:00:00\t2026-03-14 23:00:00\tconfirmed\t9f55814feb9fe899d88181e07982f161@booking.com\tNULL\n6\tSadoles\tbooking\t2026-03-19 23:00:00\t2026-03-21 23:00:00\tconfirmed\t5de86499ca3d7b52fdd78c2fd8a3ce16@slowhop.com\tNULL\n10\tSadoles\tbooking\t2026-03-19 23:00:00\t2026-03-21 23:00:00\tconfirmed\tfbc889d75ae8c7208005bedb8e92bb77@booking.com\tNULL\n",
+  "stderr": "",
+  "execution_time_ms": 70
+}
