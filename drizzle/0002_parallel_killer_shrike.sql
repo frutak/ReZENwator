@@ -1,0 +1,1 @@
+ALTER TABLE `bookings` ADD `amountPaid` decimal(10,2) DEFAULT '0.00';

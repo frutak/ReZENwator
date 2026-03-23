@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1773404522566,
+      "tag": "0000_lumpy_iron_lad",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1773404671700,
+      "tag": "0001_whole_garia",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1774256787716,
+      "tag": "0002_parallel_killer_shrike",
+      "breakpoints": true
+    }
+  ]
+}
