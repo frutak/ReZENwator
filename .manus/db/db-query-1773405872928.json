@@ -1,9 +1,0 @@
-{
-  "query": "DELETE FROM bookings WHERE checkIn > DATE_ADD(NOW(), INTERVAL 363 DAY);",
-  "command": "mysql --batch --raw --column-names --default-character-set=utf8mb4 --host gateway04.us-east-1.prod.aws.tidbcloud.com --port 4000 --user 3XBZvXM4G6JtM76.root --database aAcY4FV4snu2KkCthGFbUA --execute DELETE FROM bookings WHERE checkIn > DATE_ADD(NOW(), INTERVAL 363 DAY);",
-  "rows": [],
-  "messages": [],
-  "stdout": "",
-  "stderr": "",
-  "execution_time_ms": 140
-}

@@ -111,6 +111,7 @@ const bookingRouter = router({
         hostRevenue: z.string().optional(),
         currency: z.string().optional(),
         amountPaid: z.string().optional(),
+        depositAmount: z.string().optional(),
         channel: z.enum(["slowhop", "airbnb", "booking", "alohacamp", "direct"]).optional(),
         status: z.enum(["pending", "confirmed", "paid_to_intermediary", "paid", "finished"]).optional(),
       })
@@ -126,6 +127,7 @@ const bookingRouter = router({
       if (normalizedDetails.totalPrice === "") normalizedDetails.totalPrice = null;
       if (normalizedDetails.hostRevenue === "") normalizedDetails.hostRevenue = null;
       if (normalizedDetails.amountPaid === "") normalizedDetails.amountPaid = null;
+      if (normalizedDetails.depositAmount === "") normalizedDetails.depositAmount = null;
 
       await db.update(bookings).set(normalizedDetails).where(eq(bookings.id, id));
       return { success: true };

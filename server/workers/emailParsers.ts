@@ -247,6 +247,45 @@ export function parseSlowhoEmail(subject: string, body: string): ParsedBookingEm
   };
 }
 
+/**
+ * Parses Slowhop pre-payment transfer notification emails.
+ *
+ * Example subject: "Przelew przedpłaty za rezerwacje id 1222769 na Slowhop"
+ */
+export function parseSlowhopTransferEmail(subject: string, body: string): ParsedBookingEmail | null {
+  const text = `${subject}\n${body}`;
+
+  // Extract table values
+  // Body has a structure where amounts are followed by zł/zl
+  // 1222769 (Evelina De Lain, 28-03-2026 - 01-04-2026) 1800 zł 540 zł 270 zł 207.9 zł
+  const prices = [...body.matchAll(/(\d+[\s,.]*\d*)\s*(?:zł|zl|pln)/gi)];
+  
+  const totalPriceData = prices[0] ? parsePrice(prices[0][0]) : undefined;
+  const amountPaidData = prices[1] ? parsePrice(prices[1][0]) : undefined;
+  const commissionData = prices[2] ? parsePrice(prices[2][0]) : undefined;
+
+  const hostRevenue = totalPriceData && commissionData ? totalPriceData.amount - commissionData.amount : undefined;
+
+  // Extract Guest Name and Dates from parentheses: (Guest Name, DD-MM-YYYY - DD-MM-YYYY)
+  const detailMatch = body.match(/\(([^,)]+),\s*(\d{1,2}-\d{1,2}-\d{4})\s*-\s*(\d{1,2}-\d{1,2}-\d{4})\)/i);
+  const guestName = detailMatch ? detailMatch[1]!.trim() : undefined;
+  const checkIn = detailMatch ? parseDMY(detailMatch[2]!) : undefined;
+  const checkOut = detailMatch ? parseDMY(detailMatch[3]!) : undefined;
+
+  return {
+    type: "booking",
+    channel: "slowhop",
+    guestName,
+    checkIn,
+    checkOut,
+    totalPrice: totalPriceData?.amount,
+    amountPaid: amountPaidData?.amount,
+    hostRevenue,
+    currency: "PLN",
+    rawText: text.substring(0, 2000),
+  };
+}
+
 // ─── Airbnb parser ────────────────────────────────────────────────────────────
 
 /**
@@ -410,6 +449,7 @@ export function parseNestbankEmail(subject: string, body: string): ParsedBankEma
 
 export type EmailSource =
   | "slowhop"
+  | "slowhop_transfer"
   | "airbnb"
   | "nestbank"
   | "booking"
@@ -427,6 +467,9 @@ export function detectEmailSource(
   const subjectLower = subject.toLowerCase();
   const bodyLower = body.toLowerCase().substring(0, 500);
 
+  if (subjectLower.includes("przelew przedpłaty") && subjectLower.includes("slowhop")) {
+    return "slowhop_transfer";
+  }
   if (fromLower.includes("booking.com") || subjectLower.includes("booking.com") || bodyLower.includes("booking.com")) {
     return "booking";
   }
@@ -458,6 +501,8 @@ export function parseEmail(
   switch (source) {
     case "slowhop":
       return parseSlowhoEmail(subject, body);
+    case "slowhop_transfer":
+      return parseSlowhopTransferEmail(subject, body);
     case "airbnb":
       return parseAirbnbEmail(subject, body);
     case "nestbank":

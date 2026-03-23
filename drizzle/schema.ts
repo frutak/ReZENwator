@@ -87,6 +87,8 @@ export const bookings = mysqlTable(
     // Payments
     /** Total amount paid by the guest so far */
     amountPaid: decimal("amountPaid", { precision: 10, scale: 2 }).default("0.00"),
+    /** Security deposit amount required */
+    depositAmount: decimal("depositAmount", { precision: 10, scale: 2 }).default("500.00"),
 
     // Pricing (populated from email parsing)
     /** Total price charged to the guest */
