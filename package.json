@@ -1,6 +1,6 @@
 {
   "name": "rental-manager",
-  "version": "0.1.0-alpha",
+  "version": "0.2.0-alpha",
   "type": "module",
   "license": "MIT",
   "scripts": {
