@@ -1,5 +1,5 @@
 import { AXIOS_TIMEOUT_MS, COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
-import { ForbiddenError } from "@shared/_core/errors";
+import { TRPCError } from "@trpc/server";
 import axios, { type AxiosInstance } from "axios";
 import { parse as parseCookieHeader } from "cookie";
 import type { Request } from "express";
@@ -263,7 +263,7 @@ class SDKServer {
     const session = await this.verifySession(sessionCookie);
 
     if (!session) {
-      throw ForbiddenError("Invalid session cookie");
+      throw new TRPCError({ code: "FORBIDDEN", message: "Invalid session cookie" });
     }
 
     const sessionUserId = session.openId;
@@ -284,12 +284,12 @@ class SDKServer {
         user = await db.getUserByOpenId(userInfo.openId);
       } catch (error) {
         console.error("[Auth] Failed to sync user from OAuth:", error);
-        throw ForbiddenError("Failed to sync user info");
+        throw new TRPCError({ code: "FORBIDDEN", message: "Failed to sync user info" });
       }
     }
 
     if (!user) {
-      throw ForbiddenError("User not found");
+      throw new TRPCError({ code: "FORBIDDEN", message: "User not found" });
     }
 
     await db.upsertUser({

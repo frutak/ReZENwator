@@ -1,6 +1,6 @@
-import { and, desc, eq, gte, lte, or } from "drizzle-orm";
+import { and, desc, eq, gte, lte, or, ne, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { bookings, syncLogs, users } from "../drizzle/schema";
+import { bookings, syncLogs, users, propertyRatings } from "../drizzle/schema";
 import type { InsertUser, InsertBooking } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 
@@ -62,7 +62,7 @@ export async function getUserByOpenId(openId: string) {
 export type BookingFilters = {
   property?: "Sadoles" | "Hacjenda";
   channel?: "slowhop" | "airbnb" | "booking" | "alohacamp" | "direct";
-  status?: "pending" | "confirmed" | "paid" | "finished";
+  status?: "pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled";
   depositStatus?: "pending" | "paid" | "returned" | "not_applicable";
   checkInFrom?: Date;
   checkInTo?: Date;
@@ -77,7 +77,9 @@ export async function getBookings(filters: BookingFilters = {}) {
   const conditions = [];
   if (filters.property) conditions.push(eq(bookings.property, filters.property));
   if (filters.channel) conditions.push(eq(bookings.channel, filters.channel));
-  if (filters.status) conditions.push(eq(bookings.status, filters.status));
+  if (filters.status) {
+    conditions.push(eq(bookings.status, filters.status));
+  }
   if (filters.depositStatus) conditions.push(eq(bookings.depositStatus, filters.depositStatus));
   if (filters.checkInFrom) conditions.push(gte(bookings.checkIn, filters.checkInFrom));
   if (filters.checkInTo) conditions.push(lte(bookings.checkIn, filters.checkInTo));
@@ -85,7 +87,13 @@ export async function getBookings(filters: BookingFilters = {}) {
   const query = db
     .select()
     .from(bookings)
-    .where(conditions.length > 0 ? and(...conditions) : undefined)
+    .where(
+      and(
+        ...conditions,
+        // If no status filter is provided, exclude cancelled by default.
+        !filters.status ? ne(bookings.status, "cancelled") : undefined
+      )
+    )
     .orderBy(desc(bookings.checkIn))
     .limit(filters.limit ?? 200)
     .offset(filters.offset ?? 0);
@@ -102,7 +110,7 @@ export async function getBookingById(id: number) {
 
 export async function updateBookingStatus(
   id: number,
-  status: "pending" | "confirmed" | "paid" | "finished"
+  status: "pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled"
 ) {
   const db = await getDb();
   if (!db) return;
@@ -127,56 +135,57 @@ export async function updateBookingNotes(id: number, notes: string) {
 export async function getBookingStats(filters: {
   property?: "Sadoles" | "Hacjenda";
   channel?: "slowhop" | "airbnb" | "booking" | "alohacamp" | "direct";
+  status?: ("pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")[];
   timeRange?: "month" | "3months" | "6months" | "year" | "all";
 } = {}) {
   const db = await getDb();
   if (!db) return null;
 
-  let all = await db.select({
+  const now = new Date();
+  let startDate: Date | null = null;
+  let endDate: Date | null = null;
+
+  if (filters.timeRange === "month") {
+    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  } else if (filters.timeRange === "3months") {
+    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    endDate = new Date(now.getFullYear(), now.getMonth() + 3, 0, 23, 59, 59);
+  } else if (filters.timeRange === "6months") {
+    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    endDate = new Date(now.getFullYear(), now.getMonth() + 6, 0, 23, 59, 59);
+  } else if (filters.timeRange === "year" || !filters.timeRange) {
+    startDate = new Date(now.getFullYear(), 0, 1);
+    endDate = new Date(now.getFullYear(), 11, 31, 23, 59, 59);
+  }
+
+  const conditions = [];
+  if (filters.property) conditions.push(eq(bookings.property, filters.property));
+  if (filters.channel) conditions.push(eq(bookings.channel, filters.channel));
+  if (filters.status && filters.status.length > 0) {
+    conditions.push(inArray(bookings.status, filters.status));
+  }
+  if (startDate) conditions.push(gte(bookings.checkIn, startDate));
+  if (endDate) conditions.push(lte(bookings.checkIn, endDate));
+
+  const filtered = await db.select({
     id: bookings.id,
     status: bookings.status,
     property: bookings.property,
     channel: bookings.channel,
     checkIn: bookings.checkIn,
     checkOut: bookings.checkOut,
+    guestCountry: bookings.guestCountry,
     totalPrice: bookings.totalPrice,
     hostRevenue: bookings.hostRevenue,
-  }).from(bookings);
-
-  const now = new Date();
-  
-  // Apply property/channel filters
-  if (filters.property) {
-    all = all.filter(b => b.property === filters.property);
-  }
-  if (filters.channel) {
-    all = all.filter(b => b.channel === filters.channel);
-  }
-
-  // Determine time window
-  let startDate: Date | null = null;
-  let endDate: Date | null = null;
-
-  if (filters.timeRange === "month") {
-    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-    endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-  } else if (filters.timeRange === "3months") {
-    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-    endDate = new Date(now.getFullYear(), now.getMonth() + 3, 0);
-  } else if (filters.timeRange === "6months") {
-    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
-    endDate = new Date(now.getFullYear(), now.getMonth() + 6, 0);
-  } else if (filters.timeRange === "year" || !filters.timeRange) {
-    startDate = new Date(now.getFullYear(), 0, 1);
-    endDate = new Date(now.getFullYear(), 11, 31);
-  }
-
-  // Filter by time window if applicable
-  const filtered = all.filter(b => {
-    if (!startDate || !endDate) return true;
-    const cin = new Date(b.checkIn);
-    return cin >= startDate && cin <= endDate;
-  });
+  }).from(bookings).where(
+    and(
+      ...conditions,
+      // If no status filter is provided, exclude cancelled by default.
+      // If a specific status IS provided (even 'cancelled'), we use it.
+      !filters.status || filters.status.length === 0 ? ne(bookings.status, "cancelled") : undefined
+    )
+  );
 
   const upcoming = filtered.filter((b) => new Date(b.checkIn) > now && b.status !== "finished");
   const active = filtered.filter((b) => {
@@ -186,14 +195,14 @@ export async function getBookingStats(filters: {
   });
   
   const totalRevenue = filtered
-    .filter((b) => ["confirmed", "paid", "finished"].includes(b.status))
+    .filter((b) => ["confirmed", "portal_paid", "paid", "finished"].includes(b.status as string))
     .reduce((sum, b) => sum + (parseFloat(String(b.hostRevenue ?? b.totalPrice ?? "0")) || 0), 0);
 
   return {
     total: filtered.length,
     upcoming: upcoming.length,
     active: active.length,
-    paid: filtered.filter((b) => b.status === "paid" || b.status === "finished").length,
+    paid: filtered.filter((b) => b.status === "paid" || b.status === "finished" || b.status === "portal_paid").length,
     pending: filtered.filter((b) => b.status === "pending").length,
     confirmed: filtered.filter((b) => b.status === "confirmed").length,
     finished: filtered.filter((b) => b.status === "finished").length,
@@ -223,4 +232,13 @@ export async function getLastSyncTime(syncType: "ical" | "email") {
     .orderBy(desc(syncLogs.createdAt))
     .limit(1);
   return result[0]?.createdAt ?? null;
+}
+
+export async function getPropertyRatings(property: "Sadoles" | "Hacjenda") {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(propertyRatings)
+    .where(eq(propertyRatings.property, property));
 }

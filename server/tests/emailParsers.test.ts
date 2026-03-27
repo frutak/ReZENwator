@@ -204,7 +204,7 @@ Zespół Nest Banku`;
 describe("detectEmailSource", () => {
   it("detects Slowhop from subject", () => {
     expect(
-      detectEmailSource("", "Rezerwacja nr 1222769 w dniach", "")
+      detectEmailSource("", "Rezerwacja nr 1222769 w dniach - Slowhop", "")
     ).toBe("slowhop");
   });
 
@@ -248,5 +248,60 @@ describe("parseEmail", () => {
   it("returns null for unknown email", () => {
     const result = parseEmail("random@example.com", "Hello", "World");
     expect(result).toBeNull();
+  });
+});
+
+// ─── Booking.com parser tests ────────────────────────────────────────────────
+
+describe("parseBookingComEmail", () => {
+  const subject = "Nowa rezerwacja z Booking.com:";
+  const body = `Nowa rezerwacja z Booking.com:
+Obiekt: Sadoles 66
+ID Rezerwacji: 123456789
+Gość: Jan Kowalski
+Kraj: Poland
+Liczba gości: 4
+Termin: Fri, Mar 27, 2026 do Sun, Mar 29, 2026
+Cena dla gościa: PLN 2,666.67
+Prowizja Booking: PLN 337.33
+Email gościa: jan.kowalski@example.com.`;
+
+  it("extracts guest name from body", () => {
+    const result = parseEmail("automated@booking.com", subject, body) as any;
+    expect(result?.guestName).toBe("Jan Kowalski");
+  });
+
+  it("extracts guest country", () => {
+    const result = parseEmail("automated@booking.com", subject, body) as any;
+    expect(result?.guestCountry).toBe("Poland");
+  });
+
+  it("extracts guest count", () => {
+    const result = parseEmail("automated@booking.com", subject, body) as any;
+    expect(result?.guestCount).toBe(4);
+  });
+
+  it("extracts check-in and check-out dates", () => {
+    const result = parseEmail("automated@booking.com", subject, body) as any;
+    expect(result?.checkIn?.getDate()).toBe(27);
+    expect(result?.checkOut?.getDate()).toBe(29);
+  });
+
+  it("extracts total price, commission and host revenue", () => {
+    const result = parseEmail("automated@booking.com", subject, body) as any;
+    expect(result?.totalPrice).toBe(2666.67);
+    expect(result?.commission).toBe(337.33);
+    expect(result?.hostRevenue).toBe(2666.67 - 337.33);
+  });
+
+  it("detects property as Sadoles", () => {
+    const result = parseEmail("automated@booking.com", subject, body) as any;
+    expect(result?.property).toBe("Sadoles");
+  });
+
+  it("handles old format subject", () => {
+    const oldSubject = "Nowa rezerwacja: Yaroslava Senenko (6365579963)";
+    const result = parseEmail("automated@booking.com", oldSubject, body) as any;
+    expect(result?.guestName).toBe("Yaroslava Senenko");
   });
 });
