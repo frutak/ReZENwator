@@ -202,7 +202,7 @@
 /* ── Rental Manager status badge utilities ───────────────────────────────── */
 .status-pending    { background-color: #fef3c7; color: #92400e; border-color: #fde68a; }
 .status-confirmed  { background-color: #dbeafe; color: #1e40af; border-color: #bfdbfe; }
-.status-paid_to_intermediary { background-color: #f3e8ff; color: #6b21a8; border-color: #e9d5ff; }
+.status-portal_paid { background-color: #f3e8ff; color: #6b21a8; border-color: #e9d5ff; }
 .status-paid       { background-color: #d1fae5; color: #065f46; border-color: #a7f3d0; }
 .status-finished   { background-color: #f1f5f9; color: #475569; border-color: #e2e8f0; }
 

@@ -46,7 +46,12 @@ export async function detectDoubleBookings(): Promise<DoubleBookingConflict[]> {
       status: bookings.status,
     })
     .from(bookings)
-    .where(ne(bookings.status, "finished"));
+    .where(
+      and(
+        ne(bookings.status, "finished"),
+        ne(bookings.status, "cancelled")
+      )
+    );
 
   const conflicts: DoubleBookingConflict[] = [];
   const seen = new Set<string>();
@@ -94,7 +99,7 @@ export async function sendDoubleBookingAlert(
 
   const gmailUser = process.env.GMAIL_USER || "furtka.rentals@gmail.com";
   const gmailPass = process.env.GMAIL_APP_PASSWORD || "";
-  const alertRecipient = "szymonfurtak@hotmail.com";
+  const alertRecipient = process.env.DOUBLE_BOOKING_ALERT_RECIPIENT || "szymonfurtak@hotmail.com";
 
   if (!gmailPass) {
     console.warn("[DoubleBooking] Gmail credentials not configured, skipping email alert");

@@ -5,7 +5,7 @@ import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import BookingsDashboard from "./pages/BookingsDashboard";
-import SyncStatus from "./pages/SyncStatus";
+import Operations from "./pages/Operations";
 import CalendarView from "./pages/CalendarView";
 
 function Router() {
@@ -13,7 +13,7 @@ function Router() {
     <Switch>
       <Route path={"/"} component={BookingsDashboard} />
       <Route path={"/calendar"} component={CalendarView} />
-      <Route path={"/sync"} component={SyncStatus} />
+      <Route path={"/sync"} component={Operations} />
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />
     </Switch>

@@ -3,10 +3,11 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, Home } from "lucide-react";
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, isSameDay, addMonths, subMonths } from "date-fns";
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, isSameDay, addMonths, subMonths, addDays } from "date-fns";
 import BookingDetailModal from "@/components/BookingDetailModal";
 import { Booking } from "@shared/types";
 import { Dialog } from "@/components/ui/dialog";
+import { DoubleBookingBanner } from "@/components/DoubleBookingBanner";
 
 // ─── Channel colours ──────────────────────────────────────────────────────────
 
@@ -34,11 +35,13 @@ function PropertyCalendar({
   bookings,
   month,
   onSelectBooking,
+  onCreateBooking,
 }: {
   property: string;
   bookings: Booking[];
   month: Date;
-  onSelectBooking: (b: Booking) => void;
+  onSelectBooking: (b: Partial<Booking>) => void;
+  onCreateBooking: (property: string, date: Date) => void;
 }) {
   const [tooltip, setTooltip] = useState<{ booking: Booking; x: number; y: number } | null>(null);
 
@@ -72,21 +75,36 @@ function PropertyCalendar({
 
         {days.map((day) => {
           const dayBookings = bookings.filter(
-            (b) =>
-              b.property === property &&
-              isSameDay(new Date(b.checkIn), day)
+            (b) => {
+              const matchesProperty = 
+                b.property === property || 
+                (property === "Sadoleś" && b.property === "Sadoles") ||
+                (property === "Sadoles" && b.property === "Sadoleś");
+              
+              return matchesProperty && isSameDay(new Date(b.checkIn), day);
+            }
           );
 
           // Find bookings that cover this day (ongoing)
           const ongoingBookings = bookings.filter(
-            (b) =>
-              b.property === property &&
-              new Date(b.checkIn) < day &&
-              new Date(b.checkOut) > day
+            (b) => {
+              const matchesProperty = 
+                b.property === property || 
+                (property === "Sadoleś" && b.property === "Sadoles") ||
+                (property === "Sadoles" && b.property === "Sadoleś");
+
+              return matchesProperty && 
+                new Date(b.checkIn) < day &&
+                new Date(b.checkOut) > day;
+            }
           );
 
           return (
-            <div key={day.toString()} className="border-r border-b p-1 min-h-[80px] last:border-r-0 group">
+            <div 
+              key={day.toString()} 
+              className="border-r border-b p-1 min-h-[80px] last:border-r-0 group cursor-pointer hover:bg-muted/50 transition-colors"
+              onClick={() => onCreateBooking(property, day)}
+            >
               <div className="text-right">
                 <span className={`text-xs ${isSameDay(day, new Date()) ? "bg-primary text-white h-5 w-5 inline-flex items-center justify-center rounded-full" : "text-muted-foreground"}`}>
                   {format(day, "d")}
@@ -179,7 +197,7 @@ function Legend() {
 
 export default function CalendarView() {
   const [month, setMonth] = useState(() => startOfMonth(new Date()));
-  const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
+  const [selectedBooking, setSelectedBooking] = useState<Partial<Booking> | null>(null);
 
   // Fetch bookings for a wide window around the current month (±2 months)
   const windowStart = useMemo(() => subMonths(month, 1), [month]);
@@ -191,14 +209,10 @@ export default function CalendarView() {
     limit: 500,
   });
 
-  const { data: overlapList = [] } = trpc.bookings.doubleBookings.useQuery();
-
-  // Combine real bookings with overlap warnings
+  // Combine real bookings and filter out cancelled ones
   const allBookings = useMemo(() => {
-    const merged = [...bookingList];
-    // Any overlap logic if needed...
-    return merged;
-  }, [bookingList, overlapList]);
+    return bookingList.filter(b => b.status !== "cancelled");
+  }, [bookingList]);
 
   return (
     <DashboardLayout>
@@ -226,6 +240,8 @@ export default function CalendarView() {
 
         <Legend />
 
+        <DoubleBookingBanner />
+
         {isLoading ? (
           <div className="text-center py-20 text-muted-foreground">Loading bookings…</div>
         ) : (
@@ -235,12 +251,22 @@ export default function CalendarView() {
               bookings={allBookings}
               month={month}
               onSelectBooking={setSelectedBooking}
+              onCreateBooking={(p, d) => setSelectedBooking({ 
+                property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
+                checkIn: d,
+                checkOut: addDays(d, 2)
+              })}
             />
             <PropertyCalendar
               property="Hacjenda"
               bookings={allBookings}
               month={month}
               onSelectBooking={setSelectedBooking}
+              onCreateBooking={(p, d) => setSelectedBooking({ 
+                property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
+                checkIn: d,
+                checkOut: addDays(d, 2)
+              })}
             />
           </div>
         )}

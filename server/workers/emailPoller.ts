@@ -14,12 +14,13 @@
 
 import Imap from "imap";
 import { simpleParser } from "mailparser";
-import { and, eq, or } from "drizzle-orm";
+import { and, eq, or, like, lte } from "drizzle-orm";
 import { getDb } from "../db";
 import { bookings, syncLogs } from "../../drizzle/schema";
 import { parseEmail } from "./emailParsers";
 import { findMatchingBookings, applyTransferMatch } from "./bookingMatcher";
 import type { ParsedBookingEmail, ParsedBankEmail } from "./emailParsers";
+import { sendAlertEmail } from "../_core/email";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -48,23 +49,33 @@ async function fetchUnseenEmails(): Promise<
   Array<{ uid: number; from: string; subject: string; body: string; messageId: string }>
 > {
   return new Promise((resolve, reject) => {
-    const imap = createImapConnection();
+    const config = getGmailConfig();
+    const imap = new Imap(config);
     const emails: Array<{ uid: number; from: string; subject: string; body: string; messageId: string }> = [];
+
+    const timeout = setTimeout(() => {
+      console.warn("[Email] IMAP connection timed out after 30s");
+      imap.end();
+      reject(new Error("IMAP connection timeout"));
+    }, 30000);
 
     imap.once("ready", () => {
       imap.openBox("INBOX", false, (err, _box) => {
         if (err) {
+          clearTimeout(timeout);
           imap.end();
           return reject(err);
         }
 
         imap.search(["UNSEEN"], (searchErr, results) => {
           if (searchErr) {
+            clearTimeout(timeout);
             imap.end();
             return reject(searchErr);
           }
 
           if (!results || results.length === 0) {
+            clearTimeout(timeout);
             imap.end();
             return resolve([]);
           }
@@ -80,6 +91,7 @@ async function fetchUnseenEmails(): Promise<
           fetch.on("message", (msg, seqno) => {
             const p = new Promise<void>((res) => {
               let rawEmail = "";
+              let attributes: any | null = null;
 
               msg.on("body", (stream) => {
                 stream.on("data", (chunk: Buffer) => {
@@ -88,49 +100,61 @@ async function fetchUnseenEmails(): Promise<
               });
 
               msg.once("attributes", (attrs) => {
-                msg.once("end", async () => {
-                  try {
-                    const parsed = await simpleParser(rawEmail);
-                    const from = parsed.from?.text ?? "";
-                    const subject = parsed.subject ?? "";
-                    const body =
-                      parsed.text ??
-                      (typeof parsed.html === 'string' ? parsed.html.replace(/<[^>]+>/g, " ") : undefined) ??
-                      "";
-                    const messageId = parsed.messageId ?? `seq-${seqno}`;
-
-                    emails.push({
-                      uid: attrs.uid ?? seqno,
-                      from,
-                      subject,
-                      body,
-                      messageId,
-                    });
-                  } catch (parseErr) {
-                    console.error("[Email] Failed to parse email:", parseErr);
-                  }
-                  res();
-                });
+                attributes = attrs;
               });
+
+              msg.once("end", async () => {
+                try {
+                  const parsed = await simpleParser(rawEmail);
+                  const from = parsed.from?.text ?? "";
+                  const subject = parsed.subject ?? "";
+                  const body =
+                    parsed.text ??
+                    (typeof parsed.html === 'string' ? parsed.html.replace(/<[^>]+>/g, " ") : undefined) ??
+                    "";
+                  const messageId = parsed.messageId ?? `seq-${seqno}`;
+
+                  emails.push({
+                    uid: attributes?.uid ?? seqno,
+                    from,
+                    subject,
+                    body,
+                    messageId,
+                  });
+                } catch (parseErr) {
+                  console.error("[Email] Failed to parse email:", parseErr);
+                } finally {
+                  res();
+                }
+              });
+
+              // Add a per-message timeout just in case
+              setTimeout(() => res(), 10000);
             });
             promises.push(p);
           });
 
-          fetch.once("error", (fetchErr) => {
-            imap.end();
-            reject(fetchErr);
+          fetch.on("error", (fetchErr) => {
+            console.error("[Email] Fetch error:", fetchErr);
           });
 
           fetch.once("end", async () => {
-            await Promise.all(promises);
-            imap.end();
-            resolve(emails);
+            try {
+              await Promise.all(promises);
+            } catch (err) {
+              console.error("[Email] Error waiting for all email parses:", err);
+            } finally {
+              clearTimeout(timeout);
+              imap.end();
+              resolve(emails);
+            }
           });
         });
       });
     });
 
     imap.once("error", (err: Error) => {
+      clearTimeout(timeout);
       reject(err);
     });
 
@@ -141,12 +165,127 @@ async function fetchUnseenEmails(): Promise<
 // ─── Booking enrichment ───────────────────────────────────────────────────────
 
 /**
+ * Process a payment confirmation email (Booking.com).
+ * Matches by Booking Object ID and updates status to 'finished'.
+ */
+async function processPaymentConfirmation(parsed: ParsedBookingEmail): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+
+  // 1. Specialized logic for Booking.com payouts
+  // These come from the bank (Nestbank) but are detected as booking_payment
+  if (parsed.channel === "booking" && parsed.isPaymentConfirmation) {
+    const transferAmount = parsed.amountPaid || 0;
+    
+    // Find all 'portal_paid' bookings for this property that have finished (checkOut < now)
+    const now = new Date();
+    const candidates = await db
+      .select()
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.channel, "booking"),
+          eq(bookings.status, "portal_paid"),
+          parsed.property ? eq(bookings.property, parsed.property as any) : undefined,
+          lte(bookings.checkOut, now)
+        )
+      );
+
+    // Try to find a match by amount (hostRevenue)
+    const match = candidates.find(c => {
+      const hostRevenue = parseFloat(String(c.hostRevenue || "0"));
+      // Check for exact match or very close (±0.05 for rounding differences)
+      return Math.abs(hostRevenue - transferAmount) < 0.05;
+    });
+
+    if (match) {
+      await db
+        .update(bookings)
+        .set({
+          status: "finished",
+          amountPaid: String(transferAmount.toFixed(2)),
+          transferAmount: String(transferAmount),
+          transferDate: new Date(),
+          transferTitle: `Booking.com Payout Match (${parsed.bookingObjectId ?? "N/A"})`,
+        })
+        .where(eq(bookings.id, match.id));
+
+      console.log(`[Email] Booking #${match.id} marked as FINISHED via payout matching`);
+      return true;
+    } else {
+      // No match found - send alert email to host
+      const subject = `⚠️ Unmatched Booking.com Payout: ${parsed.property ?? "Unknown"}`;
+      const text = `
+        Received a Booking.com payout that couldn't be automatically matched to any finished reservation.
+        
+        Property: ${parsed.property ?? "Unknown"}
+        Amount: ${transferAmount.toFixed(2)} PLN
+        Object ID: ${parsed.bookingObjectId ?? "Unknown"}
+        
+        Please review the bookings manually.
+      `.trim();
+      
+      await sendAlertEmail(subject, text);
+      return false;
+    }
+  }
+
+  // 2. Fallback logic for other payment confirmations (matching by ID/name)
+  const candidates = await db
+    .select()
+    .from(bookings)
+    .where(
+      and(
+        eq(bookings.channel, "booking"),
+        parsed.property ? eq(bookings.property, parsed.property as any) : undefined,
+        or(
+          parsed.bookingObjectId ? like(bookings.icalSummary, `%${parsed.bookingObjectId}%`) : undefined,
+          parsed.bookingObjectId ? like(bookings.notes, `%${parsed.bookingObjectId}%`) : undefined,
+          parsed.bookingObjectId ? like(bookings.emailMessageId, `%${parsed.bookingObjectId}%`) : undefined,
+          parsed.guestName ? like(bookings.guestName, `%${parsed.guestName}%`) : undefined
+        )
+      )
+    );
+
+  if (candidates.length === 0) {
+    console.warn(`[Email] No matching booking found for Payment Confirmation (ID: ${parsed.bookingObjectId}, Guest: ${parsed.guestName})`);
+    return false;
+  }
+
+  // Prioritize "portal_paid" status if multiple exist (unlikely but safe)
+  const match = candidates.find(c => c.status === "portal_paid") || candidates[0]!;
+  
+  const currentPaid = parseFloat(String(match.amountPaid || "0"));
+  const transferAmount = parsed.amountPaid || 0;
+  const newPaid = (currentPaid + transferAmount).toFixed(2);
+
+  await db
+    .update(bookings)
+    .set({
+      status: "finished",
+      amountPaid: newPaid,
+      transferAmount: transferAmount ? String(transferAmount) : undefined,
+      transferDate: new Date(),
+      transferTitle: `Booking.com Payment Confirmation (${parsed.bookingObjectId ?? parsed.guestName})`,
+    })
+    .where(eq(bookings.id, match.id));
+
+  console.log(`[Email] Booking #${match.id} (Status: ${match.status}) marked as FINISHED via payment confirmation (${parsed.bookingObjectId ?? parsed.guestName})`);
+  return true;
+}
+
+/**
  * Match a parsed booking email to an existing booking in the database
  * and enrich it with guest details.
  */
 async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boolean> {
   const db = await getDb();
   if (!db) return false;
+
+  // Special case: Payment confirmations
+  if (parsed.isPaymentConfirmation) {
+    return processPaymentConfirmation(parsed);
+  }
 
   if (!parsed.checkIn || !parsed.checkOut) {
     console.warn("[Email] Booking email missing dates, cannot match");
@@ -185,6 +324,7 @@ async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boole
     
     // If no match found, create a new booking record instead of failing
     await db.insert(bookings).values({
+      icalUid: `email-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       property: (parsed.property as "Sadoles" | "Hacjenda") ?? "Sadoles",
       channel: parsed.channel,
       checkIn: parsed.checkIn,
@@ -193,10 +333,12 @@ async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boole
       guestName: parsed.guestName,
       guestEmail: parsed.guestEmail,
       guestPhone: parsed.guestPhone,
+      guestCountry: parsed.guestCountry,
       adultsCount: parsed.adultsCount,
       childrenCount: parsed.childrenCount,
       animalsCount: parsed.animalsCount,
       totalPrice: parsed.totalPrice ? String(parsed.totalPrice) : undefined,
+      commission: parsed.commission ? String(parsed.commission) : undefined,
       hostRevenue: parsed.hostRevenue ? String(parsed.hostRevenue) : undefined,
       amountPaid: parsed.amountPaid ? String(parsed.amountPaid) : "0.00",
       currency: parsed.currency ?? "PLN",
@@ -208,7 +350,7 @@ async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boole
 
   // Determine new status
   const newStatus =
-    match.status === "pending" || match.status === "confirmed"
+    match.status === "pending" || match.status === "confirmed" || match.status === "portal_paid"
       ? "confirmed"
       : match.status;
 
@@ -220,12 +362,15 @@ async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boole
       guestName: parsed.guestName ?? match.guestName,
       guestEmail: parsed.guestEmail ?? match.guestEmail,
       guestPhone: parsed.guestPhone ?? match.guestPhone,
+      guestCountry: parsed.guestCountry ?? match.guestCountry,
       adultsCount: parsed.adultsCount ?? match.adultsCount,
       childrenCount: parsed.childrenCount ?? match.childrenCount,
       animalsCount: parsed.animalsCount ?? match.animalsCount,
       totalPrice: parsed.totalPrice ? String(parsed.totalPrice) : match.totalPrice,
+      commission: parsed.commission ? String(parsed.commission) : match.commission,
       hostRevenue: parsed.hostRevenue != null ? String(parsed.hostRevenue) : match.hostRevenue,
       amountPaid: parsed.amountPaid != null ? String(parsed.amountPaid) : match.amountPaid,
+
       currency: parsed.currency ?? match.currency,
     })
     .where(eq(bookings.id, match.id));
@@ -300,7 +445,7 @@ export async function pollEmails(): Promise<{
         const success = await enrichBookingFromEmail(parsed);
         if (success) {
           enriched++;
-          console.log(`[Email] Successfully enriched booking from "${email.subject}"`);
+          console.log(`[Email] Successfully processed booking email: "${email.subject}"`);
         } else {
           console.warn(`[Email] Failed to match booking for "${email.subject}"`);
         }

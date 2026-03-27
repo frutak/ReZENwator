@@ -27,7 +27,7 @@ import { useLocation } from "wouter";
 const menuItems = [
   { icon: LayoutDashboard, label: "Bookings", path: "/" },
   { icon: CalendarDays, label: "Calendar", path: "/calendar" },
-  { icon: RefreshCw, label: "Sync Status", path: "/sync" },
+  { icon: RefreshCw, label: "Operations", path: "/sync" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";

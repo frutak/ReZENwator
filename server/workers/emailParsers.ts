@@ -12,19 +12,25 @@ export type ParsedBookingEmail = {
   type: "booking";
   channel: "slowhop" | "airbnb" | "booking" | "alohacamp";
   guestName?: string;
+  guestCountry?: string;
   guestEmail?: string;
   guestPhone?: string;
+  guestCount?: number;
   checkIn?: Date;
   checkOut?: Date;
   adultsCount?: number;
   childrenCount?: number;
   animalsCount?: number;
   totalPrice?: number;
+  commission?: number;
   hostRevenue?: number;
   amountPaid?: number;
   currency?: string;
   property?: string;
   rawText: string;
+  /** New fields for payment confirmations */
+  isPaymentConfirmation?: boolean;
+  bookingObjectId?: string;
 };
 
 export type ParsedBankEmail = {
@@ -89,18 +95,59 @@ function parseDotDate(dateStr: string): Date | undefined {
 }
 
 /**
- * Parse Booking.com date format: "Fri, Mar 27, 2026"
+ * Parse Booking.com date format: "Fri, Mar 27, 2026" or "27 mar 2026" or "27.03.2026"
  */
 function parseBookingComDate(dateStr: string): Date | undefined {
   const months: Record<string, number> = {
     jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
     jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+    // Polish: mar is same as English Mar
+    sty: 0, lut: 1, kwi: 3, maj: 4, cze: 5,
+    lip: 6, sie: 7, wrz: 8, paź: 9, paz: 9, lis: 10, gru: 11,
   };
-  // Format: "Fri, Mar 27, 2026" or "Mar 27, 2026"
-  const match = dateStr.trim().match(/(?:\w{3},\s+)?(\w{3})\s+(\d{1,2}),\s+(\d{4})/i);
+
+  const cleaned = dateStr.trim().toLowerCase().replace(/^od\s+/, "");
+
+  // 1. Try dot format: 27.03.2026
+  if (cleaned.match(/^\d{1,2}\.\d{1,2}\.\d{4}$/)) {
+    return parseDotDate(cleaned);
+  }
+
+  // 2. Try English/Full: "Fri, Mar 27, 2026" or "Mar 27, 2026"
+  const enMatch = cleaned.match(/(?:\w{2,4},\s+)?(\w{3,10})\s+(\d{1,2}),\s+(\d{4})/i);
+  if (enMatch) {
+    const monthKey = enMatch[1]!.substring(0, 3).toLowerCase();
+    const day = parseInt(enMatch[2]!);
+    const year = parseInt(enMatch[3]!);
+    const month = months[monthKey];
+    if (month !== undefined) return new Date(year, month, day);
+  }
+
+  // 3. Try Polish/Alternative: "27 mar 2026" or "śr., 27 mar 2026" or "27 marzec 2026"
+  const plMatch = cleaned.match(/(?:\w{2,4}\.?,\s+)?(\d{1,2})\s+(\w{3,10})\s+(\d{4})/i);
+  if (plMatch) {
+    const day = parseInt(plMatch[1]!);
+    const monthKey = plMatch[2]!.substring(0, 3).toLowerCase();
+    const year = parseInt(plMatch[3]!);
+    const month = months[monthKey];
+    if (month !== undefined) return new Date(year, month, day);
+  }
+
+  return undefined;
+}
+
+/**
+ * Parse Airbnb full date: "Mon, 29 Jun 2026" or "29 Jun 2026"
+ */
+function parseAirbnbFullDate(dateStr: string): Date | undefined {
+  const months: Record<string, number> = {
+    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+  };
+  const match = dateStr.trim().match(/(?:\w{3},\s+)?(\d{1,2})\s+(\w{3})\s+(\d{4})/i);
   if (!match) return undefined;
-  const monthKey = match[1]!.toLowerCase().substring(0, 3);
-  const day = parseInt(match[2]!);
+  const day = parseInt(match[1]!);
+  const monthKey = match[2]!.toLowerCase().substring(0, 3);
   const year = parseInt(match[3]!);
   const month = months[monthKey];
   if (month === undefined) return undefined;
@@ -205,6 +252,9 @@ export function parseSlowhoEmail(subject: string, body: string): ParsedBookingEm
   const phoneMatch = body.match(/Nr telefonu:\s*([+\d\s]+)/i);
   const guestPhone = phoneMatch ? phoneMatch[1]!.trim() : undefined;
 
+  // Extract country: "PL" if phone starts with 48
+  const guestCountry = (guestPhone?.startsWith("48") || guestPhone?.startsWith("+48")) ? "PL" : undefined;
+
   // Extract email: "Adres e-mail: evelinajazz@gmail.com"
   const emailMatch = body.match(/Adres e-mail:\s*([^\s\n]+@[^\s\n]+)/i);
   const guestEmail = emailMatch ? emailMatch[1]!.trim() : undefined;
@@ -236,6 +286,7 @@ export function parseSlowhoEmail(subject: string, body: string): ParsedBookingEm
     guestPhone,
     checkIn,
     checkOut,
+    guestCount: (adultsCount ?? 0) + (childrenCount ?? 0),
     adultsCount,
     childrenCount,
     animalsCount,
@@ -243,6 +294,7 @@ export function parseSlowhoEmail(subject: string, body: string): ParsedBookingEm
     amountPaid: paidData?.amount,
     currency: priceData?.currency ?? "PLN",
     property,
+    guestCountry,
     rawText: text.substring(0, 2000),
   };
 }
@@ -258,7 +310,7 @@ export function parseSlowhopTransferEmail(subject: string, body: string): Parsed
   // Extract table values
   // Body has a structure where amounts are followed by zł/zl
   // 1222769 (Evelina De Lain, 28-03-2026 - 01-04-2026) 1800 zł 540 zł 270 zł 207.9 zł
-  const prices = [...body.matchAll(/(\d+[\s,.]*\d*)\s*(?:zł|zl|pln)/gi)];
+  const prices = Array.from(body.matchAll(/(\d+[\s,.]*\d*)\s*(?:zł|zl|pln)/gi));
   
   const totalPriceData = prices[0] ? parsePrice(prices[0][0]) : undefined;
   const amountPaidData = prices[1] ? parsePrice(prices[1][0]) : undefined;
@@ -300,23 +352,55 @@ export function parseAirbnbEmail(subject: string, body: string): ParsedBookingEm
   const nameMatch = subject.match(/(?:confirmed\s*[-–]\s*)(.+?)\s+arrives/i);
   const guestName = nameMatch ? nameMatch[1]!.trim() : undefined;
 
-  // Extract check-in from subject: "arrives 27 Jun"
-  const arrivalMatch = subject.match(/arrives\s+(.+)/i);
-  const checkIn = arrivalMatch ? parseAirbnbDate(arrivalMatch[1]!) : undefined;
+  // ─── Date Extraction ───
+  
+  // 1. Full dates (Check-in/Checkout) - common in forwarded/desktop emails
+  // Format: "Check-in\nMon, 29 Jun 2026"
+  const fullCheckInMatch = body.match(/Check-in\s*\n?\s*([\w,.\s]+\d{4})/i);
+  const fullCheckOutMatch = body.match(/Checkout\s*\n?\s*([\w,.\s]+\d{4})/i);
+  
+  let checkIn = fullCheckInMatch ? parseAirbnbFullDate(fullCheckInMatch[1]!) : undefined;
+  let checkOut = fullCheckOutMatch ? parseAirbnbFullDate(fullCheckOutMatch[1]!) : undefined;
 
-  // Extract check-out from body: "Checkout\nMon 29 Jun"
-  const checkoutMatch = body.match(/Checkout\s*\n\s*(\w{3}\s+\d{1,2}\s+\w{3})/i);
-  const checkOut = checkoutMatch ? parseAirbnbDate(checkoutMatch[1]!) : undefined;
+  // 2. Short dates fallback
+  if (!checkIn) {
+    // From subject: "arrives 27 Jun"
+    const arrivalMatch = subject.match(/arrives\s+(.+)/i);
+    checkIn = arrivalMatch ? parseAirbnbDate(arrivalMatch[1]!) : undefined;
+    
+    // From body: "Check-in\nSat 27 Jun"
+    if (!checkIn) {
+      const checkinBodyMatch = body.match(/Check-in\s*\n\s*(\w{3}\s+\d{1,2}\s+\w{3})/i);
+      checkIn = checkinBodyMatch ? parseAirbnbDate(checkinBodyMatch[1]!) : undefined;
+    }
+  }
 
-  // Extract check-in from body as fallback: "Check-in\nSat 27 Jun"
-  const checkinBodyMatch = body.match(/Check-in\s*\n\s*(\w{3}\s+\d{1,2}\s+\w{3})/i);
-  const checkInFallback = checkinBodyMatch ? parseAirbnbDate(checkinBodyMatch[1]!) : undefined;
+  if (!checkOut) {
+    // From body: "Checkout\nMon 29 Jun"
+    const checkoutMatch = body.match(/Checkout\s*\n\s*(\w{3}\s+\d{1,2}\s+\w{3})/i);
+    checkOut = checkoutMatch ? parseAirbnbDate(checkoutMatch[1]!) : undefined;
+  }
 
-  // Extract guest counts: "11 adults, 1 child" or "2 guests"
-  const guestsMatch = body.match(/(\d+)\s+adults?,\s*(\d+)\s+child/i);
-  const adultsCount = guestsMatch ? parseInt(guestsMatch[1]!) : undefined;
-  const childrenCount = guestsMatch ? parseInt(guestsMatch[2]!) : undefined;
+  // ─── Guest Counts ───
+  
+  // Format: "2 adults, 1 child"
+  const guestsMatch = body.match(/(\d+)\s+adults?(?:,\s*(\d+)\s+child)?/i);
+  let adultsCount = guestsMatch ? parseInt(guestsMatch[1]!) : undefined;
+  let childrenCount = guestsMatch ? (guestsMatch[2] ? parseInt(guestsMatch[2]) : 0) : undefined;
+  let guestCount: number | undefined;
 
+  if (adultsCount !== undefined) {
+    guestCount = adultsCount + (childrenCount || 0);
+  } else {
+    // Fallback: "3 guests"
+    const singleGuestMatch = body.match(/(\d+)\s+guests?/i);
+    if (singleGuestMatch) {
+      guestCount = parseInt(singleGuestMatch[1]!);
+    }
+  }
+
+  // ─── Pricing ───
+  
   // Extract total price: "Total (PLN)\n2,862.00 zl"
   const totalMatch = body.match(/Total\s*\(PLN\)\s*\n?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
   const totalData = totalMatch ? parsePrice(totalMatch[1]!) : undefined;
@@ -324,6 +408,13 @@ export function parseAirbnbEmail(subject: string, body: string): ParsedBookingEm
   // Extract host revenue: "You earn\n2,451.25 zł"
   const revenueMatch = body.match(/You earn\s*\n?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
   const revenueData = revenueMatch ? parsePrice(revenueMatch[1]!) : undefined;
+
+  // ─── Metadata ───
+  
+  let guestCountry: string | undefined;
+  if (body.toLowerCase().includes("poland")) {
+    guestCountry = "PL";
+  }
 
   // Extract property: look for property names
   let property: string | undefined;
@@ -334,14 +425,16 @@ export function parseAirbnbEmail(subject: string, body: string): ParsedBookingEm
     type: "booking",
     channel: "airbnb",
     guestName,
-    checkIn: checkIn ?? checkInFallback,
+    checkIn,
     checkOut,
+    guestCount,
     adultsCount,
     childrenCount,
     totalPrice: totalData?.amount,
     hostRevenue: revenueData?.amount,
     currency: "PLN",
     property,
+    guestCountry,
     rawText: text.substring(0, 2000),
   };
 }
@@ -354,49 +447,111 @@ export function parseAirbnbEmail(subject: string, body: string): ParsedBookingEm
  * Example subject: "Nowa rezerwacja: Yaroslava Senenko (6365579963)"
  */
 export function parseBookingComEmail(subject: string, body: string): ParsedBookingEmail | null {
-  const text = `${subject}\n${body}`;
+  // Normalize whitespace: replace all newlines/tabs with spaces to handle hard-wrapped emails
+  const normalizedBody = body.replace(/\s+/g, " ");
+  const text = `${subject}\n${normalizedBody}`;
 
-  // Extract guest name from subject
-  const nameMatch = subject.match(/Nowa rezerwacja:\s*(.+?)\s*\((\d+)\)/i);
-  const guestName = nameMatch ? nameMatch[1]!.trim() : undefined;
+  // Extract guest name from subject (old format) or body (new format)
+  // Old: "Nowa rezerwacja: Yaroslava Senenko (6365579963)"
+  // New: "Gość: Yaroslava Senenko"
+  const nameMatchSubject = subject.match(/Nowa rezerwacja:\s*(.+?)\s*\((\d+)\)/i);
+  const nameMatchBody = normalizedBody.match(/Go[śs][ćc]:\s*(.+?)(?:\s+Kraj|\s+Termin|$)/i);
+  const guestName = (nameMatchSubject ? nameMatchSubject[1]! : nameMatchBody ? nameMatchBody[1]! : "").trim() || undefined;
+
+  // Extract guest country: "Kraj: Poland"
+  const countryMatch = normalizedBody.match(/Kraj:\s*(.+?)(?:\s+Liczba|$)/i);
+  const guestCountry = countryMatch ? countryMatch[1]!.trim() : undefined;
 
   // Extract property: "Obiekt: Sadoleś 66"
-  const propertyMatch = body.match(/Obiekt:\s*(.+?)(?:\s+Go[śs][ćc]|$)/i);
+  const propertyMatch = normalizedBody.match(/Obiekt:\s*(.+?)(?:\s+Go[śs][ćc]|\s+ID|$)/i);
   const rawProperty = propertyMatch ? propertyMatch[1]!.trim() : "";
   let property: string | undefined;
   if (rawProperty.toLowerCase().includes("hacjenda")) property = "Hacjenda";
   else if (rawProperty.toLowerCase().includes("sadole")) property = "Sadoles";
 
-  // Extract dates: "Termin: Fri, Mar 27, 2026 do Sun, Mar 29, 2026"
-  const datesMatch = body.match(/Termin:\s*(.+?)\s+do\s+(.+?)(?:\s+Cena|$)/i);
+  // Extract dates: "Termin: Fri, Mar 27, 2026 do Sun, Mar 29, 2026" or "Termin: od 25.03.2026 do 27.03.2026"
+  const datesMatch = normalizedBody.match(/Termin:\s*(.+?)\s+(?:do|-|–)\s+(.+?)(?:\s+Cena|$)/i);
   const checkIn = datesMatch ? parseBookingComDate(datesMatch[1]!) : undefined;
   const checkOut = datesMatch ? parseBookingComDate(datesMatch[2]!) : undefined;
 
+  // Extract guest count: "Liczba gości: 2"
+  const guestCountMatch = normalizedBody.match(/Liczba go[śs]ci:?\s*(\d+)/i);
+  const guestCount = guestCountMatch ? parseInt(guestCountMatch[1]!) : undefined;
+
   // Extract total price: "Cena dla gościa: PLN 2,666.67"
-  const priceMatch = body.match(/Cena dla go[śs]cia:\s*([\w\s,.]+)/i);
+  const priceMatch = normalizedBody.match(/Cena dla go[śs]cia:\s*([\w\s,.]+?)(?:\s+Prowizja|$)/i);
   const priceData = priceMatch ? parsePrice(priceMatch[1]!) : undefined;
 
   // Extract commission to calculate host revenue: "Prowizja Booking: PLN 337.33"
-  const commMatch = body.match(/Prowizja Booking:\s*([\w\s,.]+)/i);
+  const commMatch = normalizedBody.match(/Prowizja Booking:\s*([\w\s,.]+?)(?:\s+Email|\s+ID|$)/i);
   const commData = commMatch ? parsePrice(commMatch[1]!) : undefined;
 
   const hostRevenue = priceData && commData ? priceData.amount - commData.amount : undefined;
 
   // Extract email: "Email gościa: ysenen.962336@guest.booking.com"
-  const emailMatch = body.match(/Email go[śs]cia:\s*([^\s\n]+@[^\s\n]+)/i);
-  const guestEmail = emailMatch ? emailMatch[1]!.trim() : undefined;
+  const emailMatch = normalizedBody.match(/Email go[śs]cia:\s*([^\s]+@[^\s]+)/i);
+  const guestEmail = emailMatch ? emailMatch[1]!.trim().replace(/\.$/, "") : undefined;
 
   return {
     type: "booking",
     channel: "booking",
     guestName,
+    guestCountry,
     guestEmail,
+    guestCount,
     checkIn,
     checkOut,
     totalPrice: priceData?.amount,
+    commission: commData?.amount,
     hostRevenue,
     currency: priceData?.currency ?? "PLN",
     property,
+    rawText: text.substring(0, 2000),
+  };
+}
+
+/**
+ * Parses Booking.com payment confirmation emails.
+ * Subject contains "payment confirmation" and Booking Object ID.
+ */
+export function parseBookingComPaymentEmail(subject: string, body: string): ParsedBookingEmail | null {
+  const text = `${subject}\n${body}`;
+  const normalizedText = text.toLowerCase();
+  
+  // 1. Extract IDs. Try both (123) and 123 from transfer title
+  // For the user's specific email: "tytułem NO.KKVGU0PWZEEWZSZN/13324071"
+  const objectIdMatch = subject.match(/\((\d{7,10})\)/) || body.match(/(\d{7,10})/);
+  const bookingObjectId = objectIdMatch ? objectIdMatch[1] : undefined;
+
+  // Determine property based on the ID provided by user
+  let property: string | undefined;
+  if (bookingObjectId === "13416371") property = "Hacjenda";
+  else if (bookingObjectId === "13324071") property = "Sadoles";
+  // Fallback property detection from text
+  if (!property) {
+    if (normalizedText.includes("hacjenda")) property = "Hacjenda";
+    else if (normalizedText.includes("sadole")) property = "Sadoles";
+  }
+
+  // 2. Extract guest name (Booking.com usually includes it in the body if it's a specific stay payment)
+  const guestMatch = body.match(/Go[śs][ćc]:\s*(.+?)(?:\s+Termin|\s+Kraj|\s+ID|$)/i) || 
+                     body.match(/stay\s+by\s+(.+?)(?:\s+at|$)/i) ||
+                     body.match(/dla\s+(.+?)(?:\s+zosta[łl]a|$)/i);
+  const guestName = guestMatch ? guestMatch[1]!.trim() : undefined;
+
+  // 3. Extract payment amount (handles standard and bank-style "wpływ X PLN")
+  const amountMatch = body.match(/(?:wp[łl]yw|kwot[ęe]|wysoko[śs][ćc]|p[łl]atno[śs][ćc])\s+([\d\s,.]+(?:pln|zł|zl)?)/i);
+  const amountData = amountMatch ? parsePrice(amountMatch[1]!) : undefined;
+
+  return {
+    type: "booking",
+    channel: "booking",
+    isPaymentConfirmation: true,
+    bookingObjectId,
+    guestName,
+    property,
+    amountPaid: amountData?.amount,
+    currency: amountData?.currency ?? "PLN",
     rawText: text.substring(0, 2000),
   };
 }
@@ -453,6 +608,7 @@ export type EmailSource =
   | "airbnb"
   | "nestbank"
   | "booking"
+  | "booking_payment"
   | "unknown";
 
 /**
@@ -465,25 +621,33 @@ export function detectEmailSource(
 ): EmailSource {
   const fromLower = from.toLowerCase();
   const subjectLower = subject.toLowerCase();
-  const bodyLower = body.toLowerCase().substring(0, 500);
+  const bodyLower = body.toLowerCase().substring(0, 2000);
 
   if (subjectLower.includes("przelew przedpłaty") && subjectLower.includes("slowhop")) {
     return "slowhop_transfer";
   }
-  if (fromLower.includes("booking.com") || subjectLower.includes("booking.com") || bodyLower.includes("booking.com")) {
+  
+  if (fromLower.includes("booking.com") || 
+      subjectLower.includes("booking.com") || 
+      bodyLower.includes("booking.com") ||
+      bodyLower.includes("13324071") || 
+      bodyLower.includes("13416371")) {
+    if (subjectLower.includes("payment confirmation") || 
+        subjectLower.includes("potwierdzenie płatności") ||
+        (subjectLower.includes("wpływ") && (bodyLower.includes("booking.com") || bodyLower.includes("13324071") || bodyLower.includes("13416371")))) {
+      return "booking_payment";
+    }
     return "booking";
   }
+
   if (fromLower.includes("slowhop") || bodyLower.includes("slowhop") || (subjectLower.includes("rezerwacja") && subjectLower.includes("slowhop"))) {
     return "slowhop";
   }
-  if (fromLower.includes("airbnb") || subjectLower.includes("reservation confirmed") || subjectLower.includes("arrives")) {
+  if (fromLower.includes("airbnb") || subjectLower.includes("reservation confirmed") || subjectLower.includes("arrives") || bodyLower.includes("from: airbnb <automated@airbnb.com>")) {
     return "airbnb";
   }
   if (fromLower.includes("nestbank") || fromLower.includes("nest bank") || subjectLower.includes("wpływ na konto biznest")) {
     return "nestbank";
-  }
-  if (fromLower.includes("booking.com") || subjectLower.includes("booking.com")) {
-    return "booking";
   }
   return "unknown";
 }
@@ -509,6 +673,8 @@ export function parseEmail(
       return parseNestbankEmail(subject, body);
     case "booking":
       return parseBookingComEmail(subject, body);
+    case "booking_payment":
+      return parseBookingComPaymentEmail(subject, body);
     default:
       return null;
   }

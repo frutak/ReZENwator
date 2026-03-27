@@ -1,17 +1,28 @@
+import { useState } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { toast } from "sonner";
-import { RefreshCw, Mail, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { RefreshCw, Mail, CheckCircle2, XCircle, FileText, Download } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 
-export default function SyncStatus() {
-  const { data: lastRun, refetch: refetchLastRun } = trpc.sync.lastRun.useQuery();
-  const { data: logs = [], refetch: refetchLogs } = trpc.sync.logs.useQuery({ limit: 30 });
+export default function Operations() {
+  const { data: lastRun } = trpc.sync.lastRun.useQuery();
+  const { data: logs = [] } = trpc.sync.logs.useQuery({ limit: 30 });
   const { data: feeds = [] } = trpc.sync.feeds.useQuery();
   const utils = trpc.useUtils();
+
+  const [reportMonth, setReportMonth] = useState<string>(String(new Date().getMonth() + 1));
+  const [reportYear, setReportYear] = useState<string>(String(new Date().getFullYear()));
+  const [isGenerating, setIsGenerating] = useState(false);
 
   const triggerIcal = trpc.sync.triggerIcal.useMutation({
     onSuccess: () => {
@@ -34,15 +45,126 @@ export default function SyncStatus() {
     onError: (e) => toast.error(`Email check failed: ${e.message}`),
   });
 
+  const handleDownloadTaxReport = async () => {
+    setIsGenerating(true);
+    try {
+      // Use the client directly to ensure we get the latest state values
+      const data = await utils.client.bookings.taxReport.query({
+        month: parseInt(reportMonth),
+        year: parseInt(reportYear)
+      });
+
+      if (!data || data.length === 0) {
+        toast.error("No bookings found for the selected month");
+        return;
+      }
+
+      // Generate CSV
+      const headers = ["Guest Name", "Channel", "Property", "Arrival Date", "Total Price", "Host Revenue", "Taxable Value"];
+      const rows = data.map(b => [
+        b.guestName,
+        b.channel,
+        b.property,
+        format(new Date(b.checkIn), "yyyy-MM-dd"),
+        b.totalPrice.toFixed(2),
+        b.hostRevenue.toFixed(2),
+        b.taxableValue.toFixed(2)
+      ]);
+
+      const totalTaxable = data.reduce((sum, b) => sum + b.taxableValue, 0);
+      rows.push([]);
+      rows.push(["", "", "", "", "", "TOTAL TAXABLE:", totalTaxable.toFixed(2)]);
+
+      const csvContent = [headers, ...rows]
+        .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+        .join("\n");
+
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.setAttribute("href", url);
+      link.setAttribute("download", `Tax_Report_${reportYear}_${reportMonth.padStart(2, "0")}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      toast.success("Tax report generated successfully");
+    } catch (err) {
+      toast.error("Failed to generate report");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const months = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+  ];
+
   return (
     <DashboardLayout>
       <div className="max-w-5xl mx-auto">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold tracking-tight">Sync Status</h1>
+          <h1 className="text-2xl font-bold tracking-tight">Operations</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Background polling status and manual sync controls
+            System maintenance, data synchronization and reports
           </p>
         </div>
+
+        {/* Reports Section */}
+        <Card className="border-0 shadow-sm mb-6">
+          <CardHeader className="pb-3">
+            <div className="flex items-center gap-2">
+              <FileText className="h-5 w-5 text-primary" />
+              <CardTitle className="text-lg">Reports</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-col sm:flex-row items-end gap-4">
+              <div className="grid gap-1.5 flex-1">
+                <label className="text-[10px] font-bold uppercase text-muted-foreground ml-1">Report Month</label>
+                <Select value={reportMonth} onValueChange={setReportMonth}>
+                  <SelectTrigger className="h-10">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {months.map((m, i) => (
+                      <SelectItem key={m} value={String(i + 1)}>{m}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1.5 w-full sm:w-32">
+                <label className="text-[10px] font-bold uppercase text-muted-foreground ml-1">Year</label>
+                <Select value={reportYear} onValueChange={setReportYear}>
+                  <SelectTrigger className="h-10">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="2025">2025</SelectItem>
+                    <SelectItem value="2026">2026</SelectItem>
+                    <SelectItem value="2027">2027</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button 
+                className="h-10 px-6 shadow-sm" 
+                onClick={handleDownloadTaxReport}
+                disabled={isGenerating}
+              >
+                {isGenerating ? (
+                  <RefreshCw className="h-4 w-4 mr-2 animate-spin" />
+                ) : (
+                  <Download className="h-4 w-4 mr-2" />
+                )}
+                Generate Tax Report (CSV)
+              </Button>
+            </div>
+            <p className="text-[11px] text-muted-foreground mt-3 italic">
+              Note: Taxable value uses Total Price for all channels except Airbnb, where it uses Host Revenue (Payout).
+            </p>
+          </CardContent>
+        </Card>
 
         {/* Last run summary */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">

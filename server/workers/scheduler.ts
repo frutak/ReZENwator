@@ -11,6 +11,7 @@ import cron from "node-cron";
 import { pollAllICalFeeds } from "./icalPoller";
 import { pollEmails } from "./emailPoller";
 import { runDailyMaintenance } from "./dailyAlerts";
+import { updateAllPropertyRatings } from "./ratingScraper";
 
 let schedulerStarted = false;
 
@@ -43,7 +44,7 @@ export function startScheduler(): void {
 
   // ── Daily Maintenance: once a day at 08:00 AM ─────────────────────────────
   cron.schedule("0 0 8 * * *", async () => {
-    console.log("[Scheduler] Running daily maintenance and alerts...");
+    console.log("[Scheduler] Running daily maintenance (includes status transitions + guest emails)...");
     try {
       await runDailyMaintenance();
     } catch (err) {
@@ -51,15 +52,28 @@ export function startScheduler(): void {
     }
   });
 
-  console.log("[Scheduler] Background jobs registered (iCal + Email + Daily)");
+  // ── Weekly Ratings Update: Sunday at 02:00 AM ─────────────────────────────
+  cron.schedule("0 0 2 * * 0", async () => {
+    console.log("[Scheduler] Running weekly ratings update...");
+    try {
+      await updateAllPropertyRatings();
+    } catch (err) {
+      console.error("[Scheduler] Weekly ratings update failed:", err);
+    }
+  });
+
+  console.log("[Scheduler] Background jobs registered (iCal + Email + Daily Maintenance + Weekly Ratings)");
 
   // Run an initial poll shortly after startup (60 seconds delay)
   setTimeout(async () => {
-    console.log("[Scheduler] Running initial iCal poll on startup...");
+    console.log("[Scheduler] Running initial iCal poll and ratings update on startup...");
     try {
-      await pollAllICalFeeds();
+      await Promise.all([
+        pollAllICalFeeds(),
+        updateAllPropertyRatings(),
+      ]);
     } catch (err) {
-      console.error("[Scheduler] Initial iCal poll failed:", err);
+      console.error("[Scheduler] Initial startup jobs failed:", err);
     }
   }, 60_000);
 }

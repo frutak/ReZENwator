@@ -13,7 +13,7 @@ import { getDb } from "../db";
 import { bookings } from "../../drizzle/schema";
 import type { ParsedBankEmail } from "./emailParsers";
 import type { Booking } from "../../drizzle/schema";
-import nodemailer from "nodemailer";
+import { sendAlertEmail } from "../_core/email";
 
 // ─── Fuzzy matching ───────────────────────────────────────────────────────────
 
@@ -68,7 +68,7 @@ export async function findMatchingBookings(
     .from(bookings)
     .where(
       and(
-        or(eq(bookings.status, "pending"), eq(bookings.status, "confirmed"), eq(bookings.status, "paid_to_intermediary")),
+        or(eq(bookings.status, "pending"), eq(bookings.status, "confirmed"), eq(bookings.status, "portal_paid")),
         gte(bookings.checkIn, windowStart),
         lte(bookings.checkIn, windowEnd)
       )
@@ -80,7 +80,7 @@ export async function findMatchingBookings(
     let score = 0;
     const reasons: string[] = [];
 
-    // ── Name score (50 points max) ──────────────────────────────────────────
+    // ── Name score (100 points max) ──────────────────────────────────────────
     if (candidate.guestName && transfer.senderName) {
       const cName = normalizeName(candidate.guestName);
       const tName = normalizeName(transfer.senderName);
@@ -89,14 +89,24 @@ export async function findMatchingBookings(
       const similarity = 1 - distance / maxLen;
 
       if (similarity > 0.8) {
-        score += 50;
+        score += 80;
         reasons.push("Guest name match (high)");
       } else if (similarity > 0.5) {
-        score += 30;
+        score += 40;
         reasons.push("Guest name match (partial)");
       } else if (tName.includes(cName) || cName.includes(tName)) {
-        score += 40;
+        score += 60;
         reasons.push("Name is subset of sender");
+      }
+
+      // Special check: Shared surname (e.g. Marta Chlastawa vs Dariusz Chlastawa)
+      const cParts = cName.split(" ");
+      const tParts = tName.split(" ");
+      const cSurname = cParts[cParts.length - 1];
+      const tSurname = tParts[tParts.length - 1];
+      if (cSurname && tSurname && cSurname === tSurname && cSurname.length > 3) {
+        score += 40;
+        reasons.push(`Shared surname: ${cSurname}`);
       }
     }
 
@@ -105,15 +115,15 @@ export async function findMatchingBookings(
       const cName = normalizeName(candidate.guestName);
       const tTitle = normalizeName(transfer.transferTitle);
       if (tTitle.includes(cName)) {
-        score += 45;
+        score += 70;
         reasons.push("Guest name found in transfer title");
       }
     }
 
-    const bestNameScore = Math.min(50, score);
+    const bestNameScore = Math.min(100, score);
     score = 0; // reset for composite calculation
 
-    // ── Date score (30 points max) ──────────────────────────────────────────
+    // ── Date score (100 points max) ──────────────────────────────────────────
     // Transfers usually happen before or slightly after check-in
     const diffDays = Math.abs(
       ((candidate.checkIn.getTime() - (transfer.transferDate?.getTime() ?? Date.now())) /
@@ -122,38 +132,53 @@ export async function findMatchingBookings(
 
     let dateScore = 0;
     if (diffDays <= 3) {
-      dateScore = 30;
+      dateScore = 100;
       reasons.push("Date is very close (<3 days)");
     } else if (diffDays <= 14) {
-      dateScore = 20;
+      dateScore = 70;
       reasons.push("Date is close (<14 days)");
     } else if (diffDays <= 45) {
-      dateScore = 10;
+      dateScore = 30;
+      reasons.push("Date is within range (<45 days)");
     }
 
-    // ── Amount score (20 points max) ────────────────────────────────────────
+    // ── Amount score (100 points max) ────────────────────────────────────────
     let amountScore = 0;
-    if (candidate.totalPrice && transfer.amount) {
-      const cPrice = parseFloat(String(candidate.totalPrice));
-      const ratio = transfer.amount / cPrice;
+    if (transfer.amount) {
+      const cTotal = parseFloat(String(candidate.totalPrice || "0"));
+      const cPaid = parseFloat(String(candidate.amountPaid || "0"));
+      const cRemaining = Math.max(0, cTotal - cPaid);
+      const cDeposit = parseFloat(String(candidate.depositAmount || "500.00"));
 
-      // Accept full payment, partial payment (>= 20%), or small overpay
-      if (ratio >= 0.95 && ratio <= 1.05) {
+      const isTotalMatch = cTotal > 0 && Math.abs(transfer.amount - cTotal) < 1.0;
+      const isRemainingMatch = cRemaining > 0 && Math.abs(transfer.amount - cRemaining) < 1.0;
+      const isDepositMatch = Math.abs(transfer.amount - cDeposit) < 1.0;
+      const isBothMatch = cRemaining > 0 && Math.abs(transfer.amount - (cRemaining + cDeposit)) < 1.0;
+
+      if (isTotalMatch || isRemainingMatch || isBothMatch) {
         amountScore = 100;
-        reasons.push("Amount matches total price");
-      } else if (ratio >= 0.2 && ratio <= 1.1) {
-        amountScore = 60;
-        reasons.push("Amount is partial payment");
+        reasons.push(isTotalMatch ? "Matches total price" : isRemainingMatch ? "Matches remaining balance" : "Matches balance + deposit");
+      } else if (isDepositMatch) {
+        amountScore = 90;
+        reasons.push("Matches deposit amount");
+      } else if (cTotal > 0) {
+        const ratio = transfer.amount / cTotal;
+        if (ratio >= 0.1 && ratio <= 1.1) {
+          amountScore = 50;
+          reasons.push("Amount is plausible partial payment");
+        } else {
+          amountScore = 10;
+        }
       } else {
-        amountScore = 10;
+        amountScore = 40;
       }
     } else {
       amountScore = 40; // No price data — neutral
     }
 
     // ── Composite score ────────────────────────────────────────────────────
-    // Weights: name 50%, date 30%, amount 20%
-    score = Math.round(bestNameScore * 0.5 + dateScore * 0.3 + amountScore * 0.2);
+    // Weights: name 40%, date 20%, amount 40%
+    score = Math.round(bestNameScore * 0.4 + dateScore * 0.2 + amountScore * 0.4);
 
     if (score >= 30) {
       results.push({
@@ -253,17 +278,6 @@ export async function applyTransferMatch(
 }
 
 async function sendPaymentMismatchEmail(booking: Booking, amount: number, expected: { toBePaid: number; depositReq: number }) {
-  const gmailUser = process.env.GMAIL_USER || "furtka.rentals@gmail.com";
-  const gmailPass = process.env.GMAIL_APP_PASSWORD || "";
-  const recipient = "szymonfurtak@hotmail.com";
-
-  if (!gmailPass) return;
-
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: { user: gmailUser, pass: gmailPass },
-  });
-
   const subject = `⚠️ Payment Amount Mismatch: ${booking.guestName || "Unknown"} (${booking.property})`;
   const text = `
     Unusual payment amount received for booking #${booking.id}.
@@ -283,14 +297,5 @@ async function sendPaymentMismatchEmail(booking: Booking, amount: number, expect
     The booking has been updated with the amount, but status might need manual review.
   `.trim();
 
-  try {
-    await transporter.sendMail({
-      from: `"Rental Manager" <${gmailUser}>`,
-      to: recipient,
-      subject,
-      text,
-    });
-  } catch (err) {
-    console.error("[Matcher] Failed to send mismatch email:", err);
-  }
+  await sendAlertEmail(subject, text);
 }
