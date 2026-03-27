@@ -15,6 +15,7 @@ export type Booking = {
   status: string;
   depositStatus: string;
   guestName: string | null;
+  guestCountry: string | null;
   guestEmail: string | null;
   guestPhone: string | null;
   guestCount: number | null;

@@ -108,3 +108,12 @@ temp/
 
 # Webdev artifacts (checkpoint zips, migrations, etc.)
 .webdev/
+
+# Images
+**/public/images/
+*.jpg
+*.png
+*.jpeg
+*.webp
+*.svg
+*.bmp

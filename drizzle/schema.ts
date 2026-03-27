@@ -8,6 +8,7 @@ import {
   decimal,
   datetime,
   index,
+  uniqueIndex,
 } from "drizzle-orm/mysql-core";
 
 /**
@@ -58,9 +59,10 @@ export const bookings = mysqlTable(
     status: mysqlEnum("status", [
       "pending",
       "confirmed",
-      "paid_to_intermediary",
+      "portal_paid",
       "paid",
       "finished",
+      "cancelled",
     ])
       .default("pending")
       .notNull(),
@@ -77,6 +79,7 @@ export const bookings = mysqlTable(
 
     // Guest details (populated from email parsing)
     guestName: varchar("guestName", { length: 256 }),
+    guestCountry: varchar("guestCountry", { length: 128 }),
     guestEmail: varchar("guestEmail", { length: 320 }),
     guestPhone: varchar("guestPhone", { length: 64 }),
     guestCount: int("guestCount"),
@@ -93,6 +96,8 @@ export const bookings = mysqlTable(
     // Pricing (populated from email parsing)
     /** Total price charged to the guest */
     totalPrice: decimal("totalPrice", { precision: 10, scale: 2 }),
+    /** Portal commission amount */
+    commission: decimal("commission", { precision: 10, scale: 2 }).default("0.00"),
     /** Net revenue to the host after commission */
     hostRevenue: decimal("hostRevenue", { precision: 10, scale: 2 }),
     /** Currency code, default PLN */
@@ -115,6 +120,9 @@ export const bookings = mysqlTable(
     icalSummary: text("icalSummary"),
     /** Email message ID that enriched this booking */
     emailMessageId: varchar("emailMessageId", { length: 512 }),
+
+    /** Whether the 2-week arrival reminder has been sent */
+    reminderSent: int("reminderSent").default(0).notNull(),
 
     // Notes
     notes: text("notes"),
@@ -158,3 +166,42 @@ export const syncLogs = mysqlTable("sync_logs", {
 
 export type SyncLog = typeof syncLogs.$inferSelect;
 export type InsertSyncLog = typeof syncLogs.$inferInsert;
+
+/**
+ * Guest emails tracking — records automated guest communication.
+ */
+export const guestEmails = mysqlTable("guest_emails", {
+  id: int("id").autoincrement().primaryKey(),
+  bookingId: int("bookingId").notNull(),
+  emailType: mysqlEnum("emailType", [
+    "booking_confirmed",
+    "arrival_reminder",
+    "stay_finished",
+    "missing_country_alert",
+    "missing_data_alert",
+  ]).notNull(),
+  sentAt: timestamp("sentAt").defaultNow().notNull(),
+  recipient: varchar("recipient", { length: 320 }).notNull(),
+  success: mysqlEnum("success", ["true", "false"]).default("true").notNull(),
+  errorMessage: text("errorMessage"),
+});
+
+export type GuestEmail = typeof guestEmails.$inferSelect;
+export type InsertGuestEmail = typeof guestEmails.$inferInsert;
+
+/**
+ * Property ratings — stores average ratings and counts from external portals.
+ */
+export const propertyRatings = mysqlTable("property_ratings", {
+  id: int("id").autoincrement().primaryKey(),
+  property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).notNull(),
+  portal: mysqlEnum("portal", ["booking", "airbnb", "slowhop"]).notNull(),
+  rating: decimal("rating", { precision: 3, scale: 2 }).notNull(),
+  count: int("count").notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("idx_property_portal").on(table.property, table.portal),
+]);
+
+export type PropertyRating = typeof propertyRatings.$inferSelect;
+export type InsertPropertyRating = typeof propertyRatings.$inferInsert;

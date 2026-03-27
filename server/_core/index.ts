@@ -8,6 +8,10 @@ import { registerOAuthRoutes } from "./oauth";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
+import { getDb } from "../db";
+import { bookings } from "../../drizzle/schema";
+import { eq, and, ne } from "drizzle-orm";
+import { generateIcalString } from "./ics";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -36,6 +40,40 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   // OAuth callback under /api/oauth/callback
   registerOAuthRoutes(app);
+
+  // iCal Export Route
+  app.get("/api/export/:property.ics", async (req, res) => {
+    const propertyParam = req.params.property;
+    const property = propertyParam === "sadoles" ? "Sadoles" : "Hacjenda";
+    
+    const db = await getDb();
+    if (!db) return res.status(500).send("Database unavailable");
+
+    const activeBookings = await db
+      .select()
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.property, property as any),
+          ne(bookings.status, "pending") // Don't block for non-finalized bookings if desired, or include them?
+          // User said "A successful booking should create a booking object (in "pending" state...) and block set of dates in use in the icals"
+          // So I SHOULD include pending if they are intended to block.
+        )
+      );
+
+    // Re-reading: "A successful booking should create a booking object (in "pending" state...) and block set of dates in use in the icals"
+    // So even pending should block.
+    const allPropertyBookings = await db
+      .select()
+      .from(bookings)
+      .where(eq(bookings.property, property as any));
+
+    const ics = generateIcalString(property, allPropertyBookings);
+    res.setHeader("Content-Type", "text/calendar; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${propertyParam}.ics"`);
+    res.send(ics);
+  });
+
   // tRPC API
   app.use(
     "/api/trpc",

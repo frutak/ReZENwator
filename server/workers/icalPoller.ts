@@ -7,11 +7,12 @@
 
 import ical from "node-ical";
 import type { VEvent, ParameterValue } from "node-ical";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne, inArray } from "drizzle-orm";
 import { getDb } from "../db";
 import { bookings, syncLogs } from "../../drizzle/schema";
 import { ICAL_FEEDS, type ICalFeed } from "./icalConfig";
 import { checkAndAlertDoubleBookings } from "./doubleBookingDetector";
+import { sendAlertEmail } from "../_core/email";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,8 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
     return { newBookings: 0, updatedBookings: 0, errors: ["Database not available"] };
   }
 
+  const seenUids: string[] = [];
+
   let events: Awaited<ReturnType<typeof ical.async.fromURL>>;
   try {
     events = await ical.async.fromURL(feed.url);
@@ -120,25 +123,25 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
       continue;
     }
 
-    // Skip Airbnb's automatic 1-day preparation blocker:
-    // Airbnb always blocks "today → tomorrow" to give the host preparation time.
-    // This is a system block, not a real booking, so we hide it.
+    // Skip Airbnb's automatic preparation blockers:
+    // Airbnb blocks "today → tomorrow" (or similar short blocks) to give the host preparation time.
+    // These often have summaries like "Airbnb (Not available)".
+    const summary = paramStr(vevent.summary);
+    const description = paramStr(vevent.description);
+
     if (feed.channel === "airbnb") {
+      const isNotAvailable = summary.toLowerCase().includes("not available");
       const durationMs = checkOut.getTime() - checkIn.getTime();
       const durationDays = durationMs / (1000 * 60 * 60 * 24);
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const checkInDay = new Date(checkIn);
-      checkInDay.setHours(0, 0, 0, 0);
-      // Filter: exactly 1 night AND check-in is today
-      if (durationDays <= 1 && checkInDay.getTime() === today.getTime()) {
-        console.log(`[iCal] Skipped Airbnb preparation blocker: ${checkIn.toDateString()} → ${checkOut.toDateString()}`);
+      
+      // Filter: short block (<= 1 night) AND either "not available" summary OR starts very soon
+      const startsWithin2Days = (checkIn.getTime() - Date.now()) < 2 * 24 * 60 * 60 * 1000;
+      
+      if (durationDays <= 1.1 && (isNotAvailable || startsWithin2Days)) {
+        console.log(`[iCal] Skipped Airbnb system block: ${summary} | ${checkIn.toDateString()} → ${checkOut.toDateString()}`);
         continue;
       }
     }
-
-    const summary = paramStr(vevent.summary);
-    const description = paramStr(vevent.description);
 
     const channel = detectChannel(summary, description, feed.channel);
     const status = initialStatus(channel);
@@ -146,6 +149,7 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
 
     // Use the iCal UID as the primary deduplication key
     const icalUid = uid || `${feed.property}-${feed.channel}-${checkIn.toISOString()}-${checkOut.toISOString()}`;
+    seenUids.push(icalUid);
 
     try {
       // Primary deduplication: by iCal UID
@@ -165,39 +169,41 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
         continue;
       }
 
-      // Secondary deduplication: same property + exact same check-in + check-out
+      // Secondary deduplication: same property + same date range (ignoring exact time)
       // This catches cross-channel sync (e.g. Booking.com booking appearing in both
-      // the Slowhop feed and the Booking.com feed with different UIDs)
-      const existingByDates = await db
-        .select({ id: bookings.id, channel: bookings.channel, icalUid: bookings.icalUid })
-        .from(bookings)
-        .where(
-          and(
-            eq(bookings.property, feed.property),
-            eq(bookings.checkIn, checkIn),
-            eq(bookings.checkOut, checkOut)
-          )
-        )
-        .limit(1);
+      // the Slowhop feed and the Booking.com feed with different UIDs/times)
+      
+      // Normalize to midnight for comparison
+      const checkInDate = new Date(checkIn); checkInDate.setHours(0,0,0,0);
+      const checkOutDate = new Date(checkOut); checkOutDate.setHours(0,0,0,0);
 
-      if (existingByDates.length > 0) {
+      const allBookings = await db
+        .select({ id: bookings.id, channel: bookings.channel, checkIn: bookings.checkIn, checkOut: bookings.checkOut })
+        .from(bookings)
+        .where(eq(bookings.property, feed.property));
+
+      const duplicate = allBookings.find(b => {
+        const bIn = new Date(b.checkIn); bIn.setHours(0,0,0,0);
+        const bOut = new Date(b.checkOut); bOut.setHours(0,0,0,0);
+        return bIn.getTime() === checkInDate.getTime() && bOut.getTime() === checkOutDate.getTime();
+      });
+
+      if (duplicate) {
         // A booking for this property+dates already exists from another feed.
         // Prefer the channel-specific UID over a cross-sync UID.
-        // Update the channel if the existing one is from a different (less authoritative) feed.
-        const existing = existingByDates[0];
-        const existingIsFromOtherFeed = existing.channel !== channel;
+        const existingIsFromOtherFeed = duplicate.channel !== channel;
         if (existingIsFromOtherFeed && (channel === "airbnb" || channel === "booking")) {
           // Upgrade channel attribution to the more authoritative source
           await db
             .update(bookings)
-            .set({ channel, icalUid, icalSummary: summary.substring(0, 500) })
-            .where(eq(bookings.id, existing.id));
+            .set({ channel, icalUid, icalSummary: summary.substring(0, 500), checkIn, checkOut })
+            .where(eq(bookings.id, duplicate.id));
           console.log(
-            `[iCal] Merged duplicate: ${feed.label} | ${checkIn.toDateString()} → ${checkOut.toDateString()} (upgraded channel from ${existing.channel} to ${channel})`
+            `[iCal] Merged duplicate: ${feed.label} | ${checkIn.toDateString()} → ${checkOut.toDateString()} (upgraded channel from ${duplicate.channel} to ${channel})`
           );
         } else {
           console.log(
-            `[iCal] Skipped cross-sync duplicate: ${feed.label} | ${checkIn.toDateString()} → ${checkOut.toDateString()} (already exists as ${existing.channel})`
+            `[iCal] Skipped cross-sync duplicate: ${feed.label} | ${checkIn.toDateString()} → ${checkOut.toDateString()} (already exists as ${duplicate.channel})`
           );
         }
         updatedBookings++;
@@ -224,6 +230,68 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
       console.error(`[iCal] ${msg}`);
       errors.push(msg);
     }
+  }
+
+  // ─── Detect and handle cancellations ───────────────────────────────────────
+  try {
+    // Find active bookings (not finished or cancelled) that were matched to this feed
+    // but were NOT present in the current iCal fetch.
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+
+    const missingBookings = await db
+      .select()
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.property, feed.property),
+          eq(bookings.channel, feed.channel),
+          ne(bookings.status, "finished"),
+          ne(bookings.status, "cancelled"),
+          gte(bookings.checkIn, todayStart), // Only consider future/starting-today bookings for auto-cancel
+          seenUids.length > 0 ? ne(bookings.icalUid, "manual") : undefined
+        )
+      );
+
+    for (const b of missingBookings) {
+      // If the UID is not in seenUids, it means it's gone from the feed
+      if (!seenUids.includes(b.icalUid)) {
+        // REFINEMENT: Only auto-cancel if the booking starts AFTER today.
+        // If it starts today or in the past, it disappearing from iCal is normal cleanup/housekeeping.
+        const checkInDate = new Date(b.checkIn);
+        const isFutureBooking = checkInDate > now;
+        
+        if (isFutureBooking) {
+          await db
+            .update(bookings)
+            .set({ status: "cancelled" })
+            .where(eq(bookings.id, b.id));
+          
+          console.log(`[iCal] Booking #${b.id} marked as CANCELLED (removed from future calendar: ${feed.label})`);
+          
+          // Notify host
+          const checkInStr = new Date(b.checkIn).toLocaleDateString();
+          const checkOutStr = new Date(b.checkOut).toLocaleDateString();
+          const subject = `❌ Booking CANCELLED: ${b.guestName || "Unknown"} (${b.property})`;
+          const text = `
+            The following booking has been removed from the ${feed.channel} iCal feed and marked as CANCELLED.
+            
+            Guest: ${b.guestName || "Unknown"}
+            Property: ${b.property}
+            Channel: ${b.channel}
+            Dates: ${checkInStr} - ${checkOutStr}
+            
+            The dates are now available for new bookings.
+          `.trim();
+          
+          await sendAlertEmail(subject, text);
+        } else {
+          console.log(`[iCal] Booking #${b.id} (${b.guestName}) removed from feed but not cancelled (already started/historical)`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[iCal] Error handling cancellations for ${feed.label}:`, err);
   }
 
   // Log the sync run
@@ -276,6 +344,8 @@ export async function pollAllICalFeeds(): Promise<void> {
 
 /**
  * Automatically move bookings to 'finished' status when checkout date has passed.
+ * Only applies to fully 'paid' bookings. 'portal_paid' or 'confirmed' bookings
+ * must be manually moved to 'paid' first (once payment is received).
  */
 export async function autoFinishBookings(): Promise<void> {
   const db = await getDb();
@@ -284,7 +354,7 @@ export async function autoFinishBookings(): Promise<void> {
   const now = new Date();
 
   try {
-    // Get all non-finished bookings
+    // Get all fully paid bookings that have ended
     const active = await db
       .select({ id: bookings.id, checkOut: bookings.checkOut, status: bookings.status })
       .from(bookings)
@@ -293,17 +363,7 @@ export async function autoFinishBookings(): Promise<void> {
     for (const b of active) {
       if (b.checkOut < now) {
         await db.update(bookings).set({ status: "finished" }).where(eq(bookings.id, b.id));
-      }
-    }
-
-    const confirmed = await db
-      .select({ id: bookings.id, checkOut: bookings.checkOut })
-      .from(bookings)
-      .where(eq(bookings.status, "confirmed"));
-
-    for (const b of confirmed) {
-      if (b.checkOut < now) {
-        await db.update(bookings).set({ status: "finished" }).where(eq(bookings.id, b.id));
+        console.log(`[iCal] Booking #${b.id} auto-finished (checkout date passed)`);
       }
     }
   } catch (err) {

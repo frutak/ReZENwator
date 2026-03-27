@@ -1,19 +1,30 @@
 import React from "react";
+import { Badge } from "@/components/ui/badge";
 
 export function StatusBadge({ status }: { status: string }) {
   const labels: Record<string, string> = {
     pending: "Pending",
     confirmed: "Confirmed",
-    paid_to_intermediary: "Paid to Intermediary",
+    portal_paid: "Portal Paid",
     paid: "Paid",
     finished: "Finished",
+    cancelled: "Cancelled",
   };
+
+  const variants: Record<string, "default" | "secondary" | "outline" | "destructive"> = {
+    pending: "secondary",
+    confirmed: "default",
+    portal_paid: "outline",
+    paid: "default",
+    finished: "outline",
+    cancelled: "destructive",
+  };
+
+
   return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border status-${status}`}
-    >
+    <Badge variant={variants[status] || "outline"}>
       {labels[status] ?? status}
-    </span>
+    </Badge>
   );
 }
 
@@ -24,12 +35,20 @@ export function DepositBadge({ status }: { status: string }) {
     returned: "Dep: Returned",
     not_applicable: "N/A",
   };
+
+  const variants: Record<string, "default" | "secondary" | "outline" | "destructive"> = {
+    pending: "destructive",
+    paid: "default",
+    returned: "secondary",
+    not_applicable: "outline",
+  };
+
+  if (status === "not_applicable") return null;
+
   return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border deposit-${status}`}
-    >
+    <Badge variant={variants[status] || "outline"}>
       {labels[status] ?? status}
-    </span>
+    </Badge>
   );
 }
 
@@ -41,11 +60,10 @@ export function ChannelBadge({ channel }: { channel: string }) {
     alohacamp: "Alohacamp",
     direct: "Direct",
   };
+
   return (
-    <span
-      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium channel-${channel}`}
-    >
+    <Badge variant="secondary" className={`channel-${channel}`}>
       {labels[channel] ?? channel}
-    </span>
+    </Badge>
   );
 }

@@ -2,7 +2,7 @@ import { useState, useMemo, useCallback } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Select,
   SelectContent,
@@ -23,11 +23,16 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
+  Search,
+  Filter,
 } from "lucide-react";
 import { format } from "date-fns";
+import { toast } from "sonner";
 import BookingDetailModal from "@/components/BookingDetailModal";
-import { Booking, StatusBadge, DepositBadge, ChannelBadge } from "@/components/ui/Badges";
-import { Booking as BookingType } from "@shared/types";
+import { StatusBadge, DepositBadge, ChannelBadge } from "@/components/ui/badges";
+import { Booking } from "@shared/types";
+import { DoubleBookingBanner } from "@/components/DoubleBookingBanner";
+import { cn } from "@/lib/utils";
 
 // ─── Sort helpers ─────────────────────────────────────────────────────────────
 
@@ -43,81 +48,59 @@ function SortIcon({ col, sortKey, sortDir }: { col: SortKey; sortKey: SortKey; s
 
 // ─── Stats Cards ──────────────────────────────────────────────────────────────
 
-function StatsCards({ filters }: { filters: { property?: string; channel?: string; timeRange?: string } }) {
+function StatsCards({ filters }: { filters: { property?: string; channel?: string; status?: string; timeRange?: string } }) {
+  const allExceptCancelled: ("pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")[] = ["pending", "confirmed", "portal_paid", "paid", "finished"];
+  const activeStatuses: ("pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")[] = ["pending", "confirmed", "portal_paid", "paid"];
+  
+  const statusFilter = useMemo(() => {
+    if (filters.status === "all") return allExceptCancelled;
+    if (filters.status === "active") return activeStatuses;
+    return [filters.status as any];
+  }, [filters.status]);
+
   const { data: stats } = trpc.bookings.stats.useQuery({
     property: filters.property as any,
     channel: filters.channel as any,
+    status: statusFilter,
     timeRange: filters.timeRange as any,
   });
 
   if (!stats) return null;
 
-  const rangeLabel = 
+  const rangeLabel =
     filters.timeRange === "month" ? "Month" :
     filters.timeRange === "3months" ? "3 Months" :
     filters.timeRange === "6months" ? "6 Months" :
     filters.timeRange === "all" ? "All Time" : "2026";
 
+  const statusLabel = 
+    filters.status === "active" ? "Active" :
+    filters.status === "all" ? "All" :
+    filters.status ? filters.status.charAt(0).toUpperCase() + filters.status.slice(1).replace("_", " ") : "All";
+
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
-      <Card className="border-0 shadow-sm">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-3">
-            <div className="h-9 w-9 rounded-lg bg-blue-100 flex items-center justify-center">
-              <Calendar className="h-5 w-5 text-blue-600" />
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+      {[
+        { label: `Total (${statusLabel})`, value: stats.total, icon: Calendar, color: "bg-blue-50 text-blue-600 dark:bg-blue-900/20" },
+        { label: "Upcoming", value: stats.upcoming, icon: Clock, color: "bg-amber-50 text-amber-600 dark:bg-amber-900/20" },
+        { label: "Fully Paid", value: stats.paid, icon: CheckCircle2, color: "bg-green-50 text-green-600 dark:bg-green-900/20" },
+        { label: `Revenue (${rangeLabel})`, value: `${stats.totalRevenue.toLocaleString("pl-PL")} PLN`, icon: TrendingUp, color: "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20" },
+      ].map((stat, i) => (
+        <Card key={i} className="overflow-hidden border-0 shadow-sm transition-all hover:shadow-md">
+          <CardContent className="p-5 flex items-center gap-4">
+            <div className={cn("p-3 rounded-xl", stat.color)}>
+              <stat.icon className="h-5 w-5" />
             </div>
             <div>
-              <p className="text-2xl font-bold">{stats.total}</p>
-              <p className="text-xs text-muted-foreground">Total ({rangeLabel})</p>
+              <p className="text-sm font-medium text-muted-foreground">{stat.label}</p>
+              <h3 className="text-2xl font-bold tracking-tight">{stat.value}</h3>
             </div>
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="border-0 shadow-sm">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-3">
-            <div className="h-9 w-9 rounded-lg bg-amber-100 flex items-center justify-center">
-              <Clock className="h-5 w-5 text-amber-600" />
-            </div>
-            <div>
-              <p className="text-2xl font-bold">{stats.upcoming}</p>
-              <p className="text-xs text-muted-foreground">Upcoming</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="border-0 shadow-sm">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-3">
-            <div className="h-9 w-9 rounded-lg bg-green-100 flex items-center justify-center">
-              <CheckCircle2 className="h-5 w-5 text-green-600" />
-            </div>
-            <div>
-              <p className="text-2xl font-bold">{stats.paid}</p>
-              <p className="text-xs text-muted-foreground">Fully Paid</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-      <Card className="border-0 shadow-sm">
-        <CardContent className="p-4">
-          <div className="flex items-center gap-3">
-            <div className="h-9 w-9 rounded-lg bg-teal-100 flex items-center justify-center">
-              <TrendingUp className="h-5 w-5 text-teal-600" />
-            </div>
-            <div>
-              <p className="text-2xl font-bold">
-                {stats.totalRevenue.toLocaleString("pl-PL")}
-              </p>
-              <p className="text-xs text-muted-foreground">Revenue ({rangeLabel})</p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      ))}
     </div>
   );
 }
-
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function BookingsDashboard() {
@@ -125,9 +108,10 @@ export default function BookingsDashboard() {
   const [channel, setChannel] = useState<string>("all");
   const [status, setStatus] = useState<string>("active");
   const [timeRange, setTimeRange] = useState<string>("year");
-  const [selectedBooking, setSelectedBooking] = useState<BookingType | null>(null);
+  const [selectedBooking, setSelectedBooking] = useState<Booking | null>(null);
   const [sortKey, setSortKey] = useState<SortKey>("checkIn");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [searchQuery, setSearchQuery] = useState("");
 
   const handleSort = useCallback((col: SortKey) => {
     setSortKey(prev => {
@@ -149,7 +133,7 @@ export default function BookingsDashboard() {
           : undefined,
       status:
         status !== "all" && status !== "active"
-          ? (status as "pending" | "confirmed" | "paid_to_intermediary" | "paid" | "finished")
+          ? (status as "pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")
           : undefined,
     }),
     [property, channel, status]
@@ -158,25 +142,33 @@ export default function BookingsDashboard() {
   const statsFilters = useMemo(() => ({
     property: property !== "all" ? property : undefined,
     channel: channel !== "all" ? channel : undefined,
+    status,
     timeRange,
-  }), [property, channel, timeRange]);
+  }), [property, channel, status, timeRange]);
 
   const { data: rawBookingList = [], isLoading } = trpc.bookings.list.useQuery(filters);
 
   const utils = trpc.useUtils();
-  const triggerIcal = trpc.sync.ical.useMutation({
-    onSuccess: (data) => {
+  const triggerIcal = trpc.sync.triggerIcal.useMutation({
+    onSuccess: () => {
       utils.bookings.list.invalidate();
       utils.bookings.stats.invalidate();
-      toast.success(`iCal Sync complete: ${data.newCount} new, ${data.updatedCount} updated`);
+      toast.success(`iCal Sync complete`);
     },
   });
 
-  const triggerEmail = trpc.sync.email.useMutation({
+  const triggerEmail = trpc.sync.triggerEmail.useMutation({
     onSuccess: (data) => {
       utils.bookings.list.invalidate();
       utils.bookings.stats.invalidate();
-      toast.success(`Email Check: ${data.enriched} enriched, ${data.matched} matched`);
+      if (data.errors && data.errors.length > 0) {
+        toast.error(`Email Check had errors: ${data.errors[0]}`);
+      } else {
+        toast.success(`Email Check: ${data.enriched} enriched, ${data.matched} matched`);
+      }
+    },
+    onError: (err) => {
+      toast.error(`Email Check failed: ${err.message}`);
     },
   });
 
@@ -186,8 +178,19 @@ export default function BookingsDashboard() {
   const bookingList = useMemo(() => {
     let list = [...rawBookingList];
     if (status === "active") {
-      list = list.filter(b => b.status !== "finished");
+      list = list.filter(b => b.status !== "finished" && b.status !== "cancelled");
     }
+    
+    // Search filter
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      list = list.filter(b => 
+        b.guestName?.toLowerCase().includes(q) || 
+        b.property?.toLowerCase().includes(q) ||
+        b.channel?.toLowerCase().includes(q)
+      );
+    }
+
     return list.sort((a, b) => {
       let aVal: string | number = 0;
       let bVal: string | number = 0;
@@ -206,179 +209,212 @@ export default function BookingsDashboard() {
       const res = aVal > bVal ? 1 : -1;
       return sortDir === "asc" ? res : -res;
     });
-  }, [rawBookingList, sortKey, sortDir, status]);
+  }, [rawBookingList, sortKey, sortDir, status, searchQuery]);
 
   return (
     <DashboardLayout>
-      <div className="max-w-7xl mx-auto">
-        <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col gap-6 max-w-7xl mx-auto">
+        <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b pb-6">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight">Bookings</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              Sadoleś &amp; Hacjenda — all channels
+            <h1 className="text-3xl font-bold tracking-tight text-foreground">Bookings</h1>
+            <p className="text-muted-foreground mt-1">
+              Manage your property reservations across all channels.
             </p>
           </div>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-3">
             <Button
               variant="outline"
-              size="sm"
+              className="shadow-sm"
               onClick={() => triggerEmail.mutate()}
               disabled={triggerEmail.isPending}
             >
-              <Mail className="h-4 w-4 mr-1.5" />
+              <Mail className="h-4 w-4 mr-2" />
               {triggerEmail.isPending ? "Checking..." : "Check Email"}
             </Button>
             <Button
-              size="sm"
+              className="shadow-sm"
               onClick={() => triggerIcal.mutate()}
               disabled={triggerIcal.isPending}
             >
               <RefreshCw
-                className={`h-4 w-4 mr-1.5 ${triggerIcal.isPending ? "animate-spin" : ""}`}
+                className={cn("h-4 w-4 mr-2", triggerIcal.isPending && "animate-spin")}
               />
               {triggerIcal.isPending ? "Syncing..." : "Sync iCal"}
             </Button>
           </div>
-        </div>
+        </header>
 
-        {/* Stats */}
+        <DoubleBookingBanner />
+
         <StatsCards filters={statsFilters} />
 
-        {/* Filters */}
-        <div className="flex flex-wrap gap-2 mb-4">
-          <Select value={timeRange} onValueChange={setTimeRange}>
-            <SelectTrigger className="w-44 h-8 text-sm bg-blue-50/50 dark:bg-blue-900/10 border-blue-200 dark:border-blue-800">
-              <SelectValue placeholder="Time Range" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="month">This Month</SelectItem>
-              <SelectItem value="3months">Next 3 Months</SelectItem>
-              <SelectItem value="6months">Next 6 Months</SelectItem>
-              <SelectItem value="year">This Year (2026)</SelectItem>
-              <SelectItem value="all">All Time</SelectItem>
-            </SelectContent>
-          </Select>
+        <div className="space-y-4">
+          <div className="flex flex-col lg:flex-row gap-4 justify-between items-start lg:items-center">
+            <div className="relative w-full lg:w-96">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <input
+                type="text"
+                placeholder="Search guest, property or channel..."
+                className="w-full pl-10 h-10 border rounded-lg bg-background focus:ring-2 focus:ring-primary/20 focus:outline-none transition-all"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+            
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-2 mr-2 text-sm font-medium text-muted-foreground">
+                <Filter className="h-4 w-4" /> Filters:
+              </div>
+              <Select value={timeRange} onValueChange={setTimeRange}>
+                <SelectTrigger className="h-9 w-40 text-sm border-0 bg-secondary/50 hover:bg-secondary transition-colors">
+                  <SelectValue placeholder="Time Range" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="month">This Month</SelectItem>
+                  <SelectItem value="3months">Next 3 Months</SelectItem>
+                  <SelectItem value="6months">Next 6 Months</SelectItem>
+                  <SelectItem value="year">This Year (2026)</SelectItem>
+                  <SelectItem value="all">All Time</SelectItem>
+                </SelectContent>
+              </Select>
 
-          <Select value={property} onValueChange={setProperty}>
-            <SelectTrigger className="w-40 h-8 text-sm">
-              <SelectValue placeholder="Property" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Properties</SelectItem>
-              <SelectItem value="Sadoles">Sadoleś</SelectItem>
-              <SelectItem value="Hacjenda">Hacjenda</SelectItem>
-            </SelectContent>
-          </Select>
+              <Select value={property} onValueChange={setProperty}>
+                <SelectTrigger className="h-9 w-40 text-sm border-0 bg-secondary/50 hover:bg-secondary transition-colors">
+                  <SelectValue placeholder="Property" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Properties</SelectItem>
+                  <SelectItem value="Sadoles">Sadoleś</SelectItem>
+                  <SelectItem value="Hacjenda">Hacjenda</SelectItem>
+                </SelectContent>
+              </Select>
 
-          <Select value={channel} onValueChange={setChannel}>
-            <SelectTrigger className="w-40 h-8 text-sm">
-              <SelectValue placeholder="Channel" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Channels</SelectItem>
-              <SelectItem value="slowhop">Slowhop</SelectItem>
-              <SelectItem value="airbnb">Airbnb</SelectItem>
-              <SelectItem value="booking">Booking.com</SelectItem>
-              <SelectItem value="alohacamp">Alohacamp</SelectItem>
-              <SelectItem value="direct">Direct</SelectItem>
-            </SelectContent>
-          </Select>
+              <Select value={channel} onValueChange={setChannel}>
+                <SelectTrigger className="h-9 w-40 text-sm border-0 bg-secondary/50 hover:bg-secondary transition-colors">
+                  <SelectValue placeholder="Channel" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Channels</SelectItem>
+                  <SelectItem value="slowhop">Slowhop</SelectItem>
+                  <SelectItem value="airbnb">Airbnb</SelectItem>
+                  <SelectItem value="booking">Booking.com</SelectItem>
+                  <SelectItem value="alohacamp">Alohacamp</SelectItem>
+                  <SelectItem value="direct">Direct</SelectItem>
+                </SelectContent>
+              </Select>
 
-          <Select value={status} onValueChange={setStatus}>
-            <SelectTrigger className="w-40 h-8 text-sm">
-              <SelectValue placeholder="Status" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="active">Active</SelectItem>
-              <SelectItem value="all">All Statuses</SelectItem>
-              <SelectItem value="pending">Pending</SelectItem>
-              <SelectItem value="confirmed">Confirmed</SelectItem>
-              <SelectItem value="paid_to_intermediary">Paid to Intermediary</SelectItem>
-              <SelectItem value="paid">Paid</SelectItem>
-              <SelectItem value="finished">Finished</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+              <Select value={status} onValueChange={setStatus}>
+                <SelectTrigger className="h-9 w-40 text-sm border-0 bg-secondary/50 hover:bg-secondary transition-colors">
+                  <SelectValue placeholder="Status" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="active">Active Only</SelectItem>
+                  <SelectItem value="all">All Statuses</SelectItem>
+                  <SelectItem value="pending">Pending</SelectItem>
+                  <SelectItem value="confirmed">Confirmed</SelectItem>
+                  <SelectItem value="portal_paid">Portal Paid</SelectItem>
+                  <SelectItem value="paid">Paid</SelectItem>
+                  <SelectItem value="finished">Finished</SelectItem>
+                  <SelectItem value="cancelled">Cancelled</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
 
-        {/* Table */}
-        <div className="bg-card border rounded-lg overflow-hidden shadow-sm">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left border-collapse">
-              <thead className="bg-muted/50 text-muted-foreground font-medium border-b">
-                <tr>
-                  <th className="px-4 py-3 cursor-pointer hover:text-foreground" onClick={() => handleSort("property")}>
-                    Property <SortIcon col="property" sortKey={sortKey} sortDir={sortDir} />
-                  </th>
-                  <th className="px-4 py-3 cursor-pointer hover:text-foreground" onClick={() => handleSort("guestName")}>
-                    Guest <SortIcon col="guestName" sortKey={sortKey} sortDir={sortDir} />
-                  </th>
-                  <th className="px-4 py-3 cursor-pointer hover:text-foreground" onClick={() => handleSort("checkIn")}>
-                    Check-in <SortIcon col="checkIn" sortKey={sortKey} sortDir={sortDir} />
-                  </th>
-                  <th className="px-4 py-3 cursor-pointer hover:text-foreground" onClick={() => handleSort("checkOut")}>
-                    Check-out <SortIcon col="checkOut" sortKey={sortKey} sortDir={sortDir} />
-                  </th>
-                  <th className="px-4 py-3 cursor-pointer hover:text-foreground" onClick={() => handleSort("status")}>
-                    Status <SortIcon col="status" sortKey={sortKey} sortDir={sortDir} />
-                  </th>
-                  <th className="px-4 py-3 cursor-pointer hover:text-foreground text-right" onClick={() => handleSort("revenue")}>
-                    Revenue <SortIcon col="revenue" sortKey={sortKey} sortDir={sortDir} />
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {isLoading ? (
-                  <tr>
-                    <td colSpan={6} className="px-4 py-10 text-center text-muted-foreground">
-                      Loading bookings...
-                    </td>
+          <Card className="border shadow-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left">
+                <thead>
+                  <tr className="bg-muted/50 text-muted-foreground border-b uppercase text-[10px] font-bold tracking-wider">
+                    <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("property")}>
+                      Property <SortIcon col="property" sortKey={sortKey} sortDir={sortDir} />
+                    </th>
+                    <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("guestName")}>
+                      Guest <SortIcon col="guestName" sortKey={sortKey} sortDir={sortDir} />
+                    </th>
+                    <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("checkIn")}>
+                      Check-in <SortIcon col="checkIn" sortKey={sortKey} sortDir={sortDir} />
+                    </th>
+                    <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("checkOut")}>
+                      Check-out <SortIcon col="checkOut" sortKey={sortKey} sortDir={sortDir} />
+                    </th>
+                    <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("status")}>
+                      Status <SortIcon col="status" sortKey={sortKey} sortDir={sortDir} />
+                    </th>
+                    <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground text-right" onClick={() => handleSort("revenue")}>
+                      Revenue <SortIcon col="revenue" sortKey={sortKey} sortDir={sortDir} />
+                    </th>
                   </tr>
-                ) : bookingList.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="px-4 py-10 text-center text-muted-foreground">
-                      No bookings found for the current filters.
-                    </td>
-                  </tr>
-                ) : (
-                  bookingList.map((b) => (
-                    <tr
-                      key={b.id}
-                      className="border-b last:border-0 hover:bg-muted/30 cursor-pointer transition-colors"
-                      onClick={() => setSelectedBooking(b)}
-                    >
-                      <td className="px-4 py-3">
-                        <div className="font-medium text-foreground">{b.property}</div>
-                        <div className="mt-1">
-                          <ChannelBadge channel={b.channel} />
+                </thead>
+                <tbody className="divide-y">
+                  {isLoading ? (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-20 text-center">
+                        <div className="flex flex-col items-center gap-3">
+                          <RefreshCw className="h-8 w-8 text-primary/20 animate-spin" />
+                          <span className="text-muted-foreground font-medium">Loading bookings...</span>
                         </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="font-medium text-foreground">{b.guestName || "Unknown"}</div>
-                        <div className="text-xs text-muted-foreground mt-0.5">
-                          {nightsCount(b)} night{nightsCount(b) !== 1 ? "s" : ""}
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">
-                        {format(new Date(b.checkIn), "dd MMM yyyy")}
-                      </td>
-                      <td className="px-4 py-3 text-muted-foreground">
-                        {format(new Date(b.checkOut), "dd MMM yyyy")}
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex flex-col gap-1.5 items-start">
-                          <StatusBadge status={b.status} />
-                          <DepositBadge status={b.depositStatus} />
-                        </div>
-                      </td>
-                      <td className="px-4 py-3 text-right font-medium">
-                        {(parseFloat(b.hostRevenue ?? b.totalPrice ?? "0")).toLocaleString("pl-PL")} PLN
                       </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
+                  ) : bookingList.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-6 py-20 text-center">
+                        <div className="flex flex-col items-center gap-2">
+                          <Filter className="h-8 w-8 text-muted-foreground/20" />
+                          <span className="text-muted-foreground font-medium">No bookings found matching filters.</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    bookingList.map((b) => (
+                      <tr
+                        key={b.id}
+                        className="group hover:bg-muted/50 cursor-pointer transition-colors"
+                        onClick={() => setSelectedBooking(b)}
+                      >
+                        <td className="px-6 py-4">
+                          <div className="font-semibold text-foreground">{b.property}</div>
+                          <div className="mt-1">
+                            <ChannelBadge channel={b.channel} />
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="font-semibold text-foreground">{b.guestName || "Unknown Guest"}</div>
+                          <div className="text-xs text-muted-foreground mt-1 flex items-center gap-1.5">
+                            {b.guestCountry && (
+                              <>
+                                <span className="uppercase">{b.guestCountry}</span>
+                                <span>•</span>
+                              </>
+                            )}
+                            <span>{nightsCount(b)} night{nightsCount(b) !== 1 ? "s" : ""}</span>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 text-muted-foreground">
+                          {format(new Date(b.checkIn), "dd MMM yyyy")}
+                        </td>
+                        <td className="px-6 py-4 text-muted-foreground">
+                          {format(new Date(b.checkOut), "dd MMM yyyy")}
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col gap-1.5 items-start">
+                            <StatusBadge status={b.status} />
+                            <DepositBadge status={b.depositStatus} />
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <span className="font-bold text-base">
+                            {(parseFloat(b.hostRevenue ?? b.totalPrice ?? "0")).toLocaleString("pl-PL")}
+                          </span>
+                          <span className="text-[10px] font-bold text-muted-foreground ml-1">PLN</span>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </Card>
         </div>
       </div>
 
