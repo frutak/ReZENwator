@@ -1,13 +1,19 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
-import { ChevronLeft, ChevronRight, Home } from "lucide-react";
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, isSameDay, addMonths, subMonths, addDays } from "date-fns";
+import { ChevronLeft, ChevronRight, Home, Calendar as CalendarIcon, Tag, Loader2, Settings, Plus, Trash2, SoapDispenserDroplet, Clock } from "lucide-react";
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, isSameDay, addMonths, subMonths, addDays, startOfDay } from "date-fns";
 import BookingDetailModal from "@/components/BookingDetailModal";
 import { Booking } from "@shared/types";
-import { Dialog } from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { DoubleBookingBanner } from "@/components/DoubleBookingBanner";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { toast } from "sonner";
+import { cn } from "@/lib/utils";
+import { useAuth } from "@/_core/hooks/useAuth";
 
 // ─── Channel colours ──────────────────────────────────────────────────────────
 
@@ -20,6 +26,14 @@ const CHANNEL_COLORS: Record<string, { bg: string; text: string; border: string 
   unknown:   { bg: "#f1f5f9", text: "#475569", border: "#e2e8f0" },
 };
 
+const PLAN_COLORS: Record<string, string> = {
+  Low: "#f1f5f9",      // Slate 100
+  Mixed: "#fef9c3",    // Yellow 100
+  High: "#ffedd5",     // Orange 100
+  Special: "#fee2e2",  // Red 100
+  New: "#fae8ff",      // Fuchsia 100
+};
+
 const CHANNEL_LABELS: Record<string, string> = {
   airbnb: "Airbnb",
   booking: "Booking.com",
@@ -28,26 +42,346 @@ const CHANNEL_LABELS: Record<string, string> = {
   direct: "Direct",
 };
 
+// ─── Pricing Plan Modal ────────────────────────────────────────────────────────
+
+function PricingPlanModal({ plan, onClose, onUpdated }: { plan: any, onClose: () => void, onUpdated: () => void }) {
+  const [price, setPrice] = useState(plan.nightlyPrice);
+  const [minStay, setMinStay] = useState(plan.minStay);
+
+  const updateMutation = trpc.pricing.updatePlan.useMutation({
+    onSuccess: () => {
+      toast.success("Pricing plan updated");
+      onUpdated();
+      onClose();
+    },
+    onError: (err) => toast.error(err.message)
+  });
+
+  return (
+    <DialogContent>
+      <DialogHeader>
+        <DialogTitle>Edit Pricing Plan</DialogTitle>
+      </DialogHeader>
+      <div className="space-y-4 py-4">
+        <div className="space-y-2">
+          <Label>Plan Name</Label>
+          <Input value={plan.planName} disabled className="bg-muted" />
+        </div>
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label>Nightly Price (PLN)</Label>
+            <Input type="number" value={price} onChange={e => setPrice(parseInt(e.target.value))} />
+          </div>
+          <div className="space-y-2">
+            <Label>Min Stay (Nights)</Label>
+            <Input type="number" value={minStay} onChange={e => setMinStay(parseInt(e.target.value))} />
+          </div>
+        </div>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" onClick={onClose}>Cancel</Button>
+        <Button onClick={() => updateMutation.mutate({ id: plan.planId, nightlyPrice: price, minStay })} disabled={updateMutation.isPending}>
+          {updateMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          Save Changes
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  );
+}
+
+const CLEANING_COLORS = [
+  { bg: "bg-emerald-50", border: "border-emerald-200", text: "text-emerald-700", icon: "text-emerald-500" },
+  { bg: "bg-sky-50", border: "border-sky-200", text: "text-sky-700", icon: "text-sky-500" },
+  { bg: "bg-violet-50", border: "border-violet-200", text: "text-violet-700", icon: "text-violet-500" },
+  { bg: "bg-amber-50", border: "border-amber-200", text: "text-amber-700", icon: "text-amber-500" },
+];
+
+const BOOKING_INFO_COLORS = [
+  { bg: "bg-slate-100", border: "border-slate-300", text: "text-slate-700", bar: "bg-slate-400" },
+  { bg: "bg-blue-100", border: "border-blue-300", text: "text-blue-700", bar: "bg-blue-400" },
+  { bg: "bg-purple-100", border: "border-purple-300", text: "text-purple-700", bar: "bg-purple-400" },
+  { bg: "bg-rose-100", border: "border-rose-300", text: "text-rose-700", bar: "bg-rose-400" },
+];
+
+// ─── Cleaning Slot Modal ───────────────────────────────────────────────────────
+
+function CleaningSlotModal({ slot, onClose }: { slot: { from: Date; to: Date; property: string } | null, onClose: () => void }) {
+  if (!slot) return null;
+
+  return (
+    <DialogContent className="sm:max-w-[425px]">
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2">
+          <SoapDispenserDroplet className="h-5 w-5 text-emerald-500" />
+          Okno sprzątania
+        </DialogTitle>
+      </DialogHeader>
+      <div className="py-6 space-y-6">
+        <div className="flex items-center gap-4">
+          <div className="h-12 w-12 rounded-full bg-emerald-50 flex items-center justify-center text-emerald-600">
+            <Home className="h-6 w-6" />
+          </div>
+          <div>
+            <h4 className="font-bold text-lg">{slot.property}</h4>
+            <p className="text-sm text-muted-foreground">Czas na sprzątanie i konserwację</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="p-3 rounded-xl bg-muted/50 border">
+            <div className="flex items-center gap-2 mb-1 text-muted-foreground">
+              <Clock className="h-3.5 w-3.5" />
+              <span className="text-[10px] font-bold uppercase">Od (Wymeldowanie)</span>
+            </div>
+            <p className="text-sm font-bold">{format(slot.from, "dd MMM HH:mm")}</p>
+          </div>
+          <div className="p-3 rounded-xl bg-muted/50 border">
+            <div className="flex items-center gap-2 mb-1 text-muted-foreground">
+              <Clock className="h-3.5 w-3.5" />
+              <span className="text-[10px] font-bold uppercase">Do (Zameldowanie)</span>
+            </div>
+            <p className="text-sm font-bold">{format(slot.to, "dd MMM HH:mm")}</p>
+          </div>
+        </div>
+
+        <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4 flex flex-col items-center justify-center text-center">
+          <span className="text-[10px] font-bold text-emerald-700 uppercase mb-1">Dostępny czas</span>
+          <span className="text-2xl font-black text-emerald-800">
+            {Math.floor((slot.to.getTime() - slot.from.getTime()) / (1000 * 60 * 60))}h {Math.floor(((slot.to.getTime() - slot.from.getTime()) / (1000 * 60)) % 60)}m
+          </span>
+        </div>
+      </div>
+      <DialogFooter>
+        <Button onClick={onClose} className="w-full">Zamknij</Button>
+      </DialogFooter>
+    </DialogContent>
+  );
+}
+
+// ─── Property Settings Modal ──────────────────────────────────────────────────
+
+function PropertySettingsModal({ property, onClose }: { property: "Sadoles" | "Hacjenda", onClose: () => void }) {
+  const utils = trpc.useUtils();
+  const { data: settings, isLoading } = trpc.booking.getPropertySettings.useQuery({ property });
+  
+  const [fixedFee, setFixedFee] = useState(800);
+  const [petFee, setPetFee] = useState(200);
+  const [lmDiscount, setLmDiscount] = useState(0.05);
+  const [lmDays, setLmDays] = useState(14);
+  const [peopleDiscounts, setPeopleDiscounts] = useState<{ maxGuests: number, multiplier: number }[]>([]);
+  const [stayDiscounts, setStayDiscounts] = useState<{ minNights: number, discount: number }[]>([]);
+
+  useEffect(() => {
+    if (settings) {
+      setFixedFee(settings.fixedBookingPrice);
+      setPetFee(settings.petFee ?? 200);
+      setLmDiscount(parseFloat(String(settings.lastMinuteDiscount ?? "0.05")));
+      setLmDays(settings.lastMinuteDays ?? 14);
+      
+      const pDisc = typeof settings.peopleDiscount === 'string' 
+        ? JSON.parse(settings.peopleDiscount) 
+        : (settings.peopleDiscount || []);
+      setPeopleDiscounts(pDisc);
+      
+      const sDisc = typeof settings.stayDurationDiscounts === 'string'
+        ? JSON.parse(settings.stayDurationDiscounts)
+        : (settings.stayDurationDiscounts || []);
+      setStayDiscounts(sDisc);
+    }
+  }, [settings]);
+
+  const updateMutation = trpc.pricing.updateSettings.useMutation({
+    onSuccess: () => {
+      toast.success("Property settings updated");
+      utils.booking.getPropertySettings.invalidate({ property });
+      onClose();
+    },
+    onError: (err) => toast.error(err.message)
+  });
+
+  if (isLoading) return <div className="p-10 text-center"><Loader2 className="h-8 w-8 animate-spin mx-auto" /></div>;
+
+  const handleSave = () => {
+    updateMutation.mutate({
+      property,
+      fixedBookingPrice: fixedFee,
+      petFee,
+      peopleDiscount: peopleDiscounts,
+      lastMinuteDiscount: lmDiscount,
+      lastMinuteDays: lmDays,
+      stayDurationDiscounts: stayDiscounts,
+    });
+  };
+
+  return (
+    <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogHeader>
+        <DialogTitle>Object Price Settings — {property}</DialogTitle>
+      </DialogHeader>
+      
+      <div className="space-y-6 py-4">
+        {/* Basic Fees */}
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label>Fixed Booking Fee (PLN)</Label>
+            <Input type="number" value={fixedFee} onChange={e => setFixedFee(parseInt(e.target.value) || 0)} />
+          </div>
+          <div className="space-y-2">
+            <Label>Pet Fee (PLN per pet)</Label>
+            <Input type="number" value={petFee} onChange={e => setPetFee(parseInt(e.target.value) || 0)} />
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <Label>Last Minute Discount (%)</Label>
+            <Input type="number" step="0.01" value={lmDiscount} onChange={e => setLmDiscount(parseFloat(e.target.value) || 0)} />
+            <p className="text-[10px] text-muted-foreground">e.g. 0.05 for 5%</p>
+          </div>
+          <div className="space-y-2">
+            <Label>Last Minute Days</Label>
+            <Input type="number" value={lmDays} onChange={e => setLmDays(parseInt(e.target.value) || 0)} />
+          </div>
+        </div>
+
+        {/* People Discounts */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <Label className="text-base font-semibold">People Multipliers</Label>
+            <Button variant="outline" size="sm" onClick={() => setPeopleDiscounts([...peopleDiscounts, { maxGuests: 0, multiplier: 1.0 }])}>
+              <Plus className="h-3.5 w-3.5 mr-1" /> Add Bracket
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {[...peopleDiscounts].sort((a,b) => a.maxGuests - b.maxGuests).map((d, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <div className="flex-1 flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground min-w-[60px]">Up to</span>
+                  <Input type="number" className="h-8" value={d.maxGuests} onChange={e => {
+                    const newD = [...peopleDiscounts];
+                    newD[i].maxGuests = parseInt(e.target.value) || 0;
+                    setPeopleDiscounts(newD);
+                  }} />
+                  <span className="text-xs text-muted-foreground">guests:</span>
+                </div>
+                <div className="flex-1 flex items-center gap-2">
+                  <Input type="number" step="0.01" className="h-8" value={d.multiplier} onChange={e => {
+                    const newD = [...peopleDiscounts];
+                    newD[i].multiplier = parseFloat(e.target.value) || 0;
+                    setPeopleDiscounts(newD);
+                  }} />
+                  <span className="text-xs text-muted-foreground">multiplier</span>
+                </div>
+                <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => {
+                  setPeopleDiscounts(peopleDiscounts.filter((_, idx) => idx !== i));
+                }}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+            {peopleDiscounts.length === 0 && <p className="text-xs text-muted-foreground italic">No guest count multipliers defined.</p>}
+          </div>
+        </div>
+
+        {/* Stay Duration Discounts */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <Label className="text-base font-semibold">Stay Duration Discounts</Label>
+            <Button variant="outline" size="sm" onClick={() => setStayDiscounts([...stayDiscounts, { minNights: 0, discount: 0 }])}>
+              <Plus className="h-3.5 w-3.5 mr-1" /> Add Discount
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {[...stayDiscounts].sort((a,b) => b.minNights - a.minNights).map((d, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <div className="flex-1 flex items-center gap-2">
+                  <Input type="number" className="h-8" value={d.minNights} onChange={e => {
+                    const newD = [...stayDiscounts];
+                    newD[i].minNights = parseInt(e.target.value) || 0;
+                    setStayDiscounts(newD);
+                  }} />
+                  <span className="text-xs text-muted-foreground">nights or more:</span>
+                </div>
+                <div className="flex-1 flex items-center gap-2">
+                  <Input type="number" step="0.01" className="h-8" value={d.discount} onChange={e => {
+                    const newD = [...stayDiscounts];
+                    newD[i].discount = parseFloat(e.target.value) || 0;
+                    setStayDiscounts(newD);
+                  }} />
+                  <span className="text-xs text-muted-foreground">discount (%)</span>
+                </div>
+                <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => {
+                  setStayDiscounts(stayDiscounts.filter((_, idx) => idx !== i));
+                }}>
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+            {stayDiscounts.length === 0 && <p className="text-xs text-muted-foreground italic">No duration-based discounts defined.</p>}
+          </div>
+        </div>
+      </div>
+
+      <DialogFooter>
+        <Button variant="outline" onClick={onClose}>Cancel</Button>
+        <Button onClick={handleSave} disabled={updateMutation.isPending}>
+          {updateMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+          Save All Settings
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  );
+}
+
 // ─── Property Calendar Component ──────────────────────────────────────────────
 
 function PropertyCalendar({
   property,
   bookings,
+  pricing,
+  viewMode,
   month,
   onSelectBooking,
   onCreateBooking,
+  onSelectPricingPlan,
+  onSelectCleaningSlot,
 }: {
   property: string;
   bookings: Booking[];
+  pricing: any[];
+  viewMode: "bookings" | "pricing" | "cleaning";
   month: Date;
   onSelectBooking: (b: Partial<Booking>) => void;
   onCreateBooking: (property: string, date: Date) => void;
+  onSelectPricingPlan: (plan: any) => void;
+  onSelectCleaningSlot?: (slot: { from: Date; to: Date; property: string }) => void;
 }) {
-  const [tooltip, setTooltip] = useState<{ booking: Booking; x: number; y: number } | null>(null);
+  const [tooltip, setTooltip] = useState<{ content: React.ReactNode; x: number; y: number } | null>(null);
 
   const monthStart = startOfMonth(month);
   const monthEnd = endOfMonth(month);
   const days = eachDayOfInterval({ start: monthStart, end: monthEnd });
+
+  const propName = property === "Sadoleś" ? "Sadoles" : property;
+  const propBookings = useMemo(() => 
+    bookings.filter(b => b.property === propName).sort((a,b) => new Date(a.checkIn).getTime() - new Date(b.checkIn).getTime()),
+    [bookings, propName]
+  );
+
+  const cleaningSlots = useMemo(() => {
+    const slots: { from: Date; to: Date; property: string }[] = [];
+    for (let i = 0; i < propBookings.length - 1; i++) {
+      const current = propBookings[i];
+      const next = propBookings[i+1];
+      const from = new Date(current.checkOut);
+      const to = new Date(next.checkIn);
+      
+      if (to > from) {
+        slots.push({ from, to, property });
+      }
+    }
+    return slots;
+  }, [propBookings, property]);
 
   // Add padding days for the start of the week (assuming week starts on Monday)
   const firstDayOfWeek = (getDay(monthStart) + 6) % 7;
@@ -55,9 +389,21 @@ function PropertyCalendar({
 
   return (
     <div className="bg-card border rounded-xl overflow-hidden shadow-sm relative">
-      <div className="bg-muted/30 px-4 py-3 border-b flex items-center gap-2">
-        <Home className="h-4 w-4 text-muted-foreground" />
-        <h3 className="font-semibold">{property}</h3>
+      <div className="bg-muted/30 px-4 py-3 border-b flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Home className="h-4 w-4 text-muted-foreground" />
+          <h3 className="font-semibold">{property}</h3>
+        </div>
+        {viewMode === "pricing" && (
+          <span className="text-[10px] font-bold text-muted-foreground uppercase bg-muted px-2 py-0.5 rounded">
+            Pricing Plan View
+          </span>
+        )}
+        {viewMode === "cleaning" && (
+          <span className="text-[10px] font-bold text-emerald-600 uppercase bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100 flex items-center gap-1">
+            <SoapDispenserDroplet className="h-3 w-3" /> Widok sprzątania
+          </span>
+        )}
       </div>
 
       <div className="grid grid-cols-7 text-center border-b bg-muted/10">
@@ -74,87 +420,218 @@ function PropertyCalendar({
         ))}
 
         {days.map((day) => {
+          const propName = property === "Sadoleś" ? "Sadoles" : property;
+          
           const dayBookings = bookings.filter(
-            (b) => {
-              const matchesProperty = 
-                b.property === property || 
-                (property === "Sadoleś" && b.property === "Sadoles") ||
-                (property === "Sadoles" && b.property === "Sadoleś");
-              
-              return matchesProperty && isSameDay(new Date(b.checkIn), day);
-            }
+            (b) => b.property === propName && isSameDay(new Date(b.checkIn), day)
           );
 
-          // Find bookings that cover this day (ongoing)
           const ongoingBookings = bookings.filter(
-            (b) => {
-              const matchesProperty = 
-                b.property === property || 
-                (property === "Sadoleś" && b.property === "Sadoles") ||
-                (property === "Sadoles" && b.property === "Sadoleś");
-
-              return matchesProperty && 
-                new Date(b.checkIn) < day &&
-                new Date(b.checkOut) > day;
-            }
+            (b) => b.property === propName && new Date(b.checkIn) < day && new Date(b.checkOut) > day
           );
+
+          const dayStr = format(day, "yyyy-MM-dd");
+          const dayPricing = pricing.find(p => p.date === dayStr);
+          
+          let planType = "";
+          if (dayPricing) {
+            const parts = dayPricing.planName.split(" ");
+            planType = parts[1] || "";
+            if (planType === "Mid") planType = "Mixed";
+          }
+          
+          let bgColor = "#ffffff";
+          let bgClass = "";
+          if (viewMode === "pricing") bgColor = PLAN_COLORS[planType] || "#ffffff";
+          else if (viewMode === "cleaning") {
+            const activeBooking = bookings.find(b => b.property === propName && b.status !== "cancelled" && (
+              isSameDay(startOfDay(new Date(b.checkIn)), startOfDay(day)) ||
+              (startOfDay(day) > startOfDay(new Date(b.checkIn)) && startOfDay(day) <= startOfDay(new Date(b.checkOut)))
+            ));
+            
+            if (activeBooking) {
+              const bIdx = propBookings.findIndex(pb => pb.id === activeBooking.id);
+              const color = BOOKING_INFO_COLORS[bIdx % BOOKING_INFO_COLORS.length];
+              bgClass = color.bg;
+              bgColor = ""; // Use class instead
+            }
+          }
+
+          const isClickable = viewMode === "cleaning" 
+            ? !(dayBookings.length > 0 || ongoingBookings.length > 0)
+            : true;
 
           return (
             <div 
               key={day.toString()} 
-              className="border-r border-b p-1 min-h-[80px] last:border-r-0 group cursor-pointer hover:bg-muted/50 transition-colors"
-              onClick={() => onCreateBooking(property, day)}
+              className={cn(
+                "border-r border-b p-1 min-h-[80px] last:border-r-0 group transition-colors",
+                bgClass,
+                isClickable ? "cursor-pointer hover:border-primary/50" : "cursor-not-allowed"
+              )}
+              style={bgColor ? { backgroundColor: bgColor } : {}}
+              onClick={() => {
+                if (!isClickable) return;
+                if (viewMode === "bookings") onCreateBooking(property, day);
+                else if (viewMode === "pricing" && dayPricing) onSelectPricingPlan(dayPricing);
+              }}
             >
-              <div className="text-right">
+              <div className="text-right flex justify-between items-start">
+                {viewMode === "pricing" && dayPricing && (
+                  <span className="text-[9px] font-bold text-muted-foreground/60 p-0.5 leading-none">
+                    {dayPricing.nightlyPrice} zł
+                  </span>
+                )}
+                <div className="flex-1" />
                 <span className={`text-xs ${isSameDay(day, new Date()) ? "bg-primary text-white h-5 w-5 inline-flex items-center justify-center rounded-full" : "text-muted-foreground"}`}>
                   {format(day, "d")}
                 </span>
               </div>
-              <div className="mt-1 space-y-1">
-                {/* Visual for ongoing bookings (horizontal lines) */}
-                {ongoingBookings.map((b) => {
-                  const colors = CHANNEL_COLORS[b.channel] || CHANNEL_COLORS.unknown;
-                  return (
-                    <div
-                      key={`ongoing-${b.id}`}
-                      className="h-1.5 rounded-full opacity-40"
-                      style={{ backgroundColor: colors.bg, border: `1px solid ${colors.border}` }}
-                    />
-                  );
-                })}
 
-                {/* Main booking entry (shown on start day) */}
-                {dayBookings.map((b) => {
-                  const colors = CHANNEL_COLORS[b.channel] || CHANNEL_COLORS.unknown;
-                  const cin = isSameDay(new Date(b.checkIn), day);
-                  const cout = isSameDay(new Date(b.checkOut), day);
+              {viewMode === "bookings" ? (
+                <div className="mt-1 space-y-1">
+                  {ongoingBookings.map((b) => {
+                    const colors = CHANNEL_COLORS[b.channel] || CHANNEL_COLORS.unknown;
+                    return (
+                      <div
+                        key={`ongoing-${b.id}`}
+                        className="h-1.5 rounded-full opacity-40"
+                        style={{ backgroundColor: colors.bg, border: `1px solid ${colors.border}` }}
+                      />
+                    );
+                  })}
 
-                  return (
-                    <div
-                      key={b.id}
-                      className="text-[10px] leading-tight px-1.5 py-1 rounded border shadow-sm cursor-pointer transition-transform hover:scale-105"
-                      style={{
-                        backgroundColor: colors.bg,
-                        color: colors.text,
-                        borderLeft: `3px solid ${colors.border}`,
-                        opacity: b.status === "finished" ? 0.6 : 1,
-                      }}
-                      title={`${b.guestName ?? "Guest"} · ${CHANNEL_LABELS[b.channel] ?? b.channel} · ${format(new Date(b.checkIn), "dd MMM")}–${format(new Date(b.checkOut), "dd MMM")}`}
-                      onMouseEnter={(e) => {
-                        const rect = (e.target as HTMLElement).getBoundingClientRect();
-                        setTooltip({ booking: b, x: rect.left, y: rect.bottom + 4 });
-                      }}
-                      onMouseLeave={() => setTooltip(null)}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onSelectBooking(b);
-                      }}
-                    >
-                      {cin ? "▶ " : ""}{b.guestName ?? CHANNEL_LABELS[b.channel] ?? b.channel}{cout ? " ◀" : ""}
-                    </div>
-                  );
-                })}
-              </div>
+                  {dayBookings.map((b) => {
+                    const colors = CHANNEL_COLORS[b.channel] || CHANNEL_COLORS.unknown;
+                    const cin = isSameDay(new Date(b.checkIn), day);
+                    const cout = isSameDay(new Date(b.checkOut), day);
+
+                    return (
+                      <div
+                        key={b.id}
+                        className="text-[10px] leading-tight px-1.5 py-1 rounded border shadow-sm cursor-pointer transition-transform hover:scale-105"
+                        style={{
+                          backgroundColor: colors.bg,
+                          color: colors.text,
+                          borderLeft: `3px solid ${colors.border}`,
+                          opacity: b.status === "finished" ? 0.6 : 1,
+                        }}
+                        onMouseEnter={(e) => {
+                          const rect = (e.target as HTMLElement).getBoundingClientRect();
+                          setTooltip({ 
+                            content: (
+                              <>
+                                <strong>{b.guestName || "Unknown"}</strong><br />
+                                {format(new Date(b.checkIn), "dd.MM HH:mm")} - {format(new Date(b.checkOut), "dd.MM HH:mm")}<br />
+                                {b.status}
+                              </>
+                            ), 
+                            x: rect.left, 
+                            y: rect.bottom + 4 
+                          });
+                        }}
+                        onMouseLeave={() => setTooltip(null)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectBooking(b);
+                        }}
+                      >
+                        {cin ? "▶ " : ""}{b.guestName ?? CHANNEL_LABELS[b.channel] ?? b.channel}{cout ? " ◀" : ""}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : viewMode === "pricing" ? (
+                <div className="mt-2 flex flex-col items-center justify-center gap-1">
+                  {dayPricing && (
+                    <>
+                      <div className="text-[8px] font-bold uppercase tracking-tighter text-center leading-none text-muted-foreground/80">
+                        {dayPricing.planName.split(": ")[1]}
+                      </div>
+                      <div className="text-[9px] font-medium text-muted-foreground/60">
+                        min {dayPricing.minStay}n
+                      </div>
+                    </>
+                  )}
+                </div>
+              ) : (
+                <div className="mt-1 space-y-1">
+                  {/* Cleaning slots first */}
+                  {cleaningSlots.filter(slot => {
+                    const s = startOfDay(slot.from);
+                    const e = startOfDay(slot.to);
+                    const d = startOfDay(day);
+                    return d >= s && d <= e;
+                  }).map((slot, idx) => {
+                    const starts = isSameDay(slot.from, day);
+                    const ends = isSameDay(slot.to, day);
+                    
+                    // Use index in original array to ensure color consistency across days
+                    const originalIdx = cleaningSlots.findIndex(s => s.from.getTime() === slot.from.getTime());
+                    const color = CLEANING_COLORS[originalIdx % CLEANING_COLORS.length];
+
+                    return (
+                      <div
+                        key={`cleaning-${idx}`}
+                        className={cn(
+                          "text-[10px] leading-tight px-1.5 py-1 cursor-pointer transition-all flex items-center gap-1 group/slot",
+                          color.text,
+                          starts && ends ? cn("rounded border shadow-sm mx-0.5", color.bg, color.border) :
+                          starts ? cn("rounded-l border-y border-l ml-0.5", color.bg, color.border) :
+                          ends ? cn("rounded-r border-y border-r mr-0.5", color.bg, color.border) :
+                          cn("border-y", color.bg, color.border)
+                        )}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectCleaningSlot?.(slot);
+                        }}
+                      >
+                        <SoapDispenserDroplet className={cn("h-2.5 w-2.5 shrink-0", color.icon)} />
+                        <span className="truncate font-medium">
+                          {starts ? format(slot.from, "HH:mm") : (ends ? format(slot.to, "HH:mm") : "")}
+                          {!starts && !ends && <span className="opacity-0">.</span>}
+                        </span>
+                      </div>
+                    );
+                  })}
+
+                  {/* Booked blocks in cleaning view - info on first day, thin bar on following days */}
+                  {bookings.filter(b => b.property === propName && b.status !== "cancelled" && (
+                    isSameDay(startOfDay(new Date(b.checkIn)), startOfDay(day)) ||
+                    (startOfDay(day) > startOfDay(new Date(b.checkIn)) && startOfDay(day) <= startOfDay(new Date(b.checkOut)))
+                  )).map((b) => {
+                    const isFirstDay = isSameDay(startOfDay(new Date(b.checkIn)), startOfDay(day));
+                    
+                    // Determine color based on booking sequence
+                    const bIdx = propBookings.findIndex(pb => pb.id === b.id);
+                    const color = BOOKING_INFO_COLORS[bIdx % BOOKING_INFO_COLORS.length];
+
+                    if (isFirstDay) {
+                      return (
+                        <div
+                          key={`info-start-${b.id}`}
+                          className={cn(
+                            "text-[9px] leading-tight px-1 py-0.5 rounded border flex items-center justify-between opacity-80",
+                            color.bg, color.text, color.border
+                          )}
+                        >
+                          <span className="font-bold">{b.guestCount || 0} os.</span>
+                          <span>{b.animalsCount || 0} zw.</span>
+                        </div>
+                      );
+                    }
+                    return (
+                      <div
+                        key={`info-ongoing-${b.id}`}
+                        className={cn(
+                          "h-1 rounded-full border opacity-60 mx-1",
+                          color.bar, color.border
+                        )}
+                      />
+                    );
+                  })}
+                </div>
+              )}
             </div>
           );
         })}
@@ -166,18 +643,16 @@ function PropertyCalendar({
           className="fixed z-50 bg-popover text-popover-foreground px-2 py-1 rounded border shadow-lg text-[10px] pointer-events-none"
           style={{ left: tooltip.x, top: tooltip.y }}
         >
-          <strong>{tooltip.booking.guestName || "Unknown"}</strong><br />
-          {format(new Date(tooltip.booking.checkIn), "dd.MM")} - {format(new Date(tooltip.booking.checkOut), "dd.MM")}<br />
-          {tooltip.booking.status}
+          {tooltip.content}
         </div>
       )}
     </div>
   );
 }
 
-// ─── Legend ───────────────────────────────────────────────────────────────────
+// ─── Legends ──────────────────────────────────────────────────────────────────
 
-function Legend() {
+function BookingLegend() {
   return (
     <div className="flex flex-wrap gap-4 mb-6 px-2">
       {Object.entries(CHANNEL_LABELS).map(([key, label]) => {
@@ -193,32 +668,106 @@ function Legend() {
   );
 }
 
+function PricingLegend() {
+  const types = [
+    { label: "Low Season", color: PLAN_COLORS.Low },
+    { label: "Mixed Season", color: PLAN_COLORS.Mixed },
+    { label: "High Season", color: PLAN_COLORS.High },
+    { label: "Special Holiday", color: PLAN_COLORS.Special },
+    { label: "New Year", color: PLAN_COLORS.New },
+  ];
+
+  return (
+    <div className="flex flex-wrap gap-4 mb-6 px-2">
+      {types.map((t) => (
+        <div key={t.label} className="flex items-center gap-1.5">
+          <div className="h-3 w-3 rounded-sm border" style={{ backgroundColor: t.color }} />
+          <span className="text-xs font-medium text-muted-foreground">{t.label}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function CleaningLegend() {
+  return (
+    <div className="flex flex-wrap gap-4 mb-6 px-2">
+      <div className="flex items-center gap-1.5">
+        <div className="h-3 w-3 rounded-sm border border-emerald-200 bg-emerald-50" />
+        <span className="text-xs font-medium text-muted-foreground">Okno sprzątania</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <div className="h-3 w-3 rounded-sm border border-slate-200 bg-slate-50" />
+        <span className="text-xs font-medium text-muted-foreground">Zajęte (Brak dostępu)</span>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Calendar Page ───────────────────────────────────────────────────────
 
 export default function CalendarView() {
+  const { user } = useAuth();
   const [month, setMonth] = useState(() => startOfMonth(new Date()));
+  const [viewMode, setViewMode] = useState<"bookings" | "pricing" | "cleaning">(() => {
+    if (user?.viewAccess) return user.viewAccess as any;
+    return "bookings";
+  });
   const [selectedBooking, setSelectedBooking] = useState<Partial<Booking> | null>(null);
+  const [selectedPlan, setSelectedPlan] = useState<any>(null);
+  const [selectedCleaningSlot, setSelectedCleaningSlot] = useState<{ from: Date; to: Date; property: string } | null>(null);
+  const [settingsProperty, setSettingsProperty] = useState<"Sadoles" | "Hacjenda" | null>(null);
 
-  // Fetch bookings for a wide window around the current month (±2 months)
+  // Sync viewMode if user changes (rare but good for consistency)
+  useEffect(() => {
+    if (user?.viewAccess) {
+      setViewMode(user.viewAccess as any);
+    }
+  }, [user]);
+
   const windowStart = useMemo(() => subMonths(month, 1), [month]);
   const windowEnd = useMemo(() => endOfMonth(addMonths(month, 1)), [month]);
 
-  const { data: bookingList = [], isLoading } = trpc.bookings.list.useQuery({
+  const { data: bookingList = [], isLoading: isLoadingBookings } = trpc.bookings.list.useQuery({
     checkInFrom: windowStart,
     checkInTo: windowEnd,
     limit: 500,
-  });
+  }, { enabled: viewMode === "bookings" || viewMode === "cleaning" });
 
-  // Combine real bookings and filter out cancelled ones
+  const { data: pricingS = [], isLoading: isLoadingS, refetch: refetchS } = trpc.pricing.getPricing.useQuery({
+    property: "Sadoles",
+    from: windowStart,
+    to: windowEnd,
+  }, { enabled: viewMode === "pricing" && (!user?.propertyAccess || user.propertyAccess === "Sadoles") });
+
+  const { data: pricingH = [], isLoading: isLoadingH, refetch: refetchH } = trpc.pricing.getPricing.useQuery({
+    property: "Hacjenda",
+    from: windowStart,
+    to: windowEnd,
+  }, { enabled: viewMode === "pricing" && (!user?.propertyAccess || user.propertyAccess === "Hacjenda") });
+
   const allBookings = useMemo(() => {
-    return bookingList.filter(b => b.status !== "cancelled");
-  }, [bookingList]);
+    let list = bookingList.filter(b => b.status !== "cancelled");
+    if (user?.propertyAccess) {
+      list = list.filter(b => b.property === user.propertyAccess);
+    }
+    return list;
+  }, [bookingList, user]);
+
+  const isDataLoading = (viewMode === "bookings" || viewMode === "cleaning") ? isLoadingBookings : (isLoadingS || isLoadingH);
+
+  const canSeeBookings = !user?.viewAccess || user.viewAccess === "bookings";
+  const canSeePricing = !user?.viewAccess || user.viewAccess === "pricing";
+  const canSeeCleaning = !user?.viewAccess || user.viewAccess === "cleaning";
+
+  const showSadoles = !user?.propertyAccess || user.propertyAccess === "Sadoles";
+  const showHacjenda = !user?.propertyAccess || user.propertyAccess === "Hacjenda";
 
   return (
     <DashboardLayout>
       <div className="max-w-7xl mx-auto">
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
           <div className="flex items-center gap-4">
             <h1 className="text-2xl font-bold tracking-tight">Calendar</h1>
             <div className="flex items-center bg-muted rounded-lg p-1">
@@ -233,41 +782,88 @@ export default function CalendarView() {
               </Button>
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={() => setMonth(startOfMonth(new Date()))}>
-            Today
-          </Button>
+
+          <div className="flex items-center gap-2">
+            {viewMode === "pricing" && (
+              <div className="flex items-center gap-1 mr-2">
+                <Button variant="outline" size="sm" className="gap-2" onClick={() => setSettingsProperty("Sadoles")}>
+                  <Settings className="h-3.5 w-3.5" /> Sadoleś Settings
+                </Button>
+                <Button variant="outline" size="sm" className="gap-2" onClick={() => setSettingsProperty("Hacjenda")}>
+                  <Settings className="h-3.5 w-3.5" /> Hacjenda Settings
+                </Button>
+              </div>
+            )}
+            <Tabs defaultValue="bookings" value={viewMode} onValueChange={(v) => setViewMode(v as any)}>
+              <TabsList className={cn("grid", canSeeBookings && canSeePricing && canSeeCleaning ? "w-[320px] grid-cols-3" : "w-[240px] grid-cols-2")}>
+                {canSeeBookings && (
+                  <TabsTrigger value="bookings" className="flex items-center gap-2">
+                    <CalendarIcon className="h-3.5 w-3.5" />
+                    Bookings
+                  </TabsTrigger>
+                )}
+                {canSeePricing && (
+                  <TabsTrigger value="pricing" className="flex items-center gap-2">
+                    <Tag className="h-3.5 w-3.5" />
+                    Pricing
+                  </TabsTrigger>
+                )}
+                {canSeeCleaning && (
+                  <TabsTrigger value="cleaning" className="flex items-center gap-2">
+                    <SoapDispenserDroplet className="h-3.5 w-3.5" />
+                    Sprzątanie
+                  </TabsTrigger>
+                )}
+              </TabsList>
+            </Tabs>
+            <Button variant="outline" size="sm" onClick={() => setMonth(startOfMonth(new Date()))}>
+              Today
+            </Button>
+          </div>
         </div>
 
-        <Legend />
+        {viewMode === "bookings" ? <BookingLegend /> : viewMode === "pricing" ? <PricingLegend /> : <CleaningLegend />}
 
         <DoubleBookingBanner />
 
-        {isLoading ? (
-          <div className="text-center py-20 text-muted-foreground">Loading bookings…</div>
+        {isDataLoading ? (
+          <div className="text-center py-20 text-muted-foreground">Loading calendar data…</div>
         ) : (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            <PropertyCalendar
-              property="Sadoleś"
-              bookings={allBookings}
-              month={month}
-              onSelectBooking={setSelectedBooking}
-              onCreateBooking={(p, d) => setSelectedBooking({ 
-                property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
-                checkIn: d,
-                checkOut: addDays(d, 2)
-              })}
-            />
-            <PropertyCalendar
-              property="Hacjenda"
-              bookings={allBookings}
-              month={month}
-              onSelectBooking={setSelectedBooking}
-              onCreateBooking={(p, d) => setSelectedBooking({ 
-                property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
-                checkIn: d,
-                checkOut: addDays(d, 2)
-              })}
-            />
+            {showSadoles && (
+              <PropertyCalendar
+                property="Sadoleś"
+                bookings={allBookings}
+                pricing={pricingS}
+                viewMode={viewMode}
+                month={month}
+                onSelectBooking={setSelectedBooking}
+                onSelectPricingPlan={setSelectedPlan}
+                onSelectCleaningSlot={setSelectedCleaningSlot}
+                onCreateBooking={(p, d) => setSelectedBooking({ 
+                  property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
+                  checkIn: d,
+                  checkOut: addDays(d, 2)
+                })}
+              />
+            )}
+            {showHacjenda && (
+              <PropertyCalendar
+                property="Hacjenda"
+                bookings={allBookings}
+                pricing={pricingH}
+                viewMode={viewMode}
+                month={month}
+                onSelectBooking={setSelectedBooking}
+                onSelectPricingPlan={setSelectedPlan}
+                onSelectCleaningSlot={setSelectedCleaningSlot}
+                onCreateBooking={(p, d) => setSelectedBooking({ 
+                  property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
+                  checkIn: d,
+                  checkOut: addDays(d, 2)
+                })}
+              />
+            )}
           </div>
         )}
       </div>
@@ -278,6 +874,40 @@ export default function CalendarView() {
           <BookingDetailModal
             booking={selectedBooking}
             onClose={() => setSelectedBooking(null)}
+          />
+        )}
+      </Dialog>
+
+      {/* Pricing plan editor modal */}
+      <Dialog open={!!selectedPlan} onOpenChange={(open) => !open && setSelectedPlan(null)}>
+        {selectedPlan && (
+          <PricingPlanModal
+            plan={selectedPlan}
+            onClose={() => setSelectedPlan(null)}
+            onUpdated={() => {
+              refetchS();
+              refetchH();
+            }}
+          />
+        )}
+      </Dialog>
+
+      {/* Property settings modal */}
+      <Dialog open={!!settingsProperty} onOpenChange={(open) => !open && setSettingsProperty(null)}>
+        {settingsProperty && (
+          <PropertySettingsModal
+            property={settingsProperty}
+            onClose={() => setSettingsProperty(null)}
+          />
+        )}
+      </Dialog>
+
+      {/* Cleaning slot modal */}
+      <Dialog open={!!selectedCleaningSlot} onOpenChange={(open) => !open && setSelectedCleaningSlot(null)}>
+        {selectedCleaningSlot && (
+          <CleaningSlotModal
+            slot={selectedCleaningSlot}
+            onClose={() => setSelectedCleaningSlot(null)}
           />
         )}
       </Dialog>

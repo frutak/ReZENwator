@@ -7,14 +7,44 @@
 
 import ical from "node-ical";
 import type { VEvent, ParameterValue } from "node-ical";
-import { and, eq, ne, inArray } from "drizzle-orm";
+import { and, eq, ne, inArray, gte } from "drizzle-orm";
+import { setHours, setMinutes } from "date-fns";
+import axios from "axios";
 import { getDb } from "../db";
-import { bookings, syncLogs } from "../../drizzle/schema";
-import { ICAL_FEEDS, type ICalFeed } from "./icalConfig";
+import { bookings } from "../../drizzle/schema";
+import { getICalFeeds, type ICalFeed } from "./icalConfig";
 import { checkAndAlertDoubleBookings } from "./doubleBookingDetector";
 import { sendAlertEmail } from "../_core/email";
+import { Logger } from "../_core/logger";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Robust fetch with retry and timeout using axios */
+async function fetchWithRetry(url: string, retries = 2, timeout = 15000): Promise<string> {
+  let lastError: Error | unknown;
+  
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const response = await axios.get(url, { 
+        timeout,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+          'Accept': 'text/calendar, text/plain, */*'
+        }
+      });
+      return response.data;
+    } catch (err) {
+      lastError = err;
+      if (i < retries) {
+        const waitTime = Math.pow(2, i) * 1000;
+        console.warn(`[iCal] Fetch failed (attempt ${i + 1}/${retries + 1}), retrying in ${waitTime}ms...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+      }
+    }
+  }
+  
+  throw lastError;
+}
 
 /** Safely extract a string from a ParameterValue (which can be string or object) */
 function paramStr(val: ParameterValue | undefined): string {
@@ -42,7 +72,7 @@ function detectChannel(
 }
 
 /** Determines the initial deposit status based on channel. */
-function initialDepositStatus(
+export function initialDepositStatus(
   channel: ICalFeed["channel"]
 ): "pending" | "not_applicable" {
   if (channel === "airbnb" || channel === "booking") return "not_applicable";
@@ -50,7 +80,7 @@ function initialDepositStatus(
 }
 
 /** Determines the initial booking status based on channel. */
-function initialStatus(
+export function initialStatus(
   channel: ICalFeed["channel"]
 ): "pending" | "confirmed" {
   if (channel === "airbnb" || channel === "booking") return "confirmed";
@@ -76,37 +106,42 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
 
   const seenUids: string[] = [];
 
-  let events: Awaited<ReturnType<typeof ical.async.fromURL>>;
+  let events: Awaited<ReturnType<typeof ical.async.parseICS>>;
   try {
-    events = await ical.async.fromURL(feed.url);
+    const data = await fetchWithRetry(feed.url);
+    events = await ical.async.parseICS(data);
   } catch (err) {
-    const msg = `Failed to fetch iCal from ${feed.label}: ${String(err)}`;
+    const msg = `Failed to fetch/parse iCal from ${feed.label}: ${String(err)}`;
     console.error(`[iCal] ${msg}`);
     errors.push(msg);
 
-    await db.insert(syncLogs).values({
-      syncType: "ical",
+    await Logger.system("ical", {
       source: feed.label,
-      newBookings: 0,
-      updatedBookings: 0,
-      success: "false",
+      success: false,
       errorMessage: msg,
       durationMs: Date.now() - start,
-    }).catch(() => {});
+    });
 
     return { newBookings: 0, updatedBookings: 0, errors };
   }
-
   for (const [uid, event] of Object.entries(events)) {
     if (!event || event.type !== "VEVENT") continue;
 
     const vevent = event as VEvent;
     if (!vevent.start || !vevent.end) continue;
 
-    const checkIn = new Date(vevent.start);
-    const checkOut = new Date(vevent.end);
+    let checkIn = new Date(vevent.start);
+    let checkOut = new Date(vevent.end);
 
     if (isNaN(checkIn.getTime()) || isNaN(checkOut.getTime())) continue;
+
+    // Set default times if not present (iCal dates are often just YYYYMMDD)
+    if (checkIn.getHours() === 0 && checkIn.getMinutes() === 0) {
+      checkIn = setMinutes(setHours(checkIn, 16), 0);
+    }
+    if (checkOut.getHours() === 0 && checkOut.getMinutes() === 0) {
+      checkOut = setMinutes(setHours(checkOut, 10), 0);
+    }
     // Skip events that ended more than 1 year ago (historical cleanup)
     if (checkOut < new Date(Date.now() - 365 * 24 * 60 * 60 * 1000)) continue;
     // Skip placeholder blocks more than 363 days ahead (iCal channels block a year forward)
@@ -160,12 +195,29 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
         .limit(1);
 
       if (existingByUid.length > 0) {
-        // Update dates only (do not overwrite guest details or status set by email parser)
-        await db
-          .update(bookings)
-          .set({ checkIn, checkOut, icalSummary: summary.substring(0, 500) })
-          .where(eq(bookings.icalUid, icalUid));
-        updatedBookings++;
+        const existing = await db
+          .select({ id: bookings.id, checkIn: bookings.checkIn, checkOut: bookings.checkOut, icalSummary: bookings.icalSummary })
+          .from(bookings)
+          .where(eq(bookings.icalUid, icalUid))
+          .limit(1);
+        
+        const b = existing[0]!;
+        const normalizedSummary = summary.substring(0, 500);
+        
+        // Compare values to avoid redundant updates/logs
+        const datesChanged = b.checkIn.getTime() !== checkIn.getTime() || b.checkOut.getTime() !== checkOut.getTime();
+        const summaryChanged = b.icalSummary !== normalizedSummary;
+
+        if (datesChanged || summaryChanged) {
+          await db
+            .update(bookings)
+            .set({ checkIn, checkOut, icalSummary: normalizedSummary })
+            .where(eq(bookings.icalUid, icalUid));
+          
+          const changeDetail = datesChanged ? `Dates updated: ${checkIn.toLocaleDateString()} - ${checkOut.toLocaleDateString()}` : "Summary updated";
+          await Logger.bookingAction(b.id, "enrichment", changeDetail, `Feed: ${feed.label}`);
+          updatedBookings++;
+        }
         continue;
       }
 
@@ -211,7 +263,7 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
       }
 
       // No existing booking found — insert as new
-      await db.insert(bookings).values({
+      const [insertResult] = await db.insert(bookings).values({
         icalUid,
         property: feed.property,
         channel,
@@ -221,6 +273,12 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
         depositStatus,
         icalSummary: summary.substring(0, 500),
       });
+      
+      const newBookingId = (insertResult as any).insertId;
+      if (newBookingId) {
+        await Logger.bookingAction(newBookingId, "system", "Created via iCal sync", `Feed: ${feed.label}`);
+      }
+
       newBookings++;
       console.log(
         `[iCal] New booking: ${feed.label} | ${checkIn.toDateString()} → ${checkOut.toDateString()}`
@@ -230,6 +288,17 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
       console.error(`[iCal] ${msg}`);
       errors.push(msg);
     }
+  }
+
+  // Log successful sync for this specific feed
+  if (errors.length === 0) {
+    await Logger.system("ical", {
+      source: feed.label,
+      success: true,
+      newBookings,
+      updatedBookings,
+      durationMs: Date.now() - start,
+    });
   }
 
   // ─── Detect and handle cancellations ───────────────────────────────────────
@@ -267,6 +336,8 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
             .set({ status: "cancelled" })
             .where(eq(bookings.id, b.id));
           
+          await Logger.bookingAction(b.id, "status_change", "Marked as CANCELLED", `Reason: Removed from ${feed.label} iCal feed`);
+          
           console.log(`[iCal] Booking #${b.id} marked as CANCELLED (removed from future calendar: ${feed.label})`);
           
           // Notify host
@@ -294,17 +365,6 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
     console.error(`[iCal] Error handling cancellations for ${feed.label}:`, err);
   }
 
-  // Log the sync run
-  await db.insert(syncLogs).values({
-    syncType: "ical",
-    source: feed.label,
-    newBookings,
-    updatedBookings,
-    success: errors.length === 0 ? "true" : "false",
-    errorMessage: errors.length > 0 ? errors.slice(0, 3).join("; ") : null,
-    durationMs: Date.now() - start,
-  }).catch((e) => console.error("[iCal] Failed to write sync log:", e));
-
   return { newBookings, updatedBookings, errors };
 }
 
@@ -312,61 +372,65 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
  * Poll all configured iCal feeds sequentially.
  */
 export async function pollAllICalFeeds(): Promise<void> {
-  console.log(`[iCal] Starting poll of ${ICAL_FEEDS.length} feeds...`);
+  const allFeeds = getICalFeeds();
+  const activeFeeds = allFeeds.filter(f => !!f.url);
+  console.log(`[iCal] Starting poll of ${activeFeeds.length} feeds (out of ${allFeeds.length} total)...`);
+  const start = Date.now();
   let totalNew = 0;
   let totalUpdated = 0;
+  const allErrors: string[] = [];
 
-  for (const feed of ICAL_FEEDS) {
-    try {
-      const result = await pollICalFeed(feed);
-      totalNew += result.newBookings;
-      totalUpdated += result.updatedBookings;
-    } catch (err) {
-      console.error(`[iCal] Unhandled error for ${feed.label}:`, err);
-    }
-  }
-
-  // Auto-finish bookings whose checkout date has passed
-  await autoFinishBookings();
-
-  // Check for double-bookings and send alert if new conflicts found
   try {
-    const conflicts = await checkAndAlertDoubleBookings();
-    if (conflicts.length > 0) {
-      console.warn(`[iCal] ⚠️  ${conflicts.length} double-booking conflict(s) detected!`);
+    for (const feed of activeFeeds) {
+      try {
+        const result = await pollICalFeed(feed);
+        totalNew += result.newBookings;
+        totalUpdated += result.updatedBookings;
+        if (result.errors.length > 0) {
+          allErrors.push(`${feed.label}: ${result.errors[0]}`);
+        }
+      } catch (err) {
+        console.error(`[iCal] Unhandled error for ${feed.label}:`, err);
+        allErrors.push(`${feed.label}: Unhandled error`);
+      }
     }
-  } catch (err) {
-    console.error("[iCal] Double-booking check failed:", err);
+
+    // Log the consolidated sync run
+    await Logger.system("ical", {
+      source: "All iCal Feeds",
+      newBookings: totalNew,
+      updatedBookings: totalUpdated,
+      success: allErrors.length === 0,
+      errorMessage: allErrors.length > 0 ? allErrors.slice(0, 3).join("; ") : null,
+      durationMs: Date.now() - start,
+    });
+
+    // Check for double-bookings and send alert if new conflicts found
+    try {
+      const conflicts = await checkAndAlertDoubleBookings();
+      if (conflicts.length > 0) {
+        console.warn(`[iCal] ⚠️  ${conflicts.length} double-booking conflict(s) detected!`);
+      }
+    } catch (err) {
+      console.error("[iCal] Double-booking check failed:", err);
+    }
+  } catch (fatalErr) {
+    console.error("[iCal] Fatal error during pollAllICalFeeds:", fatalErr);
+    
+    // Log the failure to the database
+    await Logger.system("ical", {
+      source: "All iCal Feeds (Fatal)",
+      success: false,
+      errorMessage: String(fatalErr).slice(0, 500),
+      durationMs: Date.now() - start,
+    });
+
+    // Send email alert to host
+    await sendAlertEmail(
+      "⚠️ FATAL ERROR: iCal Sync Job Failed",
+      `The background iCal synchronization job encountered a fatal error and could not complete.\n\nError details: ${String(fatalErr)}\n\nTime: ${new Date().toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" })}`
+    );
   }
 
   console.log(`[iCal] Poll complete. New: ${totalNew}, Updated: ${totalUpdated}`);
-}
-
-/**
- * Automatically move bookings to 'finished' status when checkout date has passed.
- * Only applies to fully 'paid' bookings. 'portal_paid' or 'confirmed' bookings
- * must be manually moved to 'paid' first (once payment is received).
- */
-export async function autoFinishBookings(): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-
-  const now = new Date();
-
-  try {
-    // Get all fully paid bookings that have ended
-    const active = await db
-      .select({ id: bookings.id, checkOut: bookings.checkOut, status: bookings.status })
-      .from(bookings)
-      .where(eq(bookings.status, "paid"));
-
-    for (const b of active) {
-      if (b.checkOut < now) {
-        await db.update(bookings).set({ status: "finished" }).where(eq(bookings.id, b.id));
-        console.log(`[iCal] Booking #${b.id} auto-finished (checkout date passed)`);
-      }
-    }
-  } catch (err) {
-    console.error("[iCal] autoFinishBookings error:", err);
-  }
 }

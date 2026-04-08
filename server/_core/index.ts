@@ -5,6 +5,7 @@ import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
+import { registerThumbnailRoute } from "./thumbnails";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
@@ -40,6 +41,8 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   // OAuth callback under /api/oauth/callback
   registerOAuthRoutes(app);
+  // Thumbnail generation
+  registerThumbnailRoute(app);
 
   // iCal Export Route
   app.get("/api/export/:property.ics", async (req, res) => {
@@ -49,26 +52,19 @@ async function startServer() {
     const db = await getDb();
     if (!db) return res.status(500).send("Database unavailable");
 
+    // Only include bookings that are NOT cancelled.
+    // We include 'pending' and 'confirmed' to ensure dates are blocked as requested by the user.
     const activeBookings = await db
       .select()
       .from(bookings)
       .where(
         and(
           eq(bookings.property, property as any),
-          ne(bookings.status, "pending") // Don't block for non-finalized bookings if desired, or include them?
-          // User said "A successful booking should create a booking object (in "pending" state...) and block set of dates in use in the icals"
-          // So I SHOULD include pending if they are intended to block.
+          ne(bookings.status, "cancelled")
         )
       );
 
-    // Re-reading: "A successful booking should create a booking object (in "pending" state...) and block set of dates in use in the icals"
-    // So even pending should block.
-    const allPropertyBookings = await db
-      .select()
-      .from(bookings)
-      .where(eq(bookings.property, property as any));
-
-    const ics = generateIcalString(property, allPropertyBookings);
+    const ics = generateIcalString(property, activeBookings);
     res.setHeader("Content-Type", "text/calendar; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${propertyParam}.ics"`);
     res.send(ics);
@@ -82,6 +78,7 @@ async function startServer() {
       createContext,
     })
   );
+
   // development mode uses Vite, production mode uses static files
   if (process.env.NODE_ENV === "development") {
     await setupVite(app, server);

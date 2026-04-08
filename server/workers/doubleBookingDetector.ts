@@ -15,6 +15,7 @@ import { and, eq, ne, lt, gt } from "drizzle-orm";
 import { getDb } from "../db";
 import { bookings } from "../../drizzle/schema";
 import type { Booking } from "../../drizzle/schema";
+import { getRecipientForEmail } from "../_core/email";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -87,6 +88,8 @@ export async function detectDoubleBookings(): Promise<DoubleBookingConflict[]> {
   return conflicts;
 }
 
+import { ENV } from "../_core/env";
+
 // ─── Email alert ──────────────────────────────────────────────────────────────
 
 /**
@@ -97,9 +100,9 @@ export async function sendDoubleBookingAlert(
 ): Promise<void> {
   if (conflicts.length === 0) return;
 
-  const gmailUser = process.env.GMAIL_USER || "furtka.rentals@gmail.com";
+  const gmailUser = ENV.gmailUser;
   const gmailPass = process.env.GMAIL_APP_PASSWORD || "";
-  const alertRecipient = process.env.DOUBLE_BOOKING_ALERT_RECIPIENT || "szymonfurtak@hotmail.com";
+  const adminEmail = await getRecipientForEmail("alert");
 
   if (!gmailPass) {
     console.warn("[DoubleBooking] Gmail credentials not configured, skipping email alert");
@@ -160,7 +163,7 @@ Conflict ${i + 1}: ${c.property}
           <tbody>${htmlLines}</tbody>
         </table>
         <p style="margin:16px 0 0;font-size:12px;color:#6b7280">
-          Sent automatically by Rental Manager · furtka.rentals@gmail.com
+          Sent automatically by Rental Manager · ${gmailUser}
         </p>
       </div>
     </div>
@@ -169,12 +172,12 @@ Conflict ${i + 1}: ${c.property}
   try {
     await transporter.sendMail({
       from: `"Rental Manager" <${gmailUser}>`,
-      to: alertRecipient,
+      to: adminEmail,
       subject: `⚠️ DOUBLE BOOKING DETECTED — ${conflicts.length} conflict${conflicts.length > 1 ? "s" : ""} on ${conflicts[0].property}`,
       text: `Double-booking alert!\n\n${conflictLines}`,
       html,
     });
-    console.log(`[DoubleBooking] Alert email sent for ${conflicts.length} conflict(s) to ${alertRecipient}`);
+    console.log(`[DoubleBooking] Alert email sent for ${conflicts.length} conflict(s) to ${adminEmail}`);
   } catch (err) {
     console.error("[DoubleBooking] Failed to send alert email:", err);
   }
