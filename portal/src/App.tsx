@@ -1,10 +1,11 @@
 import { useState, useMemo, useEffect } from "react";
 import { Route, Switch, useLocation } from "wouter";
 import { trpc } from "./lib/trpc";
-import { format, eachDayOfInterval, isWithinInterval, addDays } from "date-fns";
-import { cn } from "./lib/utils";
+import { format, eachDayOfInterval, isWithinInterval, addDays, differenceInDays, startOfDay, setHours, setMinutes } from "date-fns";
+import { pl, enGB } from "date-fns/locale";
+import { cn, getThumbnailUrl } from "./lib/utils";
 import { 
-  Home as HomeIcon, 
+  Home as HomeIcon,
   Calendar as CalendarIcon, 
   Users, 
   Phone, 
@@ -19,8 +20,8 @@ import {
   Waves,
   Trees,
   Bed,
-  Facebook,
-  Instagram,
+  Share2,
+  Camera,
   Baby,
   ImageIcon,
   Maximize2,
@@ -28,13 +29,23 @@ import {
   Filter,
   Info,
   Map as MapIcon,
-  ExternalLink
+  ExternalLink,
+  CalendarCheck2,
+  CalendarX2,
+  Dog
 } from "lucide-react";
 import { Button } from "./components/ui/button";
 import { Toaster } from "./components/ui/sonner";
 import { toast } from "sonner";
 import { Calendar } from "./components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "./components/ui/popover";
+import { 
+  Select, 
+  SelectContent, 
+  SelectItem, 
+  SelectTrigger, 
+  SelectValue 
+} from "./components/ui/select";
 
 // ─── Data ───────────────────────────────────────────────────────────────────
 
@@ -375,7 +386,8 @@ const PROPERTIES_DATA = {
     social: {
       fb: "https://facebook.com/hacjenda.kiekrz",
       ig: "https://instagram.com/hacjenda.kiekrz"
-    }
+    },
+    maxGuests: 7
   },
   Sadoles: {
     mainImg: "/images/Sadoles/otoczenie/MAIN.jpg",
@@ -415,7 +427,7 @@ const PROPERTIES_DATA = {
       {
         id: "s5",
         folder: "sypialnia czarna",
-        name: { PL: "Sypialnia Czarna", EN: "Black Bedroom" },
+        name: { PL: "Sypialnia Black", EN: "Black Bedroom" },
         beds: { PL: "1 łóżko podwójne, 1 rozkładana sofa", EN: "1 double bed, 1 sofa bed" },
         img: "/images/Sadoles/sypialnia czarna/MAIN.jpg"
       }
@@ -431,7 +443,8 @@ const PROPERTIES_DATA = {
     social: {
       fb: "https://facebook.com/sadoles66",
       ig: "https://instagram.com/sadoles66"
-    }
+    },
+    maxGuests: 15
   }
 };
 
@@ -441,8 +454,9 @@ type Lang = "PL" | "EN";
 
 const T = {
   PL: {
+    document_title: "Zarezerwuj pobyt",
     header_title: "Nasz-bnb",
-    footer_desc: "Dwie wyjątkowe nieruchomości posiadane i zarządzane przez Kasię i Szymona pod marką furtka nieruchomości. Zaprojektowane dla powolnego życia i kontaktu z naturą.",
+    footer_desc: "Dwie wyjątkowe nieruchomości zaprojektowane dla powolnego życia i kontaktu z naturą.",
     about_us: "O nas",
     contact: "Kontakt",
     hero_title: "Zarezerwuj swój pobyt",
@@ -463,7 +477,16 @@ const T = {
     form_email: "Adres e-mail",
     form_phone: "Numer telefonu",
     form_guests: "Liczba osób",
+    form_pets: "Zwierzęta",
     form_notes: "Uwagi do rezerwacji",
+    form_purpose: "Cel wyjazdu",
+    form_company_name: "Nazwa firmy",
+    form_nip: "NIP",
+    purposes: {
+      leisure: "Wyjazd wypoczynkowy",
+      production: "Sesja lub nagrania reklamowe",
+      company: "Wyjazd firmowy"
+    },
     continue: "Kontynuuj",
     submit: "Potwierdź rezerwację",
     success_title: "Dziękujemy za rezerwację!",
@@ -487,6 +510,7 @@ const T = {
     view_gallery: "Zobacz galerię zdjęć",
     all_photos: "Wszystkie zdjęcia",
     filter_by_area: "Filtruj według obszaru",
+    booking_steps: "W tej chwili nic nie płacisz. Aby potwierdzić rezerwację, wpłać zaliczkę w wysokości {deposit} PLN w ciągu 24h. Pozostałą kwotę oraz kaucję zwrotną należy uregulować na kilka dni przed przyjazdem. W przypadku anulowania rezerwacji na co najmniej 28 dni przed przyjazdem, zaliczka jest zwracana. Wszystkie szczegóły otrzymasz w wiadomości e-mail.",
     areas: {
       salon: "Salon",
       jadalnia: "Jadalnia",
@@ -508,8 +532,9 @@ const T = {
     }
   },
   EN: {
+    document_title: "Book your stay",
     header_title: "Our-bnb",
-    footer_desc: "Two unique properties owned and managed by Kasia and Szymon under the brand furtka nieruchomości. Designed for slow living and connection with nature.",
+    footer_desc: "Two unique properties designed for slow living and connection with nature.",
     about_us: "About Us",
     contact: "Contact",
     hero_title: "Book Your Stay",
@@ -530,7 +555,16 @@ const T = {
     form_email: "Email Address",
     form_phone: "Phone Number",
     form_guests: "Number of Guests",
+    form_pets: "Pets",
     form_notes: "Reservation Notes",
+    form_purpose: "Purpose of Stay",
+    form_company_name: "Company Name",
+    form_nip: "NIP",
+    purposes: {
+      leisure: "Leisure",
+      production: "Photo session / Product recording",
+      company: "Company trip"
+    },
     continue: "Continue",
     submit: "Confirm Reservation",
     success_title: "Thank you for booking!",
@@ -554,6 +588,7 @@ const T = {
     view_gallery: "View photo gallery",
     all_photos: "All photos",
     filter_by_area: "Filter by area",
+    booking_steps: "You are not paying anything yet. To confirm your reservation, pay a fee of {deposit} PLN within 24h. The remaining balance and the refundable security deposit should be paid a few days before arrival. If the booking is cancelled at least 28 days before arrival, the reservation fee is returned. You will receive all details in an email.",
     areas: {
       salon: "Living Room",
       jadalnia: "Dining Room",
@@ -640,7 +675,7 @@ function ImageGallery({
               className="aspect-square bg-zinc-100 rounded-xl overflow-hidden cursor-pointer group relative"
               onClick={() => setSelectedIdx(idx)}
             >
-              <img src={img} alt="" className="w-full h-full object-cover transition-transform group-hover:scale-105" />
+              <img src={getThumbnailUrl(img, 600)} alt="" className="w-full h-full object-cover transition-transform group-hover:scale-105" />
               <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 transition-colors flex items-center justify-center">
                 <Maximize2 className="text-white opacity-0 group-hover:opacity-100 transition-opacity" />
               </div>
@@ -689,18 +724,24 @@ function Layout({ children, lang, setLang }: { children: React.ReactNode, lang: 
   const [location, setLocation] = useLocation();
   const texts = T[lang];
 
-  const bgImage = useMemo(() => {
-    if (location === "/hacjenda") return "/images/Hacjenda/main.jpg";
-    return "/images/Sadoles/otoczenie/MAIN.jpg";
+  const bgImages = useMemo(() => {
+    if (location === "/hacjenda") return ["/images/Hacjenda/main.jpg"];
+    if (location === "/sadoles") return ["/images/Sadoles/otoczenie/MAIN.jpg"];
+    return ["/images/Hacjenda/main.jpg", "/images/Sadoles/otoczenie/MAIN.jpg"];
   }, [location]);
 
   return (
     <div className="h-screen flex flex-col font-sans overflow-hidden relative">
-      {/* Background Image */}
-      <div 
-        className="absolute inset-0 z-0 bg-cover bg-center bg-no-repeat transition-all duration-1000"
-        style={{ backgroundImage: `url('${bgImage}')` }}
-      />
+      {/* Background Images */}
+      <div className="absolute inset-0 z-0 flex flex-col overflow-hidden">
+        {bgImages.map((img, idx) => (
+          <div 
+            key={img}
+            className="flex-1 bg-cover bg-center bg-no-repeat transition-all duration-1000"
+            style={{ backgroundImage: `url('${getThumbnailUrl(img, 1920)}')` }}
+          />
+        ))}
+      </div>
       {/* Overlay to ensure readability */}
       <div className="absolute inset-0 z-10 bg-black/30" />
 
@@ -731,11 +772,12 @@ function Layout({ children, lang, setLang }: { children: React.ReactNode, lang: 
         </div>
       </nav>
 
-      <main className="flex-1 relative z-[60] overflow-hidden px-2 py-2 md:px-8 md:py-6 flex flex-col">
-        <div className="max-w-7xl mx-auto w-full h-full">
+      <main className="flex-1 relative z-[60] overflow-y-auto px-2 py-2 md:px-8 md:py-6 flex flex-col no-scrollbar">
+        <div className="max-w-7xl mx-auto w-full">
           {children}
         </div>
-      </main>    </div>
+      </main>
+    </div>
   );
 }
 
@@ -744,56 +786,56 @@ function Layout({ children, lang, setLang }: { children: React.ReactNode, lang: 
 function AboutUs({ lang }: { lang: Lang }) {
   const texts = T[lang];
   return (
-    <div className="h-full flex items-center justify-center p-4">
-      <div className="bg-white/70 backdrop-blur-md rounded-3xl shadow-2xl p-6 md:p-10 max-w-4xl w-full max-h-[90%] overflow-y-auto space-y-8 md:space-y-12 no-scrollbar">
-        <div className="text-center py-4">
-          <h1 className="text-3xl md:text-5xl font-black mb-4 leading-tight text-zinc-900">{texts.about_us}</h1>
-          <p className="text-base md:text-lg text-zinc-600 max-w-2xl mx-auto">{texts.footer_desc}</p>
+    <div className="min-h-full flex items-center justify-center p-4">
+      <div className="bg-white/70 backdrop-blur-md rounded-3xl shadow-2xl p-4 md:p-6 max-w-4xl w-full max-h-[50%] overflow-y-auto space-y-4 md:space-y-6 no-scrollbar">
+        <div className="text-center py-2">
+          <h1 className="text-2xl md:text-4xl font-black mb-2 leading-tight text-zinc-900">{texts.about_us}</h1>
+          <p className="text-sm md:text-base text-zinc-600 max-w-2xl mx-auto">{texts.footer_desc}</p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 pb-4">
-          <section className="space-y-4">
-            <h3 className="text-xl font-black flex items-center gap-2">
-              <Mail className="h-5 w-5 text-primary" />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-8 pb-2">
+          <section className="space-y-2">
+            <h3 className="text-lg font-black flex items-center gap-2">
+              <Mail className="h-4 w-4 text-primary" />
               {texts.contact}
             </h3>
-            <div className="space-y-3 text-base">
-              <div className="flex items-center gap-3">
-                <Mail className="h-4 w-4 text-zinc-400" />
-                <a href="mailto:furtka.rentals@gmail.com" className="hover:text-primary transition-colors text-sm">furtka.rentals@gmail.com</a>
+            <div className="space-y-1 text-sm">
+              <div className="flex items-center gap-2">
+                <Mail className="h-3.5 w-3.5 text-zinc-400" />
+                <a href={`mailto:${import.meta.env.VITE_GMAIL_USER || 'contact@example.com'}`} className="hover:text-primary transition-colors">{import.meta.env.VITE_GMAIL_USER || 'contact@example.com'}</a>
               </div>
-              <div className="flex items-center gap-3">
-                <Phone className="h-4 w-4 text-zinc-400" />
-                <span className="text-sm">+48 571 525 563</span>
+              <div className="flex items-center gap-2">
+                <Phone className="h-3.5 w-3.5 text-zinc-400" />
+                <span>{import.meta.env.VITE_CONTACT_PHONE || ''}</span>
               </div>
             </div>
           </section>
 
-          <section className="space-y-4">
-            <h3 className="text-xl font-black flex items-center gap-2">
-              <Instagram className="h-5 w-5 text-primary" />
+          <section className="space-y-2">
+            <h3 className="text-lg font-black flex items-center gap-2">
+              <Camera className="h-4 w-4 text-primary" />
               Social Media
             </h3>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <span className="text-[8px] font-bold uppercase text-zinc-400">Hacjenda Kiekrz</span>
-                <div className="flex gap-3">
-                  <a href={PROPERTIES_DATA.Hacjenda.social.fb} target="_blank" rel="noreferrer" className="bg-white/80 p-2 rounded-full hover:bg-white transition-all shadow-sm">
-                    <Facebook className="h-4 w-4" />
+            <div className="grid grid-cols-2 gap-2">
+              <div className="space-y-1">
+                <span className="text-[7px] font-bold uppercase text-zinc-400">Hacjenda Kiekrz</span>
+                <div className="flex gap-2">
+                  <a href={PROPERTIES_DATA.Hacjenda.social.fb} target="_blank" rel="noreferrer" className="bg-white/80 p-1.5 rounded-full hover:bg-white transition-all shadow-sm">
+                    <Share2 className="h-3.5 w-3.5" />
                   </a>
-                  <a href={PROPERTIES_DATA.Hacjenda.social.ig} target="_blank" rel="noreferrer" className="bg-white/80 p-2 rounded-full hover:bg-white transition-all shadow-sm">
-                    <Instagram className="h-4 w-4" />
+                  <a href={PROPERTIES_DATA.Hacjenda.social.ig} target="_blank" rel="noreferrer" className="bg-white/80 p-1.5 rounded-full hover:bg-white transition-all shadow-sm">
+                    <Camera className="h-3.5 w-3.5" />
                   </a>
                 </div>
               </div>
-              <div className="space-y-2">
-                <span className="text-[8px] font-bold uppercase text-zinc-400">Sadoleś 66</span>
-                <div className="flex gap-3">
-                  <a href={PROPERTIES_DATA.Sadoles.social.fb} target="_blank" rel="noreferrer" className="bg-white/80 p-2 rounded-full hover:bg-white transition-all shadow-sm">
-                    <Facebook className="h-4 w-4" />
+              <div className="space-y-1">
+                <span className="text-[7px] font-bold uppercase text-zinc-400">Sadoleś 66</span>
+                <div className="flex gap-2">
+                  <a href={PROPERTIES_DATA.Sadoles.social.fb} target="_blank" rel="noreferrer" className="bg-white/80 p-1.5 rounded-full hover:bg-white transition-all shadow-sm">
+                    <Share2 className="h-3.5 w-3.5" />
                   </a>
-                  <a href={PROPERTIES_DATA.Sadoles.social.ig} target="_blank" rel="noreferrer" className="bg-white/80 p-2 rounded-full hover:bg-white transition-all shadow-sm">
-                    <Instagram className="h-4 w-4" />
+                  <a href={PROPERTIES_DATA.Sadoles.social.ig} target="_blank" rel="noreferrer" className="bg-white/80 p-1.5 rounded-full hover:bg-white transition-all shadow-sm">
+                    <Camera className="h-3.5 w-3.5" />
                   </a>
                 </div>
               </div>
@@ -810,7 +852,7 @@ function Home({ lang }: { lang: Lang }) {
   const texts = T[lang];
 
   return (
-    <div className="bg-white/70 backdrop-blur-md rounded-3xl shadow-2xl p-4 md:p-10 h-full overflow-y-auto space-y-8 md:space-y-12 no-scrollbar">
+    <div className="bg-white/70 backdrop-blur-md rounded-3xl shadow-2xl p-4 md:p-10 min-h-full space-y-8 md:space-y-12">
       <div className="text-center py-4 md:py-8">
         <h1 className="text-3xl md:text-6xl font-black mb-4 md:mb-6 leading-tight text-zinc-900">{texts.hero_title}</h1>
         <p className="text-base md:text-xl text-zinc-600 max-w-2xl mx-auto">{texts.hero_subtitle}</p>
@@ -825,7 +867,7 @@ function Home({ lang }: { lang: Lang }) {
           <div className="h-48 md:h-64 bg-zinc-200 relative overflow-hidden">
             <div 
               className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-110" 
-              style={{ backgroundImage: `url('/images/Hacjenda/main.jpg')` }}
+              style={{ backgroundImage: `url('${getThumbnailUrl('/images/Hacjenda/main.jpg', 800)}')` }}
             />
             <div className="absolute top-4 left-4 bg-hacjenda-secondary text-white px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5 shadow-lg">
               <Waves className="h-3 w-3" /> {texts.tag_lake}
@@ -849,7 +891,7 @@ function Home({ lang }: { lang: Lang }) {
           <div className="h-48 md:h-64 bg-zinc-200 relative overflow-hidden">
             <div 
               className="absolute inset-0 bg-cover bg-center transition-transform duration-700 group-hover:scale-110" 
-              style={{ backgroundImage: `url('/images/Sadoles/otoczenie/MAIN.jpg')` }}
+              style={{ backgroundImage: `url('${getThumbnailUrl('/images/Sadoles/otoczenie/MAIN.jpg', 800)}')` }}
             />
             <div className="absolute top-4 left-4 bg-sadoles-primary text-white px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest flex items-center gap-1.5 shadow-lg">
               <Trees className="h-3 w-3" /> {texts.tag_nature}
@@ -871,6 +913,23 @@ function Home({ lang }: { lang: Lang }) {
 
 export default function App() {
   const [lang, setLang] = useState<Lang>("PL");
+  const [location] = useLocation();
+  const logVisit = trpc.portal.logVisit.useMutation();
+
+  useEffect(() => {
+    document.title = T[lang].document_title;
+  }, [lang]);
+
+  useEffect(() => {
+    let page = "other";
+    if (location === "/") page = "main";
+    else if (location === "/hacjenda") page = "Hacjenda";
+    else if (location === "/sadoles") page = "Sadoles";
+    
+    if (page !== "other") {
+      logVisit.mutate({ page });
+    }
+  }, [location]);
 
   return (
     <Layout lang={lang} setLang={setLang}>
@@ -901,46 +960,83 @@ export default function App() {
 function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", lang: Lang }) {
   const [, setLocation] = useLocation();
   const texts = T[lang];
+  const locale = lang === "PL" ? pl : enGB;
   const isHacjenda = property === "Hacjenda";
+  const maxGuests = PROPERTIES_DATA[property].maxGuests;
   
   const [checkIn, setCheckIn] = useState<Date | undefined>();
   const [checkOut, setCheckOut] = useState<Date | undefined>();
+  const [guestCount, setGuests] = useState(isHacjenda ? 5 : 10);
+  const [petCount, setPets] = useState(0);
+  
+  useEffect(() => {
+    setGuests(isHacjenda ? 5 : 10);
+  }, [isHacjenda]);
+
   const [bookingStep, setStep] = useState(1);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [activePicker, setActivePicker] = useState<"in" | "out" | null>(null);
+  const [calendarMonth, setCalendarMonth] = useState<Date>(new Date());
+
+  // Use the full date object with time for the server query
+  const normalizedCheckIn = useMemo(() => checkIn || null, [checkIn]);
+  const normalizedCheckOut = useMemo(() => checkOut || null, [checkOut]);
+
+  const { data: pricingRules } = trpc.portal.getPricingPlanForDate.useQuery(
+    { property, date: normalizedCheckIn! },
+    { enabled: !!normalizedCheckIn }
+  );
+
+  const { data: priceData, error: priceError } = trpc.portal.calculatePrice.useQuery(
+    { property, checkIn: normalizedCheckIn!, checkOut: normalizedCheckOut!, guestCount, animalsCount: petCount },
+    { enabled: !!normalizedCheckIn && !!normalizedCheckOut }
+  );
 
   const [guestName, setName] = useState("");
   const [guestEmail, setEmail] = useState("");
   const [guestPhone, setPhone] = useState("");
-  const [guestCount, setGuests] = useState(2);
   const [notes, setNotes] = useState("");
+  const [purpose, setPurpose] = useState("leisure");
+  const [companyName, setCompanyName] = useState("");
+  const [nip, setNip] = useState("");
 
   const [galleryOpen, setGallery] = useState(false);
   const [initialFilter, setInitialFilter] = useState<string | undefined>();
   const [expandedMap, setExpandedMap] = useState(false);
 
   const { data: blockedRanges = [] } = trpc.portal.getAvailability.useQuery({ property });
-  const isBlocked = (date: Date) => {
+  const isBlocked = (date: Date, isCheckout = false) => {
     return blockedRanges.some(range => {
       const start = new Date(range.checkIn);
       const end = new Date(range.checkOut);
-      const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-      const s = new Date(start.getFullYear(), start.getMonth(), start.getDate());
-      const e = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+      const d = startOfDay(date);
+      const s = startOfDay(start);
+      const e = startOfDay(end);
+
+      // If we are checking for a check-out date
+      if (isCheckout) {
+        // A date is blocked for checkout only if it falls WITHIN a booking,
+        // but NOT if it's the start date of a booking (unless check-out is late).
+        // Standard check-out is 10AM, standard check-in is 4PM.
+        // If current date 'd' is the same as booking start 's':
+        if (d.getTime() === s.getTime()) {
+          // If we have a specific checkout time set, check if it's at least 6h before check-in.
+          // Since we don't always have the full Date with time here (calendar uses startOfDay),
+          // we assume standard times for the calendar view but the final validation happens on server.
+          // However, for the 'disabled' prop in Calendar, we usually just want to know if the DAY is available.
+          return false; // Allow selecting start day of another booking as checkout day
+        }
+        return d >= s && d < e;
+      }
+
+      // If we are checking for a check-in date
+      if (d.getTime() === e.getTime()) {
+        return false; // Allow selecting end day of another booking as check-in day
+      }
+
       return d >= s && d < e;
     });
   };
-
-  const isRangeInvalid = useMemo(() => {
-    if (!checkIn || !checkOut) return false;
-    try {
-      const days = eachDayOfInterval({ start: checkIn, end: addDays(checkOut, -1) });
-      return days.some(day => isBlocked(day));
-    } catch { return true; }
-  }, [checkIn, checkOut, blockedRanges]);
-
-  const { data: priceData } = trpc.portal.calculatePrice.useQuery(
-    { property, checkIn: checkIn as Date, checkOut: checkOut as Date },
-    { enabled: !!checkIn && !!checkOut && !isRangeInvalid }
-  );
 
   const { data: ratings = [] } = trpc.portal.getRatings.useQuery({ property });
 
@@ -951,7 +1047,51 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
 
   const handleBooking = () => {
     if (!checkIn || !checkOut) return;
-    submitBooking.mutate({ property, checkIn, checkOut, guestName, guestEmail, guestPhone, guestCount, notes });
+    submitBooking.mutate({ 
+      property, 
+      checkIn: normalizedCheckIn!, 
+      checkOut: normalizedCheckOut!, 
+      guestName, 
+      guestEmail, 
+      guestPhone, 
+      guestCount, 
+      animalsCount: petCount, 
+      notes, 
+      guestCountry: lang,
+      purpose,
+      companyName,
+      nip
+    });
+  };
+
+  const getDisabledHours = (date: Date | undefined, type: "in" | "out") => {
+    if (!date) return [];
+    const d = startOfDay(date);
+    const disabled: number[] = [];
+
+    blockedRanges.forEach(range => {
+      const start = new Date(range.checkIn);
+      const end = new Date(range.checkOut);
+      const s = startOfDay(start);
+      const e = startOfDay(end);
+
+      if (type === "out") {
+        if (d.getTime() === s.getTime()) {
+          const latestAllowed = start.getHours() - 6;
+          for (let h = 0; h < 24; h++) {
+            if (h > latestAllowed) disabled.push(h);
+          }
+        }
+      } else {
+        if (d.getTime() === e.getTime()) {
+          const earliestAllowed = end.getHours() + 6;
+          for (let h = 0; h < 24; h++) {
+            if (h < earliestAllowed) disabled.push(h);
+          }
+        }
+      }
+    });
+    return disabled;
   };
 
   const primaryColor = isHacjenda ? "bg-hacjenda-primary" : "bg-sadoles-primary";
@@ -962,7 +1102,7 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
   }, [property]);
 
   return (
-    <div className="h-full flex flex-col overflow-hidden gap-2 md:gap-4">
+    <div className="min-h-full flex flex-col gap-4 md:gap-8 pb-8 md:pb-0">
       {galleryOpen && (
         <ImageGallery 
           images={PROPERTIES_DATA[property].allImages} 
@@ -987,7 +1127,7 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
         </div>
       )}
 
-      {/* TOP SECTION: Header & Description & Info Tiles (< 20% height) */}
+      {/* TOP SECTION */}
       <header className="shrink-0 flex flex-col md:flex-row gap-3 md:gap-6 items-start justify-between bg-white/40 backdrop-blur-md p-4 md:p-6 rounded-3xl border border-white/40 shadow-sm">
         <div className="flex-1 space-y-1 md:space-y-2">
           <div className="flex items-center gap-3 md:gap-4">
@@ -1012,8 +1152,8 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
             </div>
             <div className="w-[1px] h-3 md:h-4 bg-zinc-200" />
             <div className="flex items-center gap-2 md:gap-3">
-               <a href={PROPERTIES_DATA[property].social.fb} target="_blank" rel="noreferrer" className="hover:text-zinc-900 transition-colors"><Facebook className="h-3 w-3 md:h-4 md:w-4" /></a>
-               <a href={PROPERTIES_DATA[property].social.ig} target="_blank" rel="noreferrer" className="hover:text-zinc-900 transition-colors"><Instagram className="h-3 w-3 md:h-4 md:w-4" /></a>
+               <a href={PROPERTIES_DATA[property].social.fb} target="_blank" rel="noreferrer" className="hover:text-zinc-900 transition-colors"><Share2 className="h-3 w-3 md:h-4 md:w-4" /></a>
+               <a href={PROPERTIES_DATA[property].social.ig} target="_blank" rel="noreferrer" className="hover:text-zinc-900 transition-colors"><Camera className="h-3 w-3 md:h-4 md:w-4" /></a>
             </div>
           </div>
           
@@ -1026,68 +1166,358 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
         </div>
       </header>
 
-      {/* MIDDLE SECTION: Reservation Widget & Reviews */}
-      <div className="flex-1 flex flex-col md:flex-row items-center justify-between gap-4 md:gap-0 px-2 md:px-0 min-h-0 w-full">
-        {/* Booking Widget (All the way to left) */}
-        <div className="w-full max-w-sm md:max-w-md bg-white/80 backdrop-blur-xl rounded-[2rem] md:rounded-[2.5rem] shadow-2xl border border-white/50 overflow-hidden transform scale-90 md:scale-100 origin-center md:origin-left">
-          <div className={`${primaryColor} p-4 md:p-6 text-white text-center`}>
-            <div className="text-[8px] md:text-[10px] font-black uppercase tracking-[0.2em] opacity-80 mb-0.5 md:mb-1">{isHacjenda ? "1500 PLN" : "1200 PLN"} {texts.per_night}</div>
-            <div className="text-xl md:text-2xl font-black">{texts.book_now}</div>
+      {/* MIDDLE SECTION */}
+      <div className="flex flex-col md:flex-row items-center md:justify-between gap-8 md:gap-0 px-2 md:px-0 w-full py-4 md:py-0">
+        <div className="w-full max-w-sm md:max-w-md bg-white/80 backdrop-blur-xl rounded-[1.5rem] md:rounded-[2rem] shadow-2xl border border-white/50 overflow-hidden">
+          <div className={`${primaryColor} py-1.5 md:py-2 px-4 text-white text-center`}>
+            <div className="text-[10px] md:text-xs font-black uppercase tracking-[0.2em]">{texts.book_now}</div>
           </div>
           
-          <div className="p-5 md:p-8 space-y-4 md:space-y-6">
+          <div className="p-3 md:p-5 space-y-2 md:space-y-3">
             {bookingStep === 1 ? (
               <>
-                <div className="space-y-1.5 md:space-y-2">
-                  <label className="text-[8px] md:text-[10px] font-black uppercase text-zinc-400 tracking-widest ml-1">{lang === "PL" ? "Przyjazd i Wyjazd" : "Check-in & Check-out"}</label>
-                  <Popover>
-                    <PopoverTrigger asChild>
-                      <Button variant="outline" className={cn("w-full justify-start text-left font-black bg-white/50 border-0 rounded-xl md:rounded-2xl h-11 md:h-14 shadow-sm hover:bg-white transition-all text-xs md:text-base", !checkIn && "text-zinc-400")}>
-                        <CalendarIcon className="mr-2 md:mr-3 h-4 w-4 md:h-5 md:w-5 text-primary" />
-                        {checkIn ? (checkOut ? `${format(checkIn, "LLL dd, y")} - ${format(checkOut, "LLL dd, y")}` : format(checkIn, "LLL dd, y")) : <span>{lang === "PL" ? "Wybierz daty" : "Select dates"}</span>}
-                      </Button>
-                    </PopoverTrigger>
-                    <PopoverContent className="w-auto p-0" align="center">
-                      <Calendar mode="range" selected={{ from: checkIn, to: checkOut }} onSelect={(range) => {
-                        if (range?.from && range?.to) {
-                          try {
-                            const days = eachDayOfInterval({ start: range.from, end: addDays(range.to, -1) });
-                            if (days.some(day => isBlocked(day))) { toast.error(lang === "PL" ? "Wybrany termin zawiera zajęte dni" : "Selected range contains blocked dates"); return; }
-                          } catch (e) {}
-                        }
-                        setCheckIn(range?.from); setCheckOut(range?.to);
-                      }} disabled={(date) => date < new Date() || isBlocked(date)} />
-                    </PopoverContent>
-                  </Popover>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] md:text-xs font-black uppercase text-zinc-500 tracking-wider ml-1">{texts.form_guests}</label>
+                    <div className="flex items-center gap-1.5 px-1.5 py-0.5 bg-white/50 rounded-lg shadow-sm border border-zinc-100">
+                      <button onClick={() => setGuests(Math.max(1, guestCount-1))} className="h-5 w-5 rounded bg-white shadow-sm font-black text-[10px]">-</button>
+                      <span className="font-black text-[10px] w-3 text-center">{guestCount}</span>
+                      <button onClick={() => setGuests(Math.min(maxGuests, guestCount+1))} className="h-5 w-5 rounded bg-white shadow-sm font-black text-[10px]">+</button>
+                    </div>
+                  </div>
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] md:text-xs font-black uppercase text-zinc-500 tracking-wider ml-1">{texts.form_pets}</label>
+                    <div className="flex items-center gap-1.5 px-1.5 py-0.5 bg-white/50 rounded-lg shadow-sm border border-zinc-100">
+                      <button onClick={() => setPets(Math.max(0, petCount-1))} className="h-5 w-5 rounded bg-white shadow-sm font-black text-[10px]">-</button>
+                      <span className="font-black text-[10px] w-3 text-center">{petCount}</span>
+                      <button onClick={() => setPets(Math.min(3, petCount+1))} className="h-5 w-5 rounded bg-white shadow-sm font-black text-[10px]">+</button>
+                    </div>
+                  </div>
                 </div>
 
-                {priceData && (
-                  <div className="bg-emerald-500/10 rounded-xl md:rounded-[1.5rem] p-3 md:p-4 flex justify-between items-center border border-emerald-500/20">
-                    <div className="text-xs md:text-sm font-black text-emerald-900">{priceData.totalPrice} PLN <span className="text-[8px] md:text-[10px] text-emerald-600 ml-1 uppercase">{priceData.days} {texts.nights}</span></div>
-                    <CheckCircle2 className="text-emerald-500 h-4 w-4 md:h-5 md:w-5" />
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] md:text-xs font-black uppercase text-zinc-500 tracking-wider ml-1">{lang === "PL" ? "Przyjazd" : "Check-in"}</label>
+                    <Popover open={calendarOpen && activePicker === "in"} onOpenChange={(o) => { if (o) setActivePicker("in"); setCalendarOpen(o); }}>
+                      <PopoverTrigger asChild>
+                        <Button 
+                          variant="outline" 
+                          className={cn("w-full justify-start text-left font-black bg-white/50 border-0 rounded-lg h-8 md:h-10 shadow-sm hover:bg-white transition-all text-[10px] md:text-xs", !checkIn && "text-zinc-400")}
+                        >
+                          <CalendarCheck2 className="mr-1 h-3 w-3 text-primary" />
+                          {checkIn ? format(checkIn, "dd.MM.yy HH:mm", { locale }) : "---"}
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-auto p-0" align="start">
+                        <div className="p-3 border-b border-zinc-100 flex items-center justify-between gap-4">
+                          <span className="text-[10px] font-black uppercase text-zinc-500">{lang === "PL" ? "Godzina" : "Time"}</span>
+                          <div className="flex items-center gap-1">
+                             <Select 
+                               value={checkIn ? format(checkIn, "HH") : "16"} 
+                               onValueChange={(h) => {
+                                 if (checkIn) setCheckIn(setHours(checkIn, parseInt(h)));
+                               }}
+                             >
+                               <SelectTrigger className="h-7 w-20 px-2 text-xs font-bold">
+                                 <SelectValue />
+                               </SelectTrigger>
+                               <SelectContent>
+                                 {Array.from({ length: 24 }).map((_, i) => {
+                                   const isDisabled = getDisabledHours(checkIn, "in").includes(i);
+                                   return (
+                                     <SelectItem key={i} value={i.toString().padStart(2, "0")} disabled={isDisabled}>
+                                       {i.toString().padStart(2, "0")}
+                                     </SelectItem>
+                                   );
+                                 })}
+                               </SelectContent>
+                             </Select>
+                             <span className="font-bold">:</span>
+                             <Select 
+                               value={checkIn ? format(checkIn, "mm") : "00"} 
+                               onValueChange={(m) => {
+                                 if (checkIn) setCheckIn(setMinutes(checkIn, parseInt(m)));
+                               }}
+                             >
+                               <SelectTrigger className="h-7 w-20 px-2 text-xs font-bold">
+                                 <SelectValue />
+                               </SelectTrigger>
+                               <SelectContent>
+                                 {["00", "15", "30", "45"].map((m) => (
+                                   <SelectItem key={m} value={m}>{m}</SelectItem>
+                                 ))}
+                               </SelectContent>
+                             </Select>
+                          </div>
+                        </div>
+                        <Calendar
+                          mode="single"
+                          locale={locale}
+                          selected={checkIn}
+                          month={calendarMonth}
+                          onMonthChange={setCalendarMonth}                          onSelect={(d) => {
+                            if (d) {
+                              const withTime = setMinutes(setHours(d, 16), 0);
+                              setCheckIn(withTime);
+                            } else {
+                              setCheckIn(undefined);
+                            }
+
+                            // Check if existing check-out is still valid with new check-in
+                            let shouldClearCheckOut = false;
+                            if (d && checkOut) {
+                              const minStay = pricingRules?.minStay || 1;
+                              const diff = differenceInDays(startOfDay(checkOut), startOfDay(d));
+                              if (diff < minStay || startOfDay(checkOut) <= startOfDay(d)) {
+                                shouldClearCheckOut = true;
+                              }
+                            }
+
+                            if (d && (!checkOut || shouldClearCheckOut)) { 
+                              if (shouldClearCheckOut) setCheckOut(undefined);
+                              
+                              // Use a small delay to let the check-in popover close 
+                              // and allow the check-out one to open without state conflicts
+                              setCalendarOpen(false);
+                              setTimeout(() => {
+                                setActivePicker("out"); 
+                                setCalendarOpen(true); 
+                                if (d) setCalendarMonth(d);
+                              }, 50);
+                            } else {
+                              setCalendarOpen(false);
+                            }
+                          }} 
+                          disabled={(date) => date < startOfDay(new Date()) || isBlocked(date, false)} 
+                        />
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+
+                  <div className="space-y-0.5">
+                    <label className="text-[10px] md:text-xs font-black uppercase text-zinc-500 tracking-wider ml-1">{lang === "PL" ? "Wyjazd" : "Check-out"}</label>
+                    <Popover open={calendarOpen && activePicker === "out"} onOpenChange={(o) => { if (o) setActivePicker("out"); setCalendarOpen(o); }}>
+                      <PopoverTrigger asChild>
+                        <Button 
+                          variant="outline" 
+                          className={cn("w-full justify-start text-left font-black bg-white/50 border-0 rounded-lg h-8 md:h-10 shadow-sm hover:bg-white transition-all text-[10px] md:text-xs", !checkOut && "text-zinc-400")}
+                        >
+                          <CalendarX2 className="mr-1 h-3 w-3 text-primary" />
+                          {checkOut ? format(checkOut, "dd.MM.yy HH:mm", { locale }) : "---"}
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="w-auto p-0" align="end">
+                        <div className="p-3 border-b border-zinc-100 flex items-center justify-between gap-4">
+                          <span className="text-[10px] font-black uppercase text-zinc-500">{lang === "PL" ? "Godzina" : "Time"}</span>
+                          <div className="flex items-center gap-1">
+                             <Select 
+                               value={checkOut ? format(checkOut, "HH") : "10"} 
+                               onValueChange={(h) => {
+                                 if (checkOut) setCheckOut(setHours(checkOut, parseInt(h)));
+                               }}
+                             >
+                               <SelectTrigger className="h-7 w-20 px-2 text-xs font-bold">
+                                 <SelectValue />
+                               </SelectTrigger>
+                               <SelectContent>
+                                 {Array.from({ length: 24 }).map((_, i) => {
+                                   const isDisabled = getDisabledHours(checkOut, "out").includes(i);
+                                   return (
+                                     <SelectItem key={i} value={i.toString().padStart(2, "0")} disabled={isDisabled}>
+                                       {i.toString().padStart(2, "0")}
+                                     </SelectItem>
+                                   );
+                                 })}
+                               </SelectContent>
+                             </Select>
+                             <span className="font-bold">:</span>
+                             <Select 
+                               value={checkOut ? format(checkOut, "mm") : "00"} 
+                               onValueChange={(m) => {
+                                 if (checkOut) setCheckOut(setMinutes(checkOut, parseInt(m)));
+                               }}
+                             >
+                               <SelectTrigger className="h-7 w-20 px-2 text-xs font-bold">
+                                 <SelectValue />
+                               </SelectTrigger>
+                               <SelectContent>
+                                 {["00", "15", "30", "45"].map((m) => (
+                                   <SelectItem key={m} value={m}>{m}</SelectItem>
+                                 ))}
+                               </SelectContent>
+                             </Select>
+                          </div>
+                        </div>
+                        <Calendar
+                          mode="single"
+                          locale={locale}
+                          selected={checkOut}
+                          month={calendarMonth}
+                          onMonthChange={setCalendarMonth}                          onSelect={(d) => {
+                            if (d) {
+                              const withTime = setMinutes(setHours(d, 10), 0);
+                              setCheckOut(withTime);
+                              setCalendarOpen(false);
+                            } else {
+                              setCheckOut(undefined);
+                            }
+                          }} 
+                          modifiers={{ checkIn: checkIn ? [checkIn] : [] }}
+                          modifiersClassNames={{ checkIn: "bg-primary/20 text-primary font-bold" }}
+                          disabled={(date) => {
+                            if (!checkIn) return date < startOfDay(new Date()) || isBlocked(date, true);
+                            const minStay = pricingRules?.minStay || 1;
+                            const diff = differenceInDays(startOfDay(date), startOfDay(checkIn));
+                            return diff < minStay || isBlocked(date, true);
+                          }}
+                        />
+                      </PopoverContent>
+                    </Popover>
+                  </div>
+                </div>
+
+                {priceError && (
+                  <div className="bg-rose-500/10 rounded-xl md:rounded-[1.5rem] p-3 md:p-4 border border-rose-500/20 text-[10px] text-rose-900 font-bold">
+                    {priceError.message}
                   </div>
                 )}
 
-                <Button disabled={!checkIn || !checkOut || isRangeInvalid} onClick={() => setStep(2)} className={`w-full py-5 md:py-7 rounded-xl md:rounded-[1.5rem] font-black text-base md:text-lg shadow-xl ${primaryColor} hover:scale-105 transition-all`}>
+                {priceData && priceData.valid && (
+                  <div className="bg-emerald-500/10 rounded-xl md:rounded-[1.5rem] p-3 md:p-4 flex flex-col gap-1 border border-emerald-500/20">
+                    <div className="flex justify-between items-center">
+                      <div className="flex flex-col">
+                        <div className="flex items-center gap-2">
+                           <div className="text-sm md:text-lg font-black text-emerald-900">{priceData.totalPrice} PLN</div>
+                           {(priceData as any).discountAmount > 0 && (
+                             <div className="text-[10px] md:text-xs font-bold text-zinc-400 line-through opacity-70">{(priceData as any).basePrice} PLN</div>
+                           )}
+                        </div>
+                        {(priceData as any).discountAmount > 0 && (
+                           <div className="text-[7px] md:text-[8px] font-black uppercase tracking-wider text-emerald-600">
+                             {lang === "PL" ? "Zastosowano zniżki:" : "Discounts applied:"} 
+                             {(priceData as any).appliedDiscounts?.duration > 0 && ` ${lang === "PL" ? "Dłuższy pobyt" : "Long stay"} (-${Math.round((priceData as any).appliedDiscounts.duration * 100)}%)`}
+                             {(priceData as any).appliedDiscounts?.lastMinute && ` ${lang === "PL" ? "Last minute" : "Last minute"} (-5%)`}
+                           </div>
+                        )}
+                      </div>
+                      <CheckCircle2 className="text-emerald-500 h-4 w-4 md:h-5 md:w-5" />
+                    </div>
+                    <div className="text-[10px] md:text-xs font-bold text-emerald-700/70 flex justify-between items-center">
+                      <span>{lang === "PL" ? "Cena za pobyt" : "Price for stay"} {format(checkIn!, "dd.MM HH:mm", { locale })} - {format(checkOut!, "dd.MM HH:mm", { locale })} ({priceData.days} {texts.nights})</span>
+                      {petCount > 0 && (
+                        <span className="text-[8px] md:text-[10px] uppercase tracking-wider opacity-60">
+                          {lang === "PL" ? `w tym ${petCount * 200} zł za zwierzęta` : `incl. ${petCount * 200} zl for pets`}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {priceData && !priceData.valid && (
+                  <div className="bg-rose-500/10 rounded-xl md:rounded-[1.5rem] p-3 md:p-4 flex justify-between items-center border border-rose-500/20">
+                    <div className="text-xs md:text-sm font-bold text-rose-900 flex items-center gap-2">
+                      <X className="h-4 w-4" />
+                      {priceData.error}
+                    </div>
+                  </div>
+                )}
+
+                <Button disabled={!checkIn || !checkOut || (priceData && !priceData.valid)} onClick={() => setStep(2)} className={`w-full py-5 md:py-7 rounded-xl md:rounded-[1.5rem] font-black text-base md:text-lg shadow-xl ${primaryColor} hover:scale-105 transition-all`}>
                   {texts.continue}
                 </Button>
               </>
             ) : (
-              <div className="space-y-3 md:space-y-4">
+              <div className="space-y-4 md:space-y-6">
+                {/* Summary Row for Step 2 */}
+                {priceData && (
+                  <div className="bg-zinc-100 rounded-2xl p-4 space-y-3">
+                     <div className="flex items-center justify-between">
+                        <div>
+                          <div className="text-[10px] font-black uppercase text-zinc-400 tracking-wider mb-1">{lang === "PL" ? "Twoja Rezerwacja" : "Your Reservation"}</div>
+                          <div className="text-sm font-black text-zinc-900">{format(checkIn!, "dd.MM HH:mm", { locale })} - {format(checkOut!, "dd.MM HH:mm", { locale })}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-[10px] font-black uppercase text-zinc-400 tracking-wider mb-1">{lang === "PL" ? "Cena Całkowita" : "Total Price"}</div>
+                          <div className="flex items-center gap-2 justify-end">
+                            <div className="text-lg font-black text-zinc-900">{priceData.totalPrice} PLN</div>
+                            {(priceData as any).discountAmount > 0 && (
+                              <div className="text-[10px] font-bold text-zinc-400 line-through">{(priceData as any).basePrice} PLN</div>
+                            )}
+                          </div>
+                          {(priceData as any).discountAmount > 0 && (
+                            <div className="text-[8px] font-bold text-emerald-600 uppercase tracking-tighter">
+                              {lang === "PL" ? "Zastosowano zniżki" : "Discounts applied"}
+                            </div>
+                          )}
+                          {priceData.petFee > 0 && (
+                            <div className="text-[8px] font-bold text-zinc-400 uppercase tracking-tighter mt-0.5">
+                              {lang === "PL" ? `w tym ${priceData.petFee} zł za zwierzęta` : `incl. ${priceData.petFee} zl for pets`}
+                            </div>
+                          )}
+                        </div>
+                     </div>
+                     <div className="flex gap-4 pt-2 border-t border-zinc-200">
+                        <div className="flex items-center gap-1.5">
+                           <Users className="h-3 w-3 text-zinc-400" />
+                           <span className="text-[10px] font-bold text-zinc-600">{guestCount} {texts.form_guests}</span>
+                        </div>
+                        {petCount > 0 && (
+                          <div className="flex items-center gap-1.5">
+                             <Dog className="h-3 w-3 text-zinc-400" />
+                             <span className="text-[10px] font-bold text-zinc-600">{petCount} {texts.form_pets}</span>
+                          </div>
+                        )}
+                     </div>
+                  </div>
+                )}
+
+                {priceData && (
+                  <p className="text-[10px] md:text-xs text-zinc-500 font-medium leading-relaxed px-1">
+                    {texts.booking_steps.replace("{deposit}", String(Math.round((priceData.totalPrice * 0.3) / 100) * 100))}
+                  </p>
+                )}
+
                 <div className="grid gap-2 md:gap-3">
-                  <input className="w-full bg-white/50 border-0 rounded-xl md:rounded-2xl px-4 md:px-5 py-2.5 md:py-3 text-xs md:text-sm font-bold shadow-sm" placeholder={texts.form_name} value={guestName} onChange={e => setName(e.target.value)} />
-                  <input className="w-full bg-white/50 border-0 rounded-xl md:rounded-2xl px-4 md:px-5 py-2.5 md:py-3 text-xs md:text-sm font-bold shadow-sm" placeholder={texts.form_email} value={guestEmail} onChange={e => setEmail(e.target.value)} />
-                  <input className="w-full bg-white/50 border-0 rounded-xl md:rounded-2xl px-4 md:px-5 py-2.5 md:py-3 text-xs md:text-sm font-bold shadow-sm" placeholder={texts.form_phone} value={guestPhone} onChange={e => setPhone(e.target.value)} />
-                  <div className="flex items-center gap-3 md:gap-4 px-4 md:px-5 py-1.5 md:py-2 bg-white/50 rounded-xl md:rounded-2xl shadow-sm">
-                    <span className="text-[8px] md:text-[10px] font-black uppercase text-zinc-400 flex-1">{texts.form_guests}</span>
-                    <button onClick={() => setGuests(Math.max(1, guestCount-1))} className="h-7 w-7 md:h-8 md:w-8 rounded-lg md:rounded-xl bg-white shadow-sm font-black">-</button>
-                    <span className="font-black w-4 text-center text-xs md:text-base">{guestCount}</span>
-                    <button onClick={() => setGuests(guestCount+1)} className="h-7 w-7 md:h-8 md:w-8 rounded-lg md:rounded-xl bg-white shadow-sm font-black">+</button>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase text-zinc-400 tracking-wider ml-1">{texts.form_purpose}</label>
+                    <Select value={purpose} onValueChange={setPurpose}>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="leisure">{texts.purposes.leisure}</SelectItem>
+                        <SelectItem value="production">{texts.purposes.production}</SelectItem>
+                        <SelectItem value="company">{texts.purposes.company}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {purpose === "leisure" ? (
+                    <input className="w-full bg-white/50 border-0 rounded-xl md:rounded-2xl px-4 md:px-5 py-2.5 md:py-3 text-xs md:text-sm font-bold shadow-sm" placeholder={texts.form_name} value={guestName} onChange={e => setName(e.target.value)} />
+                  ) : (
+                    <div className="grid grid-cols-2 gap-2 md:gap-3">
+                      <input className="w-full bg-white/50 border-0 rounded-xl md:rounded-2xl px-4 md:px-5 py-2.5 md:py-3 text-[10px] md:text-sm font-bold shadow-sm" placeholder={texts.form_company_name} value={companyName} onChange={e => setCompanyName(e.target.value)} />
+                      <input className="w-full bg-white/50 border-0 rounded-xl md:rounded-2xl px-4 md:px-5 py-2.5 md:py-3 text-[10px] md:text-sm font-bold shadow-sm" placeholder={texts.form_nip} value={nip} onChange={e => setNip(e.target.value)} />
+                    </div>
+                  )}
+
+                  <div className="grid grid-cols-2 gap-2 md:gap-3">
+                    <input className="w-full bg-white/50 border-0 rounded-xl md:rounded-2xl px-4 md:px-5 py-2.5 md:py-3 text-[10px] md:text-sm font-bold shadow-sm" placeholder={texts.form_email} value={guestEmail} onChange={e => setEmail(e.target.value)} />
+                    <input className="w-full bg-white/50 border-0 rounded-xl md:rounded-2xl px-4 md:px-5 py-2.5 md:py-3 text-[10px] md:text-sm font-bold shadow-sm" placeholder={texts.form_phone} value={guestPhone} onChange={e => setPhone(e.target.value)} />
                   </div>
                 </div>
                 <div className="flex gap-2">
                   <Button variant="outline" onClick={() => setStep(1)} className="flex-1 rounded-xl md:rounded-2xl font-bold h-10 md:h-12 text-xs md:text-sm">Back</Button>
-                  <Button onClick={handleBooking} disabled={!guestName || !guestEmail || !guestPhone || submitBooking.isPending} className={`flex-[2] rounded-xl md:rounded-2xl ${primaryColor} font-black text-white text-sm md:text-base shadow-lg hover:opacity-90 h-10 md:h-12`}>
+                  <Button 
+                    onClick={handleBooking} 
+                    disabled={
+                      (purpose === "leisure" ? !guestName : (!companyName || !nip)) || 
+                      !guestEmail || 
+                      !guestPhone || 
+                      submitBooking.isPending
+                    } 
+                    className={`flex-[2] rounded-xl md:rounded-2xl ${primaryColor} font-black text-white text-sm md:text-base shadow-lg hover:opacity-90 h-10 md:h-12`}
+                  >
                     {submitBooking.isPending ? "Sending..." : texts.submit}
                   </Button>
                 </div>
@@ -1096,8 +1526,7 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
           </div>
         </div>
 
-        {/* Reviews Pane (All the way to right) */}
-        <div className="w-full max-w-sm md:max-w-xs space-y-3 md:space-y-4 transform scale-90 md:scale-100 origin-center md:origin-right">
+        <div className="w-full max-w-sm md:max-w-xs space-y-3 md:space-y-4">
           <div className="bg-white/40 backdrop-blur-md rounded-[2rem] p-6 md:p-8 border border-white/40 shadow-xl">
              <h3 className="text-lg md:text-xl font-black mb-6 flex items-center gap-2">
                <Info className={textColor} />
@@ -1105,10 +1534,12 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
              </h3>
 
              <div className="space-y-6">
-               {["booking", "airbnb", "slowhop"].map((portal) => {
+               {["booking", "airbnb", "slowhop", "alohacamp", "google"].map((portal) => {
                  const ratingData = ratings.find(r => r.portal === portal);
-                 const portalLabel = portal.charAt(0).toUpperCase() + portal.slice(1);
-                 
+                 if (!ratingData || ratingData.count === 0) return null;
+
+                 const portalLabel = portal === "alohacamp" ? "AlohaCamp" : (portal.charAt(0).toUpperCase() + portal.slice(1));
+
                  return (
                    <div key={portal} className="flex items-center justify-between group">
                      <div className="flex items-center gap-3">
@@ -1116,6 +1547,8 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
                          {portal === "booking" && <div className="text-blue-600 font-black text-sm">B.</div>}
                          {portal === "airbnb" && <div className="text-rose-500 font-black text-sm">A.</div>}
                          {portal === "slowhop" && <div className="text-emerald-700 font-black text-sm">S.</div>}
+                         {portal === "alohacamp" && <div className="text-orange-500 font-black text-sm">Al.</div>}
+                         {portal === "google" && <div className="text-blue-500 font-black text-sm">G.</div>}
                        </div>
                        <div>
                          <div className="text-[10px] font-black uppercase tracking-wider text-zinc-600">{texts.rating_from} {portalLabel}</div>
@@ -1126,15 +1559,14 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
                        <div className="text-xl font-black text-zinc-900">{ratingData?.rating || "—"}</div>
                        <div className="flex gap-0.5 justify-end">
                          {[1, 2, 3, 4, 5].map(s => (
-                           <div key={s} className={`h-1 w-1 rounded-full ${Number(ratingData?.rating || 0) / (portal === "booking" ? 2 : 1) >= s ? (portal === "booking" ? "bg-blue-600" : portal === "airbnb" ? "bg-rose-500" : "bg-emerald-700") : "bg-zinc-200"}`} />
+                           <div key={s} className={`h-1 w-1 rounded-full ${Number(ratingData?.rating || 0) / (portal === "booking" ? 2 : 1) >= s ? (portal === "booking" ? "bg-blue-600" : portal === "airbnb" ? "bg-rose-500" : portal === "slowhop" ? "bg-emerald-700" : portal === "alohacamp" ? "bg-orange-500" : "bg-blue-500") : "bg-zinc-200"}`} />
                          ))}
                        </div>
                      </div>
                    </div>
                  );
                })}
-             </div>
-          </div>
+             </div>          </div>
 
           <div className="bg-white/20 backdrop-blur-sm rounded-2xl p-4 border border-white/20 flex items-center justify-center gap-4">
              <div className="text-center">
@@ -1155,7 +1587,6 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
         </div>
       </div>
 
-      {/* BOTTOM SECTION: Rooms Row */}
       <div className="shrink-0 pb-1 md:pb-2">
         <div className="flex gap-3 md:gap-4 overflow-x-auto pb-1 md:pb-2 no-scrollbar px-1 md:px-2">
           {allThumbnails.map((item: any) => (
@@ -1165,7 +1596,7 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
               onClick={() => { setInitialFilter(item.folder); setGallery(true); }}
             >
               <div className="h-20 md:h-32 relative overflow-hidden">
-                <img src={item.img} alt="" className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
+                <img src={getThumbnailUrl(item.img, 400)} alt="" className="absolute inset-0 w-full h-full object-cover transition-transform duration-700 group-hover:scale-110" />
                 <div className="absolute inset-0 bg-black/0 group-hover:bg-black/20 flex items-center justify-center transition-colors">
                   <Maximize2 className="text-white opacity-0 group-hover:opacity-100 h-4 w-4 md:h-5 md:w-5" />
                 </div>
@@ -1187,7 +1618,7 @@ function SuccessPage({ lang }: { lang: Lang }) {
   const [, setLocation] = useLocation();
 
   return (
-    <div className="bg-white/70 backdrop-blur-md rounded-3xl shadow-2xl p-6 md:p-10 h-full flex items-center justify-center">
+    <div className="bg-white/70 backdrop-blur-md rounded-3xl shadow-2xl p-6 md:p-10 min-h-full flex items-center justify-center">
       <div className="max-w-xl text-center">
         <div className="h-20 w-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto mb-8">
           <CheckCircle2 className="h-10 w-10" />

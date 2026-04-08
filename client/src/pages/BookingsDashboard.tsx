@@ -69,6 +69,7 @@ function StatsCards({ filters }: { filters: { property?: string; channel?: strin
 
   const rangeLabel =
     filters.timeRange === "month" ? "Month" :
+    filters.timeRange === "next_month" ? "Next Month" :
     filters.timeRange === "3months" ? "3 Months" :
     filters.timeRange === "6months" ? "6 Months" :
     filters.timeRange === "all" ? "All Time" : "2026";
@@ -135,8 +136,9 @@ export default function BookingsDashboard() {
         status !== "all" && status !== "active"
           ? (status as "pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")
           : undefined,
+      timeRange: timeRange as any,
     }),
-    [property, channel, status]
+    [property, channel, status, timeRange]
   );
 
   const statsFilters = useMemo(() => ({
@@ -271,6 +273,7 @@ export default function BookingsDashboard() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="month">This Month</SelectItem>
+                  <SelectItem value="next_month">Next Month</SelectItem>
                   <SelectItem value="3months">Next 3 Months</SelectItem>
                   <SelectItem value="6months">Next 6 Months</SelectItem>
                   <SelectItem value="year">This Year (2026)</SelectItem>
@@ -390,11 +393,11 @@ export default function BookingsDashboard() {
                             <span>{nightsCount(b)} night{nightsCount(b) !== 1 ? "s" : ""}</span>
                           </div>
                         </td>
-                        <td className="px-6 py-4 text-muted-foreground">
-                          {format(new Date(b.checkIn), "dd MMM yyyy")}
+                        <td className="px-6 py-4 text-muted-foreground whitespace-nowrap">
+                          {format(new Date(b.checkIn), "dd MMM yyyy HH:mm")}
                         </td>
-                        <td className="px-6 py-4 text-muted-foreground">
-                          {format(new Date(b.checkOut), "dd MMM yyyy")}
+                        <td className="px-6 py-4 text-muted-foreground whitespace-nowrap">
+                          {format(new Date(b.checkOut), "dd MMM yyyy HH:mm")}
                         </td>
                         <td className="px-6 py-4">
                           <div className="flex flex-col gap-1.5 items-start">

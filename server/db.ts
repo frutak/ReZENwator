@@ -1,15 +1,30 @@
 import { and, desc, eq, gte, lte, or, ne, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { bookings, syncLogs, users, propertyRatings } from "../drizzle/schema";
+import mysql from "mysql2/promise";
+import { bookings, syncLogs, users, propertyRatings, bookingActivities, systemSettings } from "../drizzle/schema";
 import type { InsertUser, InsertBooking } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+import { Logger } from "./_core/logger";
 
 let _db: ReturnType<typeof drizzle> | null = null;
+export let pool: mysql.Pool | null = null;
 
 export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
-      _db = drizzle(process.env.DATABASE_URL);
+      pool = mysql.createPool({
+        uri: process.env.DATABASE_URL,
+        timezone: "Z"
+      });
+      
+      // Force all database connections to use UTC time zone for NOW() and ON UPDATE NOW()
+      pool.on("connection", (connection) => {
+        connection.query("SET time_zone='+00:00'", (err) => {
+          if (err) console.error("[Database] Failed to set time_zone:", err);
+        });
+      });
+
+      _db = drizzle(pool);
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;
@@ -21,28 +36,29 @@ export async function getDb() {
 // ─── User helpers ─────────────────────────────────────────────────────────────
 
 export async function upsertUser(user: InsertUser): Promise<void> {
-  if (!user.openId) throw new Error("User openId is required for upsert");
   const db = await getDb();
   if (!db) { console.warn("[Database] Cannot upsert user: database not available"); return; }
 
   try {
-    const values: InsertUser = { openId: user.openId };
+    const values: InsertUser = { ...user };
     const updateSet: Record<string, unknown> = {};
-    const textFields = ["name", "email", "loginMethod"] as const;
-    type TextField = (typeof textFields)[number];
-    const assignNullable = (field: TextField) => {
-      const value = user[field];
-      if (value === undefined) return;
-      const normalized = value ?? null;
-      values[field] = normalized;
-      updateSet[field] = normalized;
-    };
-    textFields.forEach(assignNullable);
-    if (user.lastSignedIn !== undefined) { values.lastSignedIn = user.lastSignedIn; updateSet.lastSignedIn = user.lastSignedIn; }
-    if (user.role !== undefined) { values.role = user.role; updateSet.role = user.role; }
-    else if (user.openId === ENV.ownerOpenId) { values.role = "admin"; updateSet.role = "admin"; }
+    const fields = ["name", "email", "loginMethod", "username", "passwordHash", "role", "lastSignedIn"] as const;
+    
+    fields.forEach((field) => {
+      const value = (user as any)[field];
+      if (value !== undefined) {
+        updateSet[field] = value ?? null;
+      }
+    });
+
+    if (user.openId === ENV.ownerOpenId && !user.role) {
+      values.role = "admin";
+      updateSet.role = "admin";
+    }
+
     if (!values.lastSignedIn) values.lastSignedIn = new Date();
     if (Object.keys(updateSet).length === 0) updateSet.lastSignedIn = new Date();
+
     await db.insert(users).values(values).onDuplicateKeyUpdate({ set: updateSet });
   } catch (error) {
     console.error("[Database] Failed to upsert user:", error);
@@ -57,6 +73,13 @@ export async function getUserByOpenId(openId: string) {
   return result.length > 0 ? result[0] : undefined;
 }
 
+export async function getUserByUsername(username: string) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(users).where(eq(users.username, username)).limit(1);
+  return result.length > 0 ? result[0] : undefined;
+}
+
 // ─── Booking helpers ──────────────────────────────────────────────────────────
 
 export type BookingFilters = {
@@ -66,6 +89,7 @@ export type BookingFilters = {
   depositStatus?: "pending" | "paid" | "returned" | "not_applicable";
   checkInFrom?: Date;
   checkInTo?: Date;
+  timeRange?: "month" | "next_month" | "3months" | "6months" | "year" | "all";
   limit?: number;
   offset?: number;
 };
@@ -74,6 +98,27 @@ export async function getBookings(filters: BookingFilters = {}) {
   const db = await getDb();
   if (!db) return [];
 
+  const now = new Date();
+  let startDate = filters.checkInFrom;
+  let endDate = filters.checkInTo;
+
+  if (filters.timeRange === "month") {
+    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  } else if (filters.timeRange === "next_month") {
+    startDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    endDate = new Date(now.getFullYear(), now.getMonth() + 2, 0, 23, 59, 59);
+  } else if (filters.timeRange === "3months") {
+    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    endDate = new Date(now.getFullYear(), now.getMonth() + 3, 0, 23, 59, 59);
+  } else if (filters.timeRange === "6months") {
+    startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+    endDate = new Date(now.getFullYear(), now.getMonth() + 6, 0, 23, 59, 59);
+  } else if (filters.timeRange === "year") {
+    startDate = new Date(now.getFullYear(), 0, 1);
+    endDate = new Date(now.getFullYear(), 11, 31, 23, 59, 59);
+  }
+
   const conditions = [];
   if (filters.property) conditions.push(eq(bookings.property, filters.property));
   if (filters.channel) conditions.push(eq(bookings.channel, filters.channel));
@@ -81,8 +126,8 @@ export async function getBookings(filters: BookingFilters = {}) {
     conditions.push(eq(bookings.status, filters.status));
   }
   if (filters.depositStatus) conditions.push(eq(bookings.depositStatus, filters.depositStatus));
-  if (filters.checkInFrom) conditions.push(gte(bookings.checkIn, filters.checkInFrom));
-  if (filters.checkInTo) conditions.push(lte(bookings.checkIn, filters.checkInTo));
+  if (startDate) conditions.push(gte(bookings.checkIn, startDate));
+  if (endDate) conditions.push(lte(bookings.checkIn, endDate));
 
   const query = db
     .select()
@@ -115,6 +160,8 @@ export async function updateBookingStatus(
   const db = await getDb();
   if (!db) return;
   await db.update(bookings).set({ status }).where(eq(bookings.id, id));
+  
+  await Logger.bookingAction(id, "status_change", `Status updated to ${status}`);
 }
 
 export async function updateDepositStatus(
@@ -124,19 +171,23 @@ export async function updateDepositStatus(
   const db = await getDb();
   if (!db) return;
   await db.update(bookings).set({ depositStatus }).where(eq(bookings.id, id));
+
+  await Logger.bookingAction(id, "status_change", `Deposit status updated to ${depositStatus}`);
 }
 
 export async function updateBookingNotes(id: number, notes: string) {
   const db = await getDb();
   if (!db) return;
   await db.update(bookings).set({ notes }).where(eq(bookings.id, id));
+
+  await Logger.bookingAction(id, "manual_edit", "Updated booking notes");
 }
 
 export async function getBookingStats(filters: {
   property?: "Sadoles" | "Hacjenda";
   channel?: "slowhop" | "airbnb" | "booking" | "alohacamp" | "direct";
   status?: ("pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")[];
-  timeRange?: "month" | "3months" | "6months" | "year" | "all";
+  timeRange?: "month" | "next_month" | "3months" | "6months" | "year" | "all";
 } = {}) {
   const db = await getDb();
   if (!db) return null;
@@ -148,6 +199,9 @@ export async function getBookingStats(filters: {
   if (filters.timeRange === "month") {
     startDate = new Date(now.getFullYear(), now.getMonth(), 1);
     endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+  } else if (filters.timeRange === "next_month") {
+    startDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    endDate = new Date(now.getFullYear(), now.getMonth() + 2, 0, 23, 59, 59);
   } else if (filters.timeRange === "3months") {
     startDate = new Date(now.getFullYear(), now.getMonth(), 1);
     endDate = new Date(now.getFullYear(), now.getMonth() + 3, 0, 23, 59, 59);
@@ -241,4 +295,39 @@ export async function getPropertyRatings(property: "Sadoles" | "Hacjenda") {
     .select()
     .from(propertyRatings)
     .where(eq(propertyRatings.property, property));
+}
+
+export async function getBookingActivities(bookingId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(bookingActivities)
+    .where(eq(bookingActivities.bookingId, bookingId))
+    .orderBy(desc(bookingActivities.createdAt));
+}
+
+// ─── System settings helpers ──────────────────────────────────────────────────
+
+export async function getSystemSetting(key: string): Promise<string | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.select().from(systemSettings).where(eq(systemSettings.key, key)).limit(1);
+  return result[0]?.value ?? null;
+}
+
+export async function setSystemSetting(key: string, value: string): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+  await db.insert(systemSettings).values({ key, value }).onDuplicateKeyUpdate({ set: { value } });
+}
+
+import { ENV } from "./_core/env";
+
+/**
+ * Gets the admin email from system settings, falling back to a configured default.
+ */
+export async function getAdminEmail(): Promise<string> {
+  const email = await getSystemSetting("ADMIN_EMAIL");
+  return email || ENV.adminEmail;
 }

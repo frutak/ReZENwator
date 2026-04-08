@@ -212,19 +212,15 @@ class SDKServer {
       });
       const { openId, appId, name } = payload as Record<string, unknown>;
 
-      if (
-        !isNonEmptyString(openId) ||
-        !isNonEmptyString(appId) ||
-        !isNonEmptyString(name)
-      ) {
-        console.warn("[Auth] Session payload missing required fields");
+      if (!isNonEmptyString(openId)) {
+        console.warn("[Auth] Session payload missing required openId field");
         return null;
       }
 
       return {
         openId,
-        appId,
-        name,
+        appId: String(appId || ""),
+        name: String(name || ""),
       };
     } catch (error) {
       console.warn("[Auth] Session verification failed", String(error));
@@ -268,7 +264,12 @@ class SDKServer {
 
     const sessionUserId = session.openId;
     const signedInAt = new Date();
+    
+    // Try both openId and username
     let user = await db.getUserByOpenId(sessionUserId);
+    if (!user) {
+      user = await db.getUserByUsername(sessionUserId);
+    }
 
     // If user not in DB, sync from OAuth server automatically
     if (!user) {
@@ -293,7 +294,7 @@ class SDKServer {
     }
 
     await db.upsertUser({
-      openId: user.openId,
+      id: user.id,
       lastSignedIn: signedInAt,
     });
 

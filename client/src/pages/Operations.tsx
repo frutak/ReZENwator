@@ -18,6 +18,7 @@ export default function Operations() {
   const { data: lastRun } = trpc.sync.lastRun.useQuery();
   const { data: logs = [] } = trpc.sync.logs.useQuery({ limit: 30 });
   const { data: feeds = [] } = trpc.sync.feeds.useQuery();
+  const { data: syncStatuses = [] } = trpc.sync.status.useQuery();
   const utils = trpc.useUtils();
 
   const [reportMonth, setReportMonth] = useState<string>(String(new Date().getMonth() + 1));
@@ -28,6 +29,7 @@ export default function Operations() {
     onSuccess: () => {
       utils.sync.logs.invalidate();
       utils.sync.lastRun.invalidate();
+      utils.sync.status.invalidate();
       utils.bookings.stats.invalidate();
       toast.success("iCal sync triggered successfully");
     },
@@ -38,6 +40,7 @@ export default function Operations() {
     onSuccess: (data) => {
       utils.sync.logs.invalidate();
       utils.sync.lastRun.invalidate();
+      utils.sync.status.invalidate();
       toast.success(
         `Email check complete — ${data.processed} processed, ${data.enriched} enriched, ${data.matched} matched`
       );
@@ -220,7 +223,7 @@ export default function Operations() {
                   : "Never run"}
               </p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                Inbox: furtka.rentals@gmail.com
+                Inbox: {import.meta.env.VITE_GMAIL_USER || "configured-email@example.com"}
               </p>
             </CardContent>
           </Card>
@@ -238,24 +241,42 @@ export default function Operations() {
                   <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Feed</th>
                   <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Property</th>
                   <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Channel</th>
+                  <th className="text-left px-4 py-2.5 font-medium text-muted-foreground">Last Successful Sync</th>
                 </tr>
               </thead>
               <tbody>
-                {feeds.map((feed) => (
-                  <tr key={feed.label} className="border-b last:border-0">
-                    <td className="px-4 py-2.5 font-medium">{feed.label}</td>
-                    <td className="px-4 py-2.5">
-                      {feed.property === "Sadoles" ? "Sadoleś" : feed.property}
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <span
-                        className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium channel-${feed.channel}`}
-                      >
-                        {feed.channel}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {feeds.map((feed) => {
+                  const status = syncStatuses.find(s => s.source === feed.label);
+                  return (
+                    <tr key={feed.label} className="border-b last:border-0">
+                      <td className="px-4 py-2.5 font-medium">{feed.label}</td>
+                      <td className="px-4 py-2.5">
+                        {feed.property === "Sadoles" ? "Sadoleś" : feed.property}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <span
+                          className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium channel-${feed.channel}`}
+                        >
+                          {feed.channel}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5">
+                        {status?.lastSuccess ? (
+                          <span className="text-xs text-muted-foreground">
+                            {formatDistanceToNow(new Date(status.lastSuccess), { addSuffix: true })}
+                          </span>
+                        ) : (
+                          <span className="text-xs text-muted-foreground italic">Never</span>
+                        )}
+                        {status?.consecutiveFailures > 0 && (
+                          <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded bg-red-50 text-[10px] font-medium text-red-600 border border-red-100" title={status.lastError || "Unknown error"}>
+                            {status.consecutiveFailures} errors
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </CardContent>

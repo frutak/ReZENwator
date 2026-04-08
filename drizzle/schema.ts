@@ -9,6 +9,7 @@ import {
   datetime,
   index,
   uniqueIndex,
+  json,
 } from "drizzle-orm/mysql-core";
 
 /**
@@ -16,11 +17,17 @@ import {
  */
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),
-  openId: varchar("openId", { length: 64 }).notNull().unique(),
+  username: varchar("username", { length: 64 }).unique(),
+  passwordHash: text("passwordHash"),
+  openId: varchar("openId", { length: 64 }).unique(),
   name: text("name"),
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+  /** Optional restriction to a specific property: "Sadoles", "Hacjenda" or null for all */
+  propertyAccess: varchar("propertyAccess", { length: 64 }),
+  /** Optional restriction to a specific view: "cleaning", "bookings", "pricing" or null for all */
+  viewAccess: varchar("viewAccess", { length: 64 }),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -87,11 +94,18 @@ export const bookings = mysqlTable(
     childrenCount: int("childrenCount"),
     animalsCount: int("animalsCount"),
 
+    // New fields for contract and business bookings
+    purpose: varchar("purpose", { length: 128 }).default("leisure"),
+    companyName: varchar("companyName", { length: 256 }),
+    nip: varchar("nip", { length: 32 }),
+
     // Payments
     /** Total amount paid by the guest so far */
     amountPaid: decimal("amountPaid", { precision: 10, scale: 2 }).default("0.00"),
-    /** Security deposit amount required */
+    /** Security deposit amount required (Kaucja) */
     depositAmount: decimal("depositAmount", { precision: 10, scale: 2 }).default("500.00"),
+    /** Reservation fee required to confirm (Zaliczka) */
+    reservationFee: decimal("reservationFee", { precision: 10, scale: 2 }),
 
     // Pricing (populated from email parsing)
     /** Total price charged to the guest */
@@ -195,7 +209,7 @@ export type InsertGuestEmail = typeof guestEmails.$inferInsert;
 export const propertyRatings = mysqlTable("property_ratings", {
   id: int("id").autoincrement().primaryKey(),
   property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).notNull(),
-  portal: mysqlEnum("portal", ["booking", "airbnb", "slowhop"]).notNull(),
+  portal: mysqlEnum("portal", ["booking", "airbnb", "slowhop", "alohacamp", "google"]).notNull(),
   rating: decimal("rating", { precision: 3, scale: 2 }).notNull(),
   count: int("count").notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -205,3 +219,126 @@ export const propertyRatings = mysqlTable("property_ratings", {
 
 export type PropertyRating = typeof propertyRatings.$inferSelect;
 export type InsertPropertyRating = typeof propertyRatings.$inferInsert;
+
+/**
+ * Booking activities — records history of actions, enrichments and emails for a booking.
+ */
+export const bookingActivities = mysqlTable("booking_activities", {
+  id: int("id").autoincrement().primaryKey(),
+  bookingId: int("bookingId").notNull(),
+  type: mysqlEnum("type", ["email", "enrichment", "manual_edit", "status_change", "system"]).notNull(),
+  action: varchar("action", { length: 256 }).notNull(),
+  details: text("details"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_booking_id").on(table.bookingId),
+]);
+
+export type BookingActivity = typeof bookingActivities.$inferSelect;
+export type InsertBookingActivity = typeof bookingActivities.$inferInsert;
+
+/**
+ * Pricing plans — defines nightly prices and minimum stay requirements.
+ */
+export const pricingPlans = mysqlTable("pricing_plans", {
+  id: int("id").autoincrement().primaryKey(),
+  property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).notNull(),
+  name: varchar("name", { length: 128 }).notNull(),
+  nightlyPrice: int("nightlyPrice").notNull(),
+  minStay: int("minStay").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("idx_property_name").on(table.property, table.name),
+]);
+
+export type PricingPlan = typeof pricingPlans.$inferSelect;
+export type InsertPricingPlan = typeof pricingPlans.$inferInsert;
+
+/**
+ * Calendar pricing — assigns a pricing plan to every date for each property.
+ */
+export const calendarPricing = mysqlTable("calendar_pricing", {
+  id: int("id").autoincrement().primaryKey(),
+  property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).notNull(),
+  date: datetime("date").notNull(),
+  planId: int("planId").notNull(),
+}, (table) => [
+  uniqueIndex("idx_property_date").on(table.property, table.date),
+  index("idx_plan_id").on(table.planId),
+]);
+
+export type CalendarPricing = typeof calendarPricing.$inferSelect;
+export type InsertCalendarPricing = typeof calendarPricing.$inferInsert;
+
+/**
+ * Property settings — stores global configuration per property (e.g. fixed booking price).
+ */
+export const propertySettings = mysqlTable("property_settings", {
+  property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).primaryKey(),
+  fixedBookingPrice: int("fixedBookingPrice").default(800).notNull(),
+  petFee: int("petFee").default(200).notNull(),
+  /** JSON array of { maxGuests: number, multiplier: number } sorted by maxGuests asc */
+  peopleDiscount: json("peopleDiscount"),
+  lastMinuteDiscount: decimal("lastMinuteDiscount", { precision: 4, scale: 2 }).default("0.05").notNull(),
+  lastMinuteDays: int("lastMinuteDays").default(14).notNull(),
+  /** JSON array of { minNights: number, discount: number } sorted by minNights desc */
+  stayDurationDiscounts: json("stayDurationDiscounts"),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type PropertySettings = typeof propertySettings.$inferSelect;
+export type InsertPropertySettings = typeof propertySettings.$inferInsert;
+
+/**
+ * System settings — stores global configuration (e.g. admin email).
+ */
+export const systemSettings = mysqlTable("system_settings", {
+  key: varchar("key", { length: 256 }).primaryKey(),
+  value: text("value").notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type SystemSetting = typeof systemSettings.$inferSelect;
+export type InsertSystemSetting = typeof systemSettings.$inferInsert;
+
+/**
+ * Sync status — tracks the latest success and attempt for each source.
+ */
+export const syncStatus = mysqlTable("sync_status", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Source name (e.g. "Sadoles / Slowhop") */
+  source: varchar("source", { length: 256 }).notNull().unique(),
+  /** Type of sync: ical or email */
+  syncType: mysqlEnum("syncType", ["ical", "email"]).notNull(),
+  /** Last successful sync time */
+  lastSuccess: timestamp("lastSuccess"),
+  /** Last sync attempt time (success or failure) */
+  lastAttempt: timestamp("lastAttempt").defaultNow().notNull(),
+  /** Error message from the last failed attempt */
+  lastError: text("lastError"),
+  /** Number of consecutive failures */
+  consecutiveFailures: int("consecutiveFailures").default(0).notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type SyncStatus = typeof syncStatus.$inferSelect;
+export type InsertSyncStatus = typeof syncStatus.$inferInsert;
+
+/**
+ * Portal analytics — tracks unique IP addresses per page per day.
+ */
+export const portalAnalytics = mysqlTable("portal_analytics", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Date of the visit */
+  date: timestamp("date").notNull(),
+  /** Page identifier: "main", "Sadoles", "Hacjenda" */
+  page: varchar("page", { length: 64 }).notNull(),
+  /** Hashed IP address for privacy-preserving unique counting */
+  ipHash: varchar("ipHash", { length: 64 }).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+}, (table) => [
+  uniqueIndex("idx_date_page_ip").on(table.date, table.page, table.ipHash),
+]);
+
+export type PortalAnalytics = typeof portalAnalytics.$inferSelect;
+export type InsertPortalAnalytics = typeof portalAnalytics.$inferInsert;
