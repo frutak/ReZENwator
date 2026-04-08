@@ -81,6 +81,31 @@ Pozostała kwota do zapłaty: 1260 pln`;
   });
 });
 
+describe("parseSlowhopTransferEmail", () => {
+  const subject = "Przelew przedpłaty za rezerwacje id 1222769 na Slowhop";
+  const body = `Dzień dobry,
+Przesyłamy zestawienie przedpłat:
+1222769 (Evelina De Lain, 28-03-2026 - 01-04-2026) 1800 zł 540 zł 270 zł 207.9 zł
+Pozdrawiamy,
+Zespół Slowhop`;
+
+  it("extracts guest name and dates", () => {
+    // We need to import it first or use parseEmail if it's dispatched there
+    const result = parseEmail("noreply@slowhop.com", subject, body) as any;
+    expect(result?.guestName).toBe("Evelina De Lain");
+    expect(result?.checkIn?.getDate()).toBe(28);
+    expect(result?.checkOut?.getDate()).toBe(1);
+  });
+
+  it("extracts total price, prepayment and commission", () => {
+    const result = parseEmail("noreply@slowhop.com", subject, body) as any;
+    expect(result?.totalPrice).toBe(1800);
+    expect(result?.amountPaid).toBe(540);
+    expect(result?.commission).toBe(270);
+    expect(result?.hostRevenue).toBe(1800 - 270);
+  });
+});
+
 // ─── Airbnb parser tests ──────────────────────────────────────────────────────
 
 describe("parseAirbnbEmail", () => {

@@ -1,8 +1,10 @@
+import { ENV } from "../_core/env";
+
 /**
  * Email Polling Service
  *
- * Connects to Gmail via IMAP, fetches unread emails from the dedicated
- * furtka.rentals@gmail.com inbox, parses them using the email parsers,
+ * Connects to Gmail via IMAP, fetches unread emails from the configured
+ * inbox, parses them using the email parsers,
  * and updates bookings in the database accordingly.
  *
  * For booking channel emails (Slowhop, Airbnb): enriches the matching
@@ -16,17 +18,19 @@ import Imap from "imap";
 import { simpleParser } from "mailparser";
 import { and, eq, or, like, lte } from "drizzle-orm";
 import { getDb } from "../db";
-import { bookings, syncLogs } from "../../drizzle/schema";
+import { bookings } from "../../drizzle/schema";
 import { parseEmail } from "./emailParsers";
 import { findMatchingBookings, applyTransferMatch } from "./bookingMatcher";
 import type { ParsedBookingEmail, ParsedBankEmail } from "./emailParsers";
-import { sendAlertEmail } from "../_core/email";
+import { sendAlertEmail, forwardUnmatchedEmail } from "../_core/email";
+import { Logger } from "../_core/logger";
+import { initialStatus, initialDepositStatus } from "./icalPoller";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 function getGmailConfig() {
   return {
-    user: process.env.GMAIL_USER || "furtka.rentals@gmail.com",
+    user: ENV.gmailUser,
     password: process.env.GMAIL_APP_PASSWORD || "",
     host: "imap.gmail.com",
     port: 993,
@@ -48,35 +52,42 @@ function createImapConnection(): Imap {
 async function fetchUnseenEmails(): Promise<
   Array<{ uid: number; from: string; subject: string; body: string; messageId: string }>
 > {
+  const config = getGmailConfig();
+  const imap = new Imap(config);
+  
   return new Promise((resolve, reject) => {
-    const config = getGmailConfig();
-    const imap = new Imap(config);
     const emails: Array<{ uid: number; from: string; subject: string; body: string; messageId: string }> = [];
+    let isFinished = false;
+
+    const cleanup = () => {
+      if (!isFinished) {
+        isFinished = true;
+        clearTimeout(timeout);
+        imap.end();
+      }
+    };
 
     const timeout = setTimeout(() => {
-      console.warn("[Email] IMAP connection timed out after 30s");
-      imap.end();
+      console.warn("[Email] IMAP connection timed out after 45s");
+      cleanup();
       reject(new Error("IMAP connection timeout"));
-    }, 30000);
+    }, 45000);
 
     imap.once("ready", () => {
       imap.openBox("INBOX", false, (err, _box) => {
         if (err) {
-          clearTimeout(timeout);
-          imap.end();
+          cleanup();
           return reject(err);
         }
 
         imap.search(["UNSEEN"], (searchErr, results) => {
           if (searchErr) {
-            clearTimeout(timeout);
-            imap.end();
+            cleanup();
             return reject(searchErr);
           }
 
           if (!results || results.length === 0) {
-            clearTimeout(timeout);
-            imap.end();
+            cleanup();
             return resolve([]);
           }
 
@@ -128,8 +139,8 @@ async function fetchUnseenEmails(): Promise<
                 }
               });
 
-              // Add a per-message timeout just in case
-              setTimeout(() => res(), 10000);
+              // Add a per-message timeout
+              setTimeout(() => res(), 15000);
             });
             promises.push(p);
           });
@@ -144,8 +155,7 @@ async function fetchUnseenEmails(): Promise<
             } catch (err) {
               console.error("[Email] Error waiting for all email parses:", err);
             } finally {
-              clearTimeout(timeout);
-              imap.end();
+              cleanup();
               resolve(emails);
             }
           });
@@ -154,7 +164,7 @@ async function fetchUnseenEmails(): Promise<
     });
 
     imap.once("error", (err: Error) => {
-      clearTimeout(timeout);
+      cleanup();
       reject(err);
     });
 
@@ -209,6 +219,8 @@ async function processPaymentConfirmation(parsed: ParsedBookingEmail): Promise<b
           transferTitle: `Booking.com Payout Match (${parsed.bookingObjectId ?? "N/A"})`,
         })
         .where(eq(bookings.id, match.id));
+
+      await Logger.bookingAction(match.id, "status_change", "Marked as FINISHED via payout matching", `Source: Booking.com payment email (${parsed.bookingObjectId ?? "N/A"})`);
 
       console.log(`[Email] Booking #${match.id} marked as FINISHED via payout matching`);
       return true;
@@ -270,6 +282,8 @@ async function processPaymentConfirmation(parsed: ParsedBookingEmail): Promise<b
     })
     .where(eq(bookings.id, match.id));
 
+  await Logger.bookingAction(match.id, "status_change", "Marked as FINISHED via payment confirmation", `Source: Booking.com email (${parsed.bookingObjectId ?? parsed.guestName})`);
+
   console.log(`[Email] Booking #${match.id} (Status: ${match.status}) marked as FINISHED via payment confirmation (${parsed.bookingObjectId ?? parsed.guestName})`);
   return true;
 }
@@ -323,28 +337,40 @@ async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boole
     );
     
     // If no match found, create a new booking record instead of failing
-    await db.insert(bookings).values({
+    const adults = parsed.adultsCount ?? 0;
+    const children = parsed.childrenCount ?? 0;
+    const totalGuests = (adults + children) > 0 ? (adults + children) : (parsed.guestCount ?? 0);
+
+    const [insertResult] = await db.insert(bookings).values({
       icalUid: `email-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
       property: (parsed.property as "Sadoles" | "Hacjenda") ?? "Sadoles",
       channel: parsed.channel,
       checkIn: parsed.checkIn,
       checkOut: parsed.checkOut,
-      status: "confirmed",
+      status: initialStatus(parsed.channel),
+      depositStatus: initialDepositStatus(parsed.channel),
       guestName: parsed.guestName,
       guestEmail: parsed.guestEmail,
       guestPhone: parsed.guestPhone,
       guestCountry: parsed.guestCountry,
-      adultsCount: parsed.adultsCount,
-      childrenCount: parsed.childrenCount,
+      guestCount: totalGuests,
+      adultsCount: adults,
+      childrenCount: children,
       animalsCount: parsed.animalsCount,
       totalPrice: parsed.totalPrice ? String(parsed.totalPrice) : undefined,
       commission: parsed.commission ? String(parsed.commission) : undefined,
       hostRevenue: parsed.hostRevenue ? String(parsed.hostRevenue) : undefined,
       amountPaid: parsed.amountPaid ? String(parsed.amountPaid) : "0.00",
+      reservationFee: parsed.amountPaid ? String(parsed.amountPaid) : undefined,
       currency: parsed.currency ?? "PLN",
       emailMessageId: parsed.rawText.substring(0, 100), // simplistic unique ref
     });
     
+    const newBookingId = (insertResult as any).insertId;
+    if (newBookingId) {
+      await Logger.bookingAction(newBookingId, "system", "Created via email parsing", `Channel: ${parsed.channel}`);
+    }
+
     return true;
   }
 
@@ -354,7 +380,19 @@ async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boole
       ? "confirmed"
       : match.status;
 
+  const adults = parsed.adultsCount ?? match.adultsCount ?? 0;
+  const children = parsed.childrenCount ?? match.childrenCount ?? 0;
+  const totalGuests = (adults + children) > 0 ? (adults + children) : (parsed.guestCount ?? match.guestCount);
+
   // Update booking with guest details from email
+  const newAmountPaid = parsed.amountPaid != null 
+    ? (parseFloat(String(match.amountPaid || "0")) > parsed.amountPaid ? match.amountPaid : String(parsed.amountPaid))
+    : match.amountPaid;
+  
+  const newReservationFee = parsed.amountPaid != null 
+    ? (parseFloat(String(match.reservationFee || "0")) > parsed.amountPaid ? match.reservationFee : String(parsed.amountPaid))
+    : match.reservationFee;
+
   await db
     .update(bookings)
     .set({
@@ -363,17 +401,21 @@ async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boole
       guestEmail: parsed.guestEmail ?? match.guestEmail,
       guestPhone: parsed.guestPhone ?? match.guestPhone,
       guestCountry: parsed.guestCountry ?? match.guestCountry,
-      adultsCount: parsed.adultsCount ?? match.adultsCount,
-      childrenCount: parsed.childrenCount ?? match.childrenCount,
+      guestCount: totalGuests,
+      adultsCount: adults,
+      childrenCount: children,
       animalsCount: parsed.animalsCount ?? match.animalsCount,
       totalPrice: parsed.totalPrice ? String(parsed.totalPrice) : match.totalPrice,
       commission: parsed.commission ? String(parsed.commission) : match.commission,
       hostRevenue: parsed.hostRevenue != null ? String(parsed.hostRevenue) : match.hostRevenue,
-      amountPaid: parsed.amountPaid != null ? String(parsed.amountPaid) : match.amountPaid,
+      amountPaid: newAmountPaid,
+      reservationFee: newReservationFee,
 
       currency: parsed.currency ?? match.currency,
     })
     .where(eq(bookings.id, match.id));
+
+  await Logger.bookingAction(match.id, "enrichment", "Enriched with guest details from email", `Channel: ${parsed.channel}, Guest: ${parsed.guestName}`);
 
   console.log(
     `[Email] Enriched booking #${match.id} (${parsed.channel}) with guest: ${parsed.guestName}`
@@ -411,18 +453,12 @@ export async function pollEmails(): Promise<{
     console.error(`[Email] ${msg}`);
     errors.push(msg);
 
-    const db = await getDb();
-    if (db) {
-      await db.insert(syncLogs).values({
-        syncType: "email",
-        source: "Gmail IMAP",
-        newBookings: 0,
-        updatedBookings: 0,
-        success: "false",
-        errorMessage: msg,
-        durationMs: Date.now() - start,
-      }).catch(() => {});
-    }
+    await Logger.system("email", {
+      source: "Gmail IMAP",
+      success: false,
+      errorMessage: msg,
+      durationMs: Date.now() - start,
+    });
 
     return { processed: 0, enriched: 0, matched: 0, errors };
   }
@@ -435,7 +471,8 @@ export async function pollEmails(): Promise<{
       const parsed = parseEmail(email.from, email.subject, email.body);
 
       if (!parsed) {
-        console.log(`[Email] Skipping unrecognized email: "${email.subject}"`);
+        console.log(`[Email] Skipping and forwarding unrecognized email: "${email.subject}"`);
+        await forwardUnmatchedEmail(email, [], "unrecognized");
         continue;
       }
 
@@ -447,7 +484,8 @@ export async function pollEmails(): Promise<{
           enriched++;
           console.log(`[Email] Successfully processed booking email: "${email.subject}"`);
         } else {
-          console.warn(`[Email] Failed to match booking for "${email.subject}"`);
+          console.warn(`[Email] Failed to match or create booking for "${email.subject}" — forwarding`);
+          await forwardUnmatchedEmail(email, [], "unmatched");
         }
       } else if (parsed.type === "bank") {
         const bankData = parsed as ParsedBankEmail;
@@ -462,26 +500,14 @@ export async function pollEmails(): Promise<{
               `[Email] Auto-matched transfer to booking #${best.bookingId} (score: ${best.score})`
             );
           } else {
-            // Store transfer details on the best candidate for manual review
-            const db = await getDb();
-            if (db) {
-              await db
-                .update(bookings)
-                .set({
-                  transferAmount: bankData.amount ? String(bankData.amount) : undefined,
-                  transferSender: bankData.senderName,
-                  transferTitle: bankData.transferTitle,
-                  transferDate: bankData.transferDate,
-                  matchScore: best.score,
-                })
-                .where(eq(bookings.id, best.bookingId));
-            }
             console.log(
-              `[Email] Low-confidence match for booking #${best.bookingId} (score: ${best.score}) — needs manual review`
+              `[Email] Low-confidence match for booking #${best.bookingId} (score: ${best.score}) — forwarding to admin without updating DB`
             );
+            await forwardUnmatchedEmail(email, candidates, "unmatched");
           }
         } else {
-          console.log(`[Email] No matching booking found for transfer from ${bankData.senderName}`);
+          console.log(`[Email] No matching booking found for transfer from ${bankData.senderName} — forwarding to admin`);
+          await forwardUnmatchedEmail(email, [], "unmatched");
         }
       }
     } catch (err) {
@@ -492,18 +518,14 @@ export async function pollEmails(): Promise<{
   }
 
   // Log the sync run
-  const db = await getDb();
-  if (db) {
-    await db.insert(syncLogs).values({
-      syncType: "email",
-      source: "Gmail IMAP",
-      newBookings: enriched,
-      updatedBookings: matched,
-      success: errors.length === 0 ? "true" : "false",
-      errorMessage: errors.length > 0 ? errors.slice(0, 3).join("; ") : null,
-      durationMs: Date.now() - start,
-    }).catch(() => {});
-  }
+  await Logger.system("email", {
+    source: "Gmail IMAP",
+    newBookings: enriched,
+    updatedBookings: matched,
+    success: errors.length === 0,
+    errorMessage: errors.length > 0 ? errors.slice(0, 3).join("; ") : null,
+    durationMs: Date.now() - start,
+  });
 
   return { processed, enriched, matched, errors };
 }

@@ -6,8 +6,8 @@ export const getLoginUrl = (): string | null => {
   const oauthPortalUrl = import.meta.env.VITE_OAUTH_PORTAL_URL;
   const appId = import.meta.env.VITE_APP_ID;
 
-  // Gracefully handle missing OAuth config (self-hosted without Manus auth)
-  if (!oauthPortalUrl || !appId) return null;
+  // Fallback to local login if OAuth is not configured
+  if (!oauthPortalUrl || !appId) return "/login";
 
   try {
     const redirectUri = `${window.location.origin}/api/oauth/callback`;
@@ -19,6 +19,6 @@ export const getLoginUrl = (): string | null => {
     url.searchParams.set("type", "signIn");
     return url.toString();
   } catch {
-    return null;
+    return "/login";
   }
 };

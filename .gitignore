@@ -106,6 +106,15 @@ temp/
 *.sqlite
 *.sqlite3
 
+# Backups and sensitive data
+backups/
+server/tests/emailParsers.generated.test.ts
+verify_bookings.ts
+verify_id5.ts
+rules.md
+PRICING_RULES.md
+.gitkeep
+
 # Webdev artifacts (checkpoint zips, migrations, etc.)
 .webdev/
 

@@ -1,9 +1,77 @@
 {
   "version": "5",
   "dialect": "mysql",
-  "id": "303a231b-31ce-44eb-8628-abaaafbaf7af",
+  "id": "3113508d-dc37-49e3-8ebe-e44c048b234c",
   "prevId": "367e168b-2c5c-4471-95e1-8cae868180c3",
   "tables": {
+    "booking_activities": {
+      "name": "booking_activities",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "bookingId": {
+          "name": "bookingId",
+          "type": "int",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "type": {
+          "name": "type",
+          "type": "enum('email','enrichment','manual_edit','status_change','system')",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "action": {
+          "name": "action",
+          "type": "varchar(256)",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "details": {
+          "name": "details",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "createdAt": {
+          "name": "createdAt",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "(now())"
+        }
+      },
+      "indexes": {
+        "idx_booking_id": {
+          "name": "idx_booking_id",
+          "columns": [
+            "bookingId"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "booking_activities_id": {
+          "name": "booking_activities_id",
+          "columns": [
+            "id"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraint": {}
+    },
     "bookings": {
       "name": "bookings",
       "columns": {
@@ -399,7 +467,7 @@
         },
         "rating": {
           "name": "rating",
-          "type": "decimal(3,1)",
+          "type": "decimal(3,2)",
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
@@ -428,7 +496,7 @@
             "property",
             "portal"
           ],
-          "isUnique": false
+          "isUnique": true
         }
       },
       "foreignKeys": {},

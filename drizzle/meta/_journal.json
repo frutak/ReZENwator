@@ -26,8 +26,50 @@
     {
       "idx": 3,
       "version": "5",
-      "when": 1774646875826,
-      "tag": "0003_abandoned_mac_gargan",
+      "when": 1774691064036,
+      "tag": "0003_stormy_nekra",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1774861716855,
+      "tag": "0004_outstanding_bishop",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1774948863877,
+      "tag": "0005_first_iron_lad",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1775070924868,
+      "tag": "0006_giant_bishop",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1775137950455,
+      "tag": "0007_chilly_donald_blake",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1775549791279,
+      "tag": "0008_glamorous_trauma",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "5",
+      "when": 1775638162794,
+      "tag": "0009_organic_hemingway",
       "breakpoints": true
     }
   ]

@@ -57,8 +57,8 @@ DATABASE_URL=mysql://user:password@host:3306/rental_manager
 JWT_SECRET=your-very-long-random-secret-here
 
 # Gmail IMAP
-GMAIL_USER=furtka.rentals@gmail.com
-GMAIL_APP_PASSWORD=xenf rxhm ntzb zwys
+GMAIL_USER=your-email@gmail.com
+GMAIL_APP_PASSWORD=your-app-specific-password
 
 # Application
 NODE_ENV=production
@@ -202,14 +202,14 @@ sudo journalctl -u rental-manager -n 100
 
 ## Email Forwarding Setup (Hotmail → Gmail)
 
-To forward relevant emails from your Hotmail/Outlook account to `furtka.rentals@gmail.com`:
+To forward relevant emails from your primary account to your configured `GMAIL_USER`:
 
-1. In Outlook Web, go to **Settings → Mail → Rules → Add new rule**
+1. In your primary email provider (e.g., Outlook), go to **Settings → Mail → Rules → Add new rule**
 2. Create rules to forward emails from:
    - `noreply@slowhop.com` (or subject contains "Rezerwacja")
    - `automated@airbnb.com` (or subject contains "Reservation confirmed")
    - `noreply@nestbank.pl` (or subject contains "Wpływ na konto")
-3. Set action: **Forward to** `furtka.rentals@gmail.com`
+3. Set action: **Forward to** `your-email@gmail.com`
 
 ---
 

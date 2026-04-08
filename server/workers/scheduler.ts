@@ -30,6 +30,8 @@ export function startScheduler(): void {
     } catch (err) {
       console.error("[Scheduler] iCal poll failed:", err);
     }
+  }, {
+    timezone: "Europe/Warsaw"
   });
 
   // ── Email polling: every 30 minutes (offset by 5 minutes) ─────────────────
@@ -40,6 +42,8 @@ export function startScheduler(): void {
     } catch (err) {
       console.error("[Scheduler] Email poll failed:", err);
     }
+  }, {
+    timezone: "Europe/Warsaw"
   });
 
   // ── Daily Maintenance: once a day at 08:00 AM ─────────────────────────────
@@ -50,6 +54,8 @@ export function startScheduler(): void {
     } catch (err) {
       console.error("[Scheduler] Daily maintenance failed:", err);
     }
+  }, {
+    timezone: "Europe/Warsaw"
   });
 
   // ── Weekly Ratings Update: Sunday at 02:00 AM ─────────────────────────────
@@ -60,20 +66,28 @@ export function startScheduler(): void {
     } catch (err) {
       console.error("[Scheduler] Weekly ratings update failed:", err);
     }
+  }, {
+    timezone: "Europe/Warsaw"
   });
 
   console.log("[Scheduler] Background jobs registered (iCal + Email + Daily Maintenance + Weekly Ratings)");
 
   // Run an initial poll shortly after startup (60 seconds delay)
   setTimeout(async () => {
-    console.log("[Scheduler] Running initial iCal poll and ratings update on startup...");
+    console.log("[Scheduler] Running initial iCal poll on startup...");
     try {
-      await Promise.all([
-        pollAllICalFeeds(),
-        updateAllPropertyRatings(),
-      ]);
+      await pollAllICalFeeds();
     } catch (err) {
-      console.error("[Scheduler] Initial startup jobs failed:", err);
+      console.error("[Scheduler] Initial iCal poll failed:", err);
     }
   }, 60_000);
+
+  setTimeout(async () => {
+    console.log("[Scheduler] Running initial ratings update on startup...");
+    try {
+      await updateAllPropertyRatings();
+    } catch (err) {
+      console.error("[Scheduler] Initial ratings update failed:", err);
+    }
+  }, 65_000);
 }
