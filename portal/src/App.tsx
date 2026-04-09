@@ -799,16 +799,16 @@ function AboutUs({ lang }: { lang: Lang }) {
               <Mail className="h-4 w-4 text-primary" />
               {texts.contact}
             </h3>
-            <div className="space-y-1 text-sm">
-              <div className="flex items-center gap-2">
-                <Mail className="h-3.5 w-3.5 text-zinc-400" />
-                <a href={`mailto:${import.meta.env.VITE_GMAIL_USER || 'contact@example.com'}`} className="hover:text-primary transition-colors">{import.meta.env.VITE_GMAIL_USER || 'contact@example.com'}</a>
+              <div className="space-y-1 text-sm">
+                <div className="flex items-center gap-2">
+                  <Mail className="h-3.5 w-3.5 text-zinc-400" />
+                  <a href={`mailto:${import.meta.env.VITE_GMAIL_USER || 'furtka.rentals@gmail.com'}`} className="hover:text-primary transition-colors">{import.meta.env.VITE_GMAIL_USER || 'furtka.rentals@gmail.com'}</a>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Phone className="h-3.5 w-3.5 text-zinc-400" />
+                  <span>{import.meta.env.VITE_CONTACT_PHONE || '+48571525563'}</span>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Phone className="h-3.5 w-3.5 text-zinc-400" />
-                <span>{import.meta.env.VITE_CONTACT_PHONE || ''}</span>
-              </div>
-            </div>
           </section>
 
           <section className="space-y-2">

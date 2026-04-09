@@ -371,7 +371,7 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
 /**
  * Poll all configured iCal feeds sequentially.
  */
-export async function pollAllICalFeeds(): Promise<void> {
+export async function pollAllICalFeeds(): Promise<{ newBookings: number; updatedBookings: number; errors: string[] }> {
   const allFeeds = getICalFeeds();
   const activeFeeds = allFeeds.filter(f => !!f.url);
   console.log(`[iCal] Starting poll of ${activeFeeds.length} feeds (out of ${allFeeds.length} total)...`);
@@ -430,7 +430,9 @@ export async function pollAllICalFeeds(): Promise<void> {
       "⚠️ FATAL ERROR: iCal Sync Job Failed",
       `The background iCal synchronization job encountered a fatal error and could not complete.\n\nError details: ${String(fatalErr)}\n\nTime: ${new Date().toLocaleString("pl-PL", { timeZone: "Europe/Warsaw" })}`
     );
+    allErrors.push(`Fatal error: ${String(fatalErr)}`);
   }
 
   console.log(`[iCal] Poll complete. New: ${totalNew}, Updated: ${totalUpdated}`);
+  return { newBookings: totalNew, updatedBookings: totalUpdated, errors: allErrors };
 }

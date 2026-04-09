@@ -42,9 +42,12 @@ export function parseAirbnbDate(dateStr: string): Date | undefined {
 
   const now = new Date();
   let year = now.getFullYear();
-  // If the month has already passed this year, assume next year
+  // Assume current year. Only move to next year if month is early (Jan/Feb) and we are late in the year (Nov/Dec)
+  // or if the date is more than 6 months in the past.
   const candidate = new Date(year, month, day);
-  if (candidate < now && month < now.getMonth()) year++;
+  if (now.getTime() - candidate.getTime() > 180 * 24 * 60 * 60 * 1000) {
+    year++;
+  }
 
   return new Date(year, month, day);
 }

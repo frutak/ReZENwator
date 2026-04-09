@@ -93,8 +93,8 @@ async function generateContractPDF(booking: Booking, language: "PL" | "EN"): Pro
     y += 5;
     addLine("Wynajmującym:", 10, "bold");
     addLine(ENV.businessName);
-    addLine(`NIP: ${process.env.BUSINESS_NIP || "__________"}, REGON: ${process.env.BUSINESS_REGON || "__________"}`);
-    addLine(`z siedzibą: ${process.env.BUSINESS_ADDRESS || "__________"}`);
+    addLine(`NIP: ${ENV.businessNip}, REGON: ${ENV.businessRegon}`);
+    addLine(`z siedzibą: ${ENV.businessAddress}`);
     y += 5;
     addLine("a");
     y += 5;
@@ -147,8 +147,8 @@ async function generateContractPDF(booking: Booking, language: "PL" | "EN"): Pro
     y += 5;
     addLine("Lessor:", 10, "bold");
     addLine(ENV.businessName);
-    addLine(`Tax ID (NIP): ${process.env.BUSINESS_NIP || "__________"}, REGON: ${process.env.BUSINESS_REGON || "__________"}`);
-    addLine(`Registered office: ${process.env.BUSINESS_ADDRESS || "__________"}`);
+    addLine(`Tax ID (NIP): ${ENV.businessNip}, REGON: ${ENV.businessRegon}`);
+    addLine(`Registered office: ${ENV.businessAddress}`);
     y += 5;
     addLine("and");
     y += 5;
@@ -245,8 +245,8 @@ const getArrivalReminderTemplate = (booking: Booking, isPL: boolean, isEarlyArri
   const dayOfWeek = getDayOfWeek(checkInDate, isPL);
   
   const guideLink = isSadoles 
-    ? (isPL ? (process.env.SADOLES_GUIDE_PL ?? "#") : (process.env.SADOLES_GUIDE_EN ?? "#"))
-    : (isPL ? (process.env.HACJENDA_GUIDE_PL ?? "#") : (process.env.HACJENDA_GUIDE_EN ?? "#"));
+    ? (isPL ? ENV.sadolesGuidePl : ENV.sadolesGuideEn)
+    : (isPL ? ENV.hacjendaGuidePl : ENV.hacjendaGuideEn);
 
   const arrivalTimePL = isEarlyArrival ? "od rana" : "od godziny 16";
   const arrivalTimeEN = isEarlyArrival ? "from the morning" : "from 4 PM";
@@ -343,8 +343,8 @@ const getTemplates = (type: GuestEmailType, booking: Booking, language: "PL" | "
 
   const isSadoles = booking.property === "Sadoles";
   const guideLink = isSadoles 
-    ? (isPL ? (process.env.SADOLES_GUIDE_PL ?? "#") : (process.env.SADOLES_GUIDE_EN ?? "#"))
-    : (isPL ? (process.env.HACJENDA_GUIDE_PL ?? "#") : (process.env.HACJENDA_GUIDE_EN ?? "#"));
+    ? (isPL ? ENV.sadolesGuidePl : ENV.sadolesGuideEn)
+    : (isPL ? ENV.hacjendaGuidePl : ENV.hacjendaGuideEn);
 
   switch (type) {
     case "booking_pending":
@@ -480,6 +480,13 @@ export async function getRecipientForEmail(type: GuestEmailType | "alert", booki
 }
 
 export async function sendGuestEmail(type: GuestEmailType, booking: Booking, extraData?: any): Promise<{ success: boolean; recipient: string }> {
+  // Global safeguard: if guest name or email is missing, do not send the email
+  // (unless it's specifically a missing_data_alert which is intended for the admin)
+  if (type !== "missing_data_alert" && (!booking.guestEmail || !booking.guestName)) {
+    console.log(`[Email] Skipping guest email ${type} for booking #${booking.id} due to missing essential data (Name: ${booking.guestName || "Missing"}, Email: ${booking.guestEmail || "Missing"})`);
+    return { success: false, recipient: "N/A" };
+  }
+
   const transporter = getTransporter();
   const recipient = await getRecipientForEmail(type, booking);
   if (!transporter) return { success: false, recipient };

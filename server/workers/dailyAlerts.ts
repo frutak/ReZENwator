@@ -1,4 +1,4 @@
-import { and, eq, lte, gte, lt, ne, sql } from "drizzle-orm";
+import { and, eq, lte, gte, lt, ne, sql, or, isNull, inArray, desc } from "drizzle-orm";
 import { getDb } from "../db";
 import { bookings, syncLogs, guestEmails as guestEmailsTable, portalAnalytics } from "../../drizzle/schema";
 import { format, subDays, startOfDay, endOfDay } from "date-fns";
@@ -115,6 +115,7 @@ export async function runDailyMaintenance() {
   let upcomingPendingDeposits: any[] = [];
   let depositsToReturn: any[] = [];
   let stalePortalPaid: any[] = [];
+  let bookingsMissingData: any[] = [];
   let failedSyncs: any[] = [];
   let failedGuestEmails: any[] = [];
   let latestSyncs: any[] = [];
@@ -152,6 +153,27 @@ export async function runDailyMaintenance() {
     const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
     const oneWeekFromNow = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+    // ─── 0.2 Find Bookings Missing Essential Data ──────────────────────────────────
+    try {
+      bookingsMissingData = await db
+        .select()
+        .from(bookings)
+        .where(
+          and(
+            or(
+              isNull(bookings.guestName), 
+              eq(bookings.guestName, ""), 
+              isNull(bookings.guestEmail), 
+              eq(bookings.guestEmail, "")
+            ),
+            inArray(bookings.status, ["confirmed", "portal_paid", "paid", "pending"]),
+            gte(bookings.checkOut, now)
+          )
+        );
+    } catch (err) {
+      console.error("[DailyAlerts] Finding bookings missing data failed:", err);
+    }
 
     // ─── 1. Automatic status transitions (Confirmed -> Portal Paid) ────────────────
     try {
@@ -320,7 +342,7 @@ export async function runDailyMaintenance() {
           .select()
           .from(syncLogs)
           .where(eq(syncLogs.source, source))
-          .orderBy(syncLogs.createdAt, "desc")
+          .orderBy(desc(syncLogs.createdAt))
           .limit(1);
         if (latest) {
           latestSyncs.push(latest);
@@ -361,6 +383,7 @@ export async function runDailyMaintenance() {
         upcomingPendingDeposits,
         depositsToReturn,
         stalePortalPaid,
+        bookingsMissingData,
         transitions,
         guestEmailSummary,
         failedSyncs,
@@ -410,6 +433,7 @@ async function sendConsolidatedAlertEmail(data: {
   upcomingPendingDeposits: any[];
   depositsToReturn: any[];
   stalePortalPaid: any[];
+  bookingsMissingData: any[];
   transitions: string[];
   guestEmailSummary: GuestEmailSummary;
   failedSyncs: any[];
@@ -527,6 +551,22 @@ async function sendConsolidatedAlertEmail(data: {
   // --- TASKS TO TAKE BY OWNER ---
   html += `<h3 style="color:#b45309">📋 Tasks for You</h3>`;
 
+  if (data.bookingsMissingData.length > 0) {
+    html += `
+      <h4 style="color:#9f1239;margin-bottom:8px">🚨 Bookings Missing Essential Data (Action Required)</h4>
+      <p style="font-size:12px;color:#6b7280;margin-top:-4px">Guest email or name is missing. Reminder emails will NOT be sent until fixed.</p>
+      <ul style="font-size:14px;margin-top:0">
+        ${data.bookingsMissingData.map(b => `
+          <li>
+            <strong>${b.property}</strong>: ${b.guestName || "<i>Name missing</i>"} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)}) 
+            — ${!b.guestEmail ? "<span style='color:#9f1239'>Email missing</span>" : ""}
+            ${!b.guestName ? "<span style='color:#9f1239'>Name missing</span>" : ""}
+          </li>
+        `).join("")}
+      </ul>
+    `;
+  }
+
   if (data.stalePending.length > 0) {
     html += `
       <h4 style="color:#9f1239;margin-bottom:8px">⚠️ Stale Pending Bookings (> 48h)</h4>
@@ -586,7 +626,7 @@ async function sendConsolidatedAlertEmail(data: {
     </div>
   `;
 
-  const totalItems = data.stalePending.length + data.upcomingUnpaid.length + data.upcomingPendingDeposits.length + data.depositsToReturn.length + data.stalePortalPaid.length;
+  const totalItems = data.stalePending.length + data.upcomingUnpaid.length + data.upcomingPendingDeposits.length + data.depositsToReturn.length + data.stalePortalPaid.length + data.bookingsMissingData.length;
   const totalErrors = data.failedSyncs.length + data.failedGuestEmails.length;
 
   try {

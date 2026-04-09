@@ -1,30 +1,15 @@
 import { ENV } from "../_core/env";
-
-/**
- * Email Polling Service
- *
- * Connects to Gmail via IMAP, fetches unread emails from the configured
- * inbox, parses them using the email parsers,
- * and updates bookings in the database accordingly.
- *
- * For booking channel emails (Slowhop, Airbnb): enriches the matching
- * booking with guest details and moves status to 'confirmed'.
- *
- * For bank emails (Nestbank): runs fuzzy matching against existing bookings
- * and automatically marks high-confidence matches as 'paid'.
- */
-
 import Imap from "imap";
 import { simpleParser } from "mailparser";
-import { and, eq, or, like, lte } from "drizzle-orm";
+import { and, eq, or, like, lte, gte, isNull } from "drizzle-orm";
 import { getDb } from "../db";
 import { bookings } from "../../drizzle/schema";
-import { parseEmail } from "./emailParsers";
+import { qualifyEmail, QualifiedEmail, ParsedBookingData, ParsedBankData } from "./emailParsers";
 import { findMatchingBookings, applyTransferMatch } from "./bookingMatcher";
-import type { ParsedBookingEmail, ParsedBankEmail } from "./emailParsers";
 import { sendAlertEmail, forwardUnmatchedEmail } from "../_core/email";
 import { Logger } from "../_core/logger";
 import { initialStatus, initialDepositStatus } from "./icalPoller";
+import { format } from "date-fns";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -40,16 +25,11 @@ function getGmailConfig() {
   };
 }
 
-/** Auto-confirm threshold: if match score >= this, auto-mark as paid */
-const AUTO_MATCH_THRESHOLD = 75;
+const AUTO_MATCH_THRESHOLD = 80;
 
 // ─── IMAP helpers ─────────────────────────────────────────────────────────────
 
-function createImapConnection(): Imap {
-  return new Imap(getGmailConfig());
-}
-
-async function fetchUnseenEmails(): Promise<
+async function fetchEmails(testMode: boolean): Promise<
   Array<{ uid: number; from: string; subject: string; body: string; messageId: string }>
 > {
   const config = getGmailConfig();
@@ -62,470 +42,307 @@ async function fetchUnseenEmails(): Promise<
     const cleanup = () => {
       if (!isFinished) {
         isFinished = true;
-        clearTimeout(timeout);
         imap.end();
       }
     };
 
-    const timeout = setTimeout(() => {
-      console.warn("[Email] IMAP connection timed out after 45s");
-      cleanup();
-      reject(new Error("IMAP connection timeout"));
-    }, 45000);
-
     imap.once("ready", () => {
-      imap.openBox("INBOX", false, (err, _box) => {
-        if (err) {
-          cleanup();
-          return reject(err);
-        }
+      imap.openBox("INBOX", false, (err) => {
+        if (err) { cleanup(); return reject(err); }
 
-        imap.search(["UNSEEN"], (searchErr, results) => {
-          if (searchErr) {
-            cleanup();
-            return reject(searchErr);
-          }
+        const searchCriteria = testMode ? ["ALL"] : ["UNSEEN"];
+        imap.search(searchCriteria, (searchErr, results) => {
+          if (searchErr) { cleanup(); return reject(searchErr); }
+          if (!results || results.length === 0) { cleanup(); return resolve([]); }
 
-          if (!results || results.length === 0) {
-            cleanup();
-            return resolve([]);
-          }
+          // In test mode, limit to last 80 emails to avoid processing too many
+          const targetResults = testMode ? results.slice(-80) : results;
 
-          const fetch = imap.fetch(results, {
-            bodies: "",
-            markSeen: true,
-            struct: true,
-          });
-
+          const fetch = imap.fetch(targetResults, { bodies: "", markSeen: !testMode });
           const promises: Promise<void>[] = [];
 
           fetch.on("message", (msg, seqno) => {
             const p = new Promise<void>((res) => {
               let rawEmail = "";
-              let attributes: any | null = null;
-
+              let attributes: any = null;
               msg.on("body", (stream) => {
-                stream.on("data", (chunk: Buffer) => {
-                  rawEmail += chunk.toString("utf8");
-                });
+                stream.on("data", (chunk: Buffer) => { rawEmail += chunk.toString("utf8"); });
               });
-
-              msg.once("attributes", (attrs) => {
-                attributes = attrs;
-              });
-
+              msg.once("attributes", (attrs) => { attributes = attrs; });
               msg.once("end", async () => {
                 try {
                   const parsed = await simpleParser(rawEmail);
-                  const from = parsed.from?.text ?? "";
-                  const subject = parsed.subject ?? "";
-                  const body =
-                    parsed.text ??
-                    (typeof parsed.html === 'string' ? parsed.html.replace(/<[^>]+>/g, " ") : undefined) ??
-                    "";
-                  const messageId = parsed.messageId ?? `seq-${seqno}`;
-
                   emails.push({
                     uid: attributes?.uid ?? seqno,
-                    from,
-                    subject,
-                    body,
-                    messageId,
+                    from: parsed.from?.text ?? "",
+                    subject: parsed.subject ?? "",
+                    body: parsed.text ?? (typeof parsed.html === 'string' ? parsed.html.replace(/<[^>]+>/g, " ") : "") ?? "",
+                    messageId: parsed.messageId ?? `seq-${seqno}`,
                   });
-                } catch (parseErr) {
-                  console.error("[Email] Failed to parse email:", parseErr);
-                } finally {
-                  res();
-                }
+                } finally { res(); }
               });
-
-              // Add a per-message timeout
-              setTimeout(() => res(), 15000);
             });
             promises.push(p);
           });
 
-          fetch.on("error", (fetchErr) => {
-            console.error("[Email] Fetch error:", fetchErr);
-          });
-
           fetch.once("end", async () => {
-            try {
-              await Promise.all(promises);
-            } catch (err) {
-              console.error("[Email] Error waiting for all email parses:", err);
-            } finally {
-              cleanup();
-              resolve(emails);
-            }
+            await Promise.all(promises);
+            cleanup();
+            resolve(emails);
           });
         });
       });
     });
 
-    imap.once("error", (err: Error) => {
-      cleanup();
-      reject(err);
-    });
-
+    imap.once("error", (err: Error) => { cleanup(); reject(err); });
     imap.connect();
   });
 }
 
-// ─── Booking enrichment ───────────────────────────────────────────────────────
+// ─── Logic Handlers ───────────────────────────────────────────────────────────
 
 /**
- * Process a payment confirmation email (Booking.com).
- * Matches by Booking Object ID and updates status to 'finished'.
+ * Handle Booking Confirmation Emails (S1, A1, B1).
+ * Purpose: Filling-out all possible booking data.
  */
-async function processPaymentConfirmation(parsed: ParsedBookingEmail): Promise<boolean> {
+async function handleBookingConfirmation(subTemplate: string, data: ParsedBookingData, email: any, testMode: boolean): Promise<"created" | "updated" | null> {
   const db = await getDb();
-  if (!db) return false;
+  if (!db || !data.checkIn || !data.checkOut) return null;
 
-  // 1. Specialized logic for Booking.com payouts
-  // These come from the bank (Nestbank) but are detected as booking_payment
-  if (parsed.channel === "booking" && parsed.isPaymentConfirmation) {
-    const transferAmount = parsed.amountPaid || 0;
-    
-    // Find all 'portal_paid' bookings for this property that have finished (checkOut < now)
-    const now = new Date();
-    const candidates = await db
-      .select()
-      .from(bookings)
-      .where(
-        and(
-          eq(bookings.channel, "booking"),
-          eq(bookings.status, "portal_paid"),
-          parsed.property ? eq(bookings.property, parsed.property as any) : undefined,
-          lte(bookings.checkOut, now)
-        )
-      );
-
-    // Try to find a match by amount (hostRevenue)
-    const match = candidates.find(c => {
-      const hostRevenue = parseFloat(String(c.hostRevenue || "0"));
-      // Check for exact match or very close (±0.05 for rounding differences)
-      return Math.abs(hostRevenue - transferAmount) < 0.05;
-    });
-
-    if (match) {
-      await db
-        .update(bookings)
-        .set({
-          status: "finished",
-          amountPaid: String(transferAmount.toFixed(2)),
-          transferAmount: String(transferAmount),
-          transferDate: new Date(),
-          transferTitle: `Booking.com Payout Match (${parsed.bookingObjectId ?? "N/A"})`,
-        })
-        .where(eq(bookings.id, match.id));
-
-      await Logger.bookingAction(match.id, "status_change", "Marked as FINISHED via payout matching", `Source: Booking.com payment email (${parsed.bookingObjectId ?? "N/A"})`);
-
-      console.log(`[Email] Booking #${match.id} marked as FINISHED via payout matching`);
-      return true;
-    } else {
-      // No match found - send alert email to host
-      const subject = `⚠️ Unmatched Booking.com Payout: ${parsed.property ?? "Unknown"}`;
-      const text = `
-        Received a Booking.com payout that couldn't be automatically matched to any finished reservation.
-        
-        Property: ${parsed.property ?? "Unknown"}
-        Amount: ${transferAmount.toFixed(2)} PLN
-        Object ID: ${parsed.bookingObjectId ?? "Unknown"}
-        
-        Please review the bookings manually.
-      `.trim();
-      
-      await sendAlertEmail(subject, text);
-      return false;
-    }
-  }
-
-  // 2. Fallback logic for other payment confirmations (matching by ID/name)
-  const candidates = await db
-    .select()
-    .from(bookings)
-    .where(
-      and(
-        eq(bookings.channel, "booking"),
-        parsed.property ? eq(bookings.property, parsed.property as any) : undefined,
-        or(
-          parsed.bookingObjectId ? like(bookings.icalSummary, `%${parsed.bookingObjectId}%`) : undefined,
-          parsed.bookingObjectId ? like(bookings.notes, `%${parsed.bookingObjectId}%`) : undefined,
-          parsed.bookingObjectId ? like(bookings.emailMessageId, `%${parsed.bookingObjectId}%`) : undefined,
-          parsed.guestName ? like(bookings.guestName, `%${parsed.guestName}%`) : undefined
-        )
-      )
-    );
-
-  if (candidates.length === 0) {
-    console.warn(`[Email] No matching booking found for Payment Confirmation (ID: ${parsed.bookingObjectId}, Guest: ${parsed.guestName})`);
-    return false;
-  }
-
-  // Prioritize "portal_paid" status if multiple exist (unlikely but safe)
-  const match = candidates.find(c => c.status === "portal_paid") || candidates[0]!;
-  
-  const currentPaid = parseFloat(String(match.amountPaid || "0"));
-  const transferAmount = parsed.amountPaid || 0;
-  const newPaid = (currentPaid + transferAmount).toFixed(2);
-
-  await db
-    .update(bookings)
-    .set({
-      status: "finished",
-      amountPaid: newPaid,
-      transferAmount: transferAmount ? String(transferAmount) : undefined,
-      transferDate: new Date(),
-      transferTitle: `Booking.com Payment Confirmation (${parsed.bookingObjectId ?? parsed.guestName})`,
-    })
-    .where(eq(bookings.id, match.id));
-
-  await Logger.bookingAction(match.id, "status_change", "Marked as FINISHED via payment confirmation", `Source: Booking.com email (${parsed.bookingObjectId ?? parsed.guestName})`);
-
-  console.log(`[Email] Booking #${match.id} (Status: ${match.status}) marked as FINISHED via payment confirmation (${parsed.bookingObjectId ?? parsed.guestName})`);
-  return true;
-}
-
-/**
- * Match a parsed booking email to an existing booking in the database
- * and enrich it with guest details.
- */
-async function enrichBookingFromEmail(parsed: ParsedBookingEmail): Promise<boolean> {
-  const db = await getDb();
-  if (!db) return false;
-
-  // Special case: Payment confirmations
-  if (parsed.isPaymentConfirmation) {
-    return processPaymentConfirmation(parsed);
-  }
-
-  if (!parsed.checkIn || !parsed.checkOut) {
-    console.warn("[Email] Booking email missing dates, cannot match");
-    return false;
-  }
-
-  // Find matching booking by channel + approximate dates (±1 day tolerance)
+  // 1. Find existing booking by channel + dates (±1 day)
   const dayMs = 24 * 60 * 60 * 1000;
-  const checkInMin = new Date(parsed.checkIn.getTime() - dayMs);
-  const checkInMax = new Date(parsed.checkIn.getTime() + dayMs);
-  const checkOutMin = new Date(parsed.checkOut.getTime() - dayMs);
-  const checkOutMax = new Date(parsed.checkOut.getTime() + dayMs);
+  const checkInMin = new Date(data.checkIn.getTime() - dayMs);
+  const checkInMax = new Date(data.checkIn.getTime() + dayMs);
+  const checkOutMin = new Date(data.checkOut.getTime() - dayMs);
+  const checkOutMax = new Date(data.checkOut.getTime() + dayMs);
 
   const candidates = await db
     .select()
     .from(bookings)
     .where(
       and(
-        eq(bookings.channel, parsed.channel),
-        parsed.property ? eq(bookings.property, parsed.property as "Sadoles" | "Hacjenda") : undefined
+        eq(bookings.channel, data.channel),
+        data.property ? eq(bookings.property, data.property) : undefined
       )
     );
 
-  const match = candidates.find((b) => {
-    const checkInOk =
-      b.checkIn >= checkInMin && b.checkIn <= checkInMax;
-    const checkOutOk =
-      b.checkOut >= checkOutMin && b.checkOut <= checkOutMax;
-    return checkInOk && checkOutOk;
-  });
+  const match = candidates.find((b) => 
+    b.checkIn >= checkInMin && b.checkIn <= checkInMax &&
+    b.checkOut >= checkOutMin && b.checkOut <= checkOutMax
+  );
 
   if (!match) {
-    console.log(
-      `[Email] No matching booking found for ${parsed.channel} email (${parsed.checkIn.toDateString()}). Creating new record.`
-    );
-    
-    // If no match found, create a new booking record instead of failing
-    const adults = parsed.adultsCount ?? 0;
-    const children = parsed.childrenCount ?? 0;
-    const totalGuests = (adults + children) > 0 ? (adults + children) : (parsed.guestCount ?? 0);
-
+    if (testMode) return "created";
+    // If not found, create it (iCal hasn't seen it yet)
+    console.log(`[Email] No match for ${subTemplate} confirmation. Creating new booking.`);
     const [insertResult] = await db.insert(bookings).values({
-      icalUid: `email-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-      property: (parsed.property as "Sadoles" | "Hacjenda") ?? "Sadoles",
-      channel: parsed.channel,
-      checkIn: parsed.checkIn,
-      checkOut: parsed.checkOut,
-      status: initialStatus(parsed.channel),
-      depositStatus: initialDepositStatus(parsed.channel),
-      guestName: parsed.guestName,
-      guestEmail: parsed.guestEmail,
-      guestPhone: parsed.guestPhone,
-      guestCountry: parsed.guestCountry,
-      guestCount: totalGuests,
-      adultsCount: adults,
-      childrenCount: children,
-      animalsCount: parsed.animalsCount,
-      totalPrice: parsed.totalPrice ? String(parsed.totalPrice) : undefined,
-      commission: parsed.commission ? String(parsed.commission) : undefined,
-      hostRevenue: parsed.hostRevenue ? String(parsed.hostRevenue) : undefined,
-      amountPaid: parsed.amountPaid ? String(parsed.amountPaid) : "0.00",
-      reservationFee: parsed.amountPaid ? String(parsed.amountPaid) : undefined,
-      currency: parsed.currency ?? "PLN",
-      emailMessageId: parsed.rawText.substring(0, 100), // simplistic unique ref
+      icalUid: `email-${data.channel}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      property: data.property ?? "Sadoles",
+      channel: data.channel,
+      checkIn: data.checkIn,
+      checkOut: data.checkOut,
+      status: initialStatus(data.channel),
+      depositStatus: initialDepositStatus(data.channel),
+      guestName: data.guestName,
+      guestEmail: data.guestEmail,
+      guestPhone: data.guestPhone,
+      guestCountry: data.guestCountry,
+      guestCount: data.guestCount ?? (data.adultsCount ?? 0) + (data.childrenCount ?? 0),
+      adultsCount: data.adultsCount,
+      childrenCount: data.childrenCount,
+      animalsCount: data.animalsCount,
+      totalPrice: data.totalPrice ? String(data.totalPrice) : undefined,
+      commission: data.commission ? String(data.commission) : undefined,
+      hostRevenue: data.hostRevenue ? String(data.hostRevenue) : undefined,
+      amountPaid: data.amountPaid ? String(data.amountPaid) : "0.00",
+      reservationFee: data.amountPaid ? String(data.amountPaid) : undefined,
+      currency: data.currency ?? "PLN",
+      emailMessageId: email.messageId,
     });
     
-    const newBookingId = (insertResult as any).insertId;
-    if (newBookingId) {
-      await Logger.bookingAction(newBookingId, "system", "Created via email parsing", `Channel: ${parsed.channel}`);
-    }
-
-    return true;
+    const newId = (insertResult as any).insertId;
+    await Logger.bookingAction(newId, "system", `Created via ${subTemplate} email`, `Guest: ${data.guestName}`);
+    return "created";
   }
 
-  // Determine new status
-  const newStatus =
-    match.status === "pending" || match.status === "confirmed" || match.status === "portal_paid"
-      ? "confirmed"
-      : match.status;
+  // 2. Enrich existing booking
+  if (testMode) return "updated";
 
-  const adults = parsed.adultsCount ?? match.adultsCount ?? 0;
-  const children = parsed.childrenCount ?? match.childrenCount ?? 0;
-  const totalGuests = (adults + children) > 0 ? (adults + children) : (parsed.guestCount ?? match.guestCount);
+  await db.update(bookings).set({
+    guestName: data.guestName ?? match.guestName,
+    guestEmail: data.guestEmail ?? match.guestEmail,
+    guestPhone: data.guestPhone ?? match.guestPhone,
+    guestCountry: data.guestCountry ?? match.guestCountry,
+    guestCount: data.guestCount ?? match.guestCount,
+    adultsCount: data.adultsCount ?? match.adultsCount,
+    childrenCount: data.childrenCount ?? match.childrenCount,
+    animalsCount: data.animalsCount ?? match.animalsCount,
+    totalPrice: data.totalPrice ? String(data.totalPrice) : match.totalPrice,
+    commission: data.commission ? String(data.commission) : match.commission,
+    hostRevenue: data.hostRevenue ? String(data.hostRevenue) : match.hostRevenue,
+    amountPaid: data.amountPaid ? String(data.amountPaid) : match.amountPaid,
+    reservationFee: data.amountPaid ? String(data.amountPaid) : match.reservationFee,
+    currency: data.currency ?? match.currency,
+  }).where(eq(bookings.id, match.id));
 
-  // Update booking with guest details from email
-  const newAmountPaid = parsed.amountPaid != null 
-    ? (parseFloat(String(match.amountPaid || "0")) > parsed.amountPaid ? match.amountPaid : String(parsed.amountPaid))
-    : match.amountPaid;
-  
-  const newReservationFee = parsed.amountPaid != null 
-    ? (parseFloat(String(match.reservationFee || "0")) > parsed.amountPaid ? match.reservationFee : String(parsed.amountPaid))
-    : match.reservationFee;
-
-  await db
-    .update(bookings)
-    .set({
-      status: newStatus,
-      guestName: parsed.guestName ?? match.guestName,
-      guestEmail: parsed.guestEmail ?? match.guestEmail,
-      guestPhone: parsed.guestPhone ?? match.guestPhone,
-      guestCountry: parsed.guestCountry ?? match.guestCountry,
-      guestCount: totalGuests,
-      adultsCount: adults,
-      childrenCount: children,
-      animalsCount: parsed.animalsCount ?? match.animalsCount,
-      totalPrice: parsed.totalPrice ? String(parsed.totalPrice) : match.totalPrice,
-      commission: parsed.commission ? String(parsed.commission) : match.commission,
-      hostRevenue: parsed.hostRevenue != null ? String(parsed.hostRevenue) : match.hostRevenue,
-      amountPaid: newAmountPaid,
-      reservationFee: newReservationFee,
-
-      currency: parsed.currency ?? match.currency,
-    })
-    .where(eq(bookings.id, match.id));
-
-  await Logger.bookingAction(match.id, "enrichment", "Enriched with guest details from email", `Channel: ${parsed.channel}, Guest: ${parsed.guestName}`);
-
-  console.log(
-    `[Email] Enriched booking #${match.id} (${parsed.channel}) with guest: ${parsed.guestName}`
-  );
-  return true;
+  await Logger.bookingAction(match.id, "enrichment", `Enriched via ${subTemplate} email`, `Data filled: Name, Contact, Prices`);
+  return "updated";
 }
 
-// ─── Main polling function ────────────────────────────────────────────────────
+/**
+ * Handle Slowhop S2 (Prepayment/Commission accounting).
+ * Purpose: Fill out commission and prepayment details.
+ */
+async function handleSlowhopS2(data: ParsedBookingData, testMode: boolean): Promise<boolean> {
+  const db = await getDb();
+  if (!db || !data.bookingId) return false;
 
-export async function pollEmails(): Promise<{
-  processed: number;
-  enriched: number;
+  const match = await db.select().from(bookings).where(
+    and(
+      eq(bookings.channel, "slowhop"),
+      like(bookings.icalSummary, `%${data.bookingId}%`)
+    )
+  ).limit(1);
+
+  if (match[0]) {
+    if (testMode) return true;
+    await db.update(bookings).set({
+      commission: data.commission ? String(data.commission) : match[0].commission,
+      hostRevenue: data.hostRevenue ? String(data.hostRevenue) : match[0].hostRevenue,
+      reservationFee: data.amountPaid ? String(data.amountPaid) : match[0].reservationFee,
+    }).where(eq(bookings.id, match[0].id));
+    
+    await Logger.bookingAction(match[0].id, "enrichment", "Enriched via S2 (Accounting) email", "Filled: Commission, Host Revenue, Reservation Fee");
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Handle Bank Transfer (Template 1).
+ */
+async function handleBankTransfer(data: ParsedBankData, email: any, testMode: boolean): Promise<boolean> {
+  const db = await getDb();
+  if (!db) return false;
+
+  // Use the fuzzy matcher logic
+  const results = await findMatchingBookings(data as any, testMode); 
+  
+  if (results.length > 0) {
+    const best = results[0];
+    if (best.score >= AUTO_MATCH_THRESHOLD) {
+      if (testMode) return true;
+      await applyTransferMatch(best.bookingId, data as any, best.score);
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// ─── Main Dispatcher ──────────────────────────────────────────────────────────
+
+export async function pollEmails(testMode = false): Promise<{ 
+  processed: number; 
+  added: number;
+  enriched: number; 
   matched: number;
   errors: string[];
+  unmatchedBankTransfers: Array<{ subject: string; date: Date; sender: string }>;
+  stats: {
+    templates: Record<string, number>;
+    subTemplates: Record<string, number>;
+    bankMatched: number;
+    bankUnmatched: number;
+  }
 }> {
   const start = Date.now();
   let processed = 0;
+  let added = 0;
   let enriched = 0;
   let matched = 0;
   const errors: string[] = [];
+  const unmatchedBankTransfers: Array<{ subject: string; date: Date; sender: string }> = [];
+  
+  const stats = {
+    templates: { BANK_TRANSFER: 0, BOOKING_CONFIRMATION: 0, OTHER: 0 } as Record<string, number>,
+    subTemplates: { S1: 0, S2: 0, A1: 0, B1: 0, UNKNOWN: 0 } as Record<string, number>,
+    bankMatched: 0,
+    bankUnmatched: 0,
+  };
 
-  const config = getGmailConfig();
-  if (!config.password) {
-    const msg = "Gmail app password not configured (GMAIL_APP_PASSWORD env var missing)";
-    console.warn(`[Email] ${msg}`);
-    return { processed: 0, enriched: 0, matched: 0, errors: [msg] };
+  try {
+    const emails = await fetchEmails(testMode);
+    console.log(`[EmailPoller] Fetched ${emails.length} emails (testMode: ${testMode}).`);
+
+
+    for (const email of emails) {
+      processed++;
+      try {
+        const qualified = qualifyEmail(email.from, email.subject, email.body);
+        stats.templates[qualified.template]++;
+        if (qualified.template === "BOOKING_CONFIRMATION") {
+          stats.subTemplates[qualified.subTemplate]++;
+        }
+
+        let action: "added" | "enriched" | "matched" | null = null;
+
+        switch (qualified.template) {
+          case "BOOKING_CONFIRMATION":
+            if (["S1", "A1", "B1"].includes(qualified.subTemplate)) {
+              const result = await handleBookingConfirmation(qualified.subTemplate, qualified.data, email, testMode);
+              if (result === "created") action = "added";
+              else if (result === "updated") action = "enriched";
+            } else if (qualified.subTemplate === "S2") {
+              const success = await handleSlowhopS2(qualified.data, testMode);
+              if (success) action = "enriched";
+            }
+            break;
+          case "BANK_TRANSFER":
+            const success = await handleBankTransfer(qualified.data, email, testMode);
+            if (success) {
+              action = "matched";
+              stats.bankMatched++;
+            } else {
+              stats.bankUnmatched++;
+              unmatchedBankTransfers.push({
+                subject: email.subject,
+                date: qualified.data.transferDate,
+                sender: qualified.data.senderName
+              });
+            }
+            break;
+          case "OTHER":
+            break;
+        }
+
+        if (action) {
+          if (action === "added") added++;
+          else if (action === "enriched") enriched++;
+          else if (action === "matched") matched++;
+        } else if (!testMode) {
+          // Forward unmatched to admin only in normal mode
+          const candidates = qualified.template === "BANK_TRANSFER" ? await findMatchingBookings(qualified.data as any, testMode) : [];
+          await forwardUnmatchedEmail(email, candidates as any, "unmatched");
+        }
+
+      } catch (err) {
+        errors.push(`Error in email ${email.subject}: ${String(err)}`);
+      }
+    }
+  } catch (err) {
+    errors.push(`Polling failed: ${String(err)}`);
   }
 
-  let emails: Awaited<ReturnType<typeof fetchUnseenEmails>>;
-  try {
-    emails = await fetchUnseenEmails();
-    console.log(`[Email] Fetched ${emails.length} unread email(s)`);
-  } catch (err) {
-    const msg = `Failed to fetch emails: ${String(err)}`;
-    console.error(`[Email] ${msg}`);
-    errors.push(msg);
-
+  if (!testMode) {
     await Logger.system("email", {
-      source: "Gmail IMAP",
-      success: false,
-      errorMessage: msg,
+      source: "IMAP Poller",
+      newBookings: added + enriched,
+      success: errors.length === 0,
+      errorMessage: errors.length > 0 ? errors[0] : null,
       durationMs: Date.now() - start,
     });
-
-    return { processed: 0, enriched: 0, matched: 0, errors };
   }
 
-  for (const email of emails) {
-    processed++;
-    console.log(`[Email] Processing: "${email.subject}" from ${email.from}`);
-
-    try {
-      const parsed = parseEmail(email.from, email.subject, email.body);
-
-      if (!parsed) {
-        console.log(`[Email] Skipping and forwarding unrecognized email: "${email.subject}"`);
-        await forwardUnmatchedEmail(email, [], "unrecognized");
-        continue;
-      }
-
-      console.log(`[Email] Detected type: ${parsed.type}, source: ${"channel" in parsed ? parsed.channel : "bank"}`);
-
-      if (parsed.type === "booking") {
-        const success = await enrichBookingFromEmail(parsed);
-        if (success) {
-          enriched++;
-          console.log(`[Email] Successfully processed booking email: "${email.subject}"`);
-        } else {
-          console.warn(`[Email] Failed to match or create booking for "${email.subject}" — forwarding`);
-          await forwardUnmatchedEmail(email, [], "unmatched");
-        }
-      } else if (parsed.type === "bank") {
-        const bankData = parsed as ParsedBankEmail;
-        const candidates = await findMatchingBookings(bankData);
-
-        if (candidates.length > 0) {
-          const best = candidates[0]!;
-          if (best.score >= AUTO_MATCH_THRESHOLD) {
-            await applyTransferMatch(best.bookingId, bankData, best.score);
-            matched++;
-            console.log(
-              `[Email] Auto-matched transfer to booking #${best.bookingId} (score: ${best.score})`
-            );
-          } else {
-            console.log(
-              `[Email] Low-confidence match for booking #${best.bookingId} (score: ${best.score}) — forwarding to admin without updating DB`
-            );
-            await forwardUnmatchedEmail(email, candidates, "unmatched");
-          }
-        } else {
-          console.log(`[Email] No matching booking found for transfer from ${bankData.senderName} — forwarding to admin`);
-          await forwardUnmatchedEmail(email, [], "unmatched");
-        }
-      }
-    } catch (err) {
-      const msg = `Error processing email "${email.subject}": ${String(err)}`;
-      console.error(`[Email] ${msg}`);
-      errors.push(msg);
-    }
-  }
-
-  // Log the sync run
-  await Logger.system("email", {
-    source: "Gmail IMAP",
-    newBookings: enriched,
-    updatedBookings: matched,
-    success: errors.length === 0,
-    errorMessage: errors.length > 0 ? errors.slice(0, 3).join("; ") : null,
-    durationMs: Date.now() - start,
-  });
-
-  return { processed, enriched, matched, errors };
+  return { processed, added, enriched, matched, errors, stats, unmatchedBankTransfers };
 }

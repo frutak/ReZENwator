@@ -322,8 +322,6 @@ export async function setSystemSetting(key: string, value: string): Promise<void
   await db.insert(systemSettings).values({ key, value }).onDuplicateKeyUpdate({ set: { value } });
 }
 
-import { ENV } from "./_core/env";
-
 /**
  * Gets the admin email from system settings, falling back to a configured default.
  */

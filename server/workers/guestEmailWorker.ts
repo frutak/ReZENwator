@@ -32,6 +32,13 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
 
   for (const booking of activeBookings) {
     try {
+      // Skip bookings with missing essential data (name or email)
+      // We don't want to send emails with "Owner Name" placeholders to the admin
+      if (!booking.guestName || !booking.guestEmail) {
+        console.log(`[GuestEmailWorker] Skipping booking #${booking.id} due to missing essential data (Name: ${booking.guestName || "Missing"}, Email: ${booking.guestEmail || "Missing"})`);
+        continue;
+      }
+
       const sentEmails = await db
         .select()
         .from(guestEmails)
