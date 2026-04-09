@@ -8,10 +8,10 @@
  *   - Amount matching (exact match or partial payment)
  */
 
-import { and, eq, gte, lte, or } from "drizzle-orm";
+import { and, eq, gte, lte, or, inArray } from "drizzle-orm";
 import { getDb } from "../db";
 import { bookings } from "../../drizzle/schema";
-import type { ParsedBankEmail } from "./emailParsers";
+import type { ParsedBankData } from "./emailParsers";
 import type { Booking } from "../../drizzle/schema";
 import { sendAlertEmail } from "../_core/email";
 import { levenshtein, normalizeName } from "../_core/utils/string";
@@ -25,67 +25,83 @@ import { ENV } from "../_core/env";
  * Scores how well a bank transfer matches a candidate booking.
  */
 export async function findMatchingBookings(
-  transfer: ParsedBankEmail
+  transfer: ParsedBankData,
+  testMode = false
 ): Promise<Array<{ bookingId: number; score: number; guestName: string | null; checkIn: Date; channel: string; property: string; reasons: string[] }>> {
   const db = await getDb();
   if (!db) return [];
 
-  // 1. Fetch "active" bookings
-  // We look for bookings within a very wide window to catch early payments or late deposit returns
-  const windowStart = new Date(transfer.transferDate?.getTime() ?? Date.now());
-  windowStart.setDate(windowStart.getDate() - 365); // Look 1 year back
-  const windowEnd = new Date(transfer.transferDate?.getTime() ?? Date.now());
-  windowEnd.setDate(windowEnd.getDate() + 365);  // Look 1 year ahead
+  const tTitle = normalizeName(transfer.transferTitle || "").toUpperCase();
+  const tSender = normalizeName(transfer.senderName || "").toUpperCase();
 
-  const candidates = await db
-    .select()
-    .from(bookings)
-    .where(
+  // 1. Determine subsets based on source
+  const isAirbnbPayout = tTitle.includes("AIRBNB") || tSender.includes("PAYONEER") || tSender.includes("AIRBNB");
+  
+  const objectIdMatch = transfer.transferTitle?.match(/(\d{7,10})/);
+  const oid = objectIdMatch ? objectIdMatch[1] : null;
+  const isBookingPayout = tTitle.includes("BOOKING.COM") || tSender.includes("BOOKING.COM") ||
+                          tTitle.includes("BOOKING") || tSender.includes("BOOKING") ||
+                          (ENV.hacjendaBookingId && oid === ENV.hacjendaBookingId) || 
+                          (ENV.sadolesBookingId && oid === ENV.sadolesBookingId);
+
+  const isPortalPayout = isAirbnbPayout || isBookingPayout;
+
+  const windowStart = new Date(transfer.transferDate?.getTime() ?? Date.now());
+  windowStart.setFullYear(windowStart.getFullYear() - 5); 
+  const windowEnd = new Date(transfer.transferDate?.getTime() ?? Date.now());
+  windowEnd.setFullYear(windowEnd.getFullYear() + 5); 
+
+  let candidates: Booking[] = [];
+
+  if (isPortalPayout) {
+    const channel = isAirbnbPayout ? "airbnb" : "booking";
+    let query = db.select().from(bookings).where(
       and(
-        or(
-          eq(bookings.status, "pending"),
-          eq(bookings.status, "confirmed"),
-          eq(bookings.status, "portal_paid"),
-          eq(bookings.status, "paid"),
-          eq(bookings.status, "finished") // Include finished for deposit matching
-        ),
+        eq(bookings.channel, channel),
+        testMode ? undefined : inArray(bookings.status, ["portal_paid", "confirmed", "finished"]),
         gte(bookings.checkIn, windowStart),
         lte(bookings.checkIn, windowEnd)
       )
     );
 
+    candidates = await query;
+
+    // Further filter Booking.com by property ID if possible
+    if (isBookingPayout && oid) {
+      if (ENV.hacjendaBookingId && oid === ENV.hacjendaBookingId) candidates = candidates.filter(c => c.channel !== "booking" || c.property === "Hacjenda");
+      else if (ENV.sadolesBookingId && oid === ENV.sadolesBookingId) candidates = candidates.filter(c => c.channel !== "booking" || c.property === "Sadoles");
+    }
+  } else {
+    // Guest direct transfer: pending/confirmed or finished (for deposits)
+    // Also include portal_paid just in case portal detection failed but it's a portal payout
+    candidates = await db
+      .select()
+      .from(bookings)
+      .where(
+        and(
+          testMode ? undefined : or(
+            eq(bookings.status, "pending"),
+            eq(bookings.status, "confirmed"),
+            eq(bookings.status, "paid"),
+            eq(bookings.status, "portal_paid"),
+            eq(bookings.status, "finished")
+          ),
+          gte(bookings.checkIn, windowStart),
+          lte(bookings.checkIn, windowEnd)
+        )
+      );
+  }
+
   const results: any[] = [];
 
   // Specialized matching for Portal Payouts (Airbnb/Booking.com)
-  const tTitle = normalizeName(transfer.transferTitle || "").toUpperCase();
-  const isAirbnbPayout = tTitle.includes("AIRBNB") || transfer.senderName?.toUpperCase().includes("PAYONEER");
-  
-  // Detection for Booking.com: check for name OR known property IDs
-  const objectIdMatch = transfer.transferTitle?.match(/(\d{7,10})/);
-  const oid = objectIdMatch ? objectIdMatch[1] : null;
-  const isBookingPayout = tTitle.includes("BOOKING.COM") || (ENV.hacjendaBookingId && oid === ENV.hacjendaBookingId) || (ENV.sadolesBookingId && oid === ENV.sadolesBookingId);
-
-  if (isAirbnbPayout || isBookingPayout) {
-    const portalChannel = isAirbnbPayout ? "airbnb" : "booking";
-    
-    // Narrow down to candidates for this channel that are awaiting payout
-    let portalCandidates = candidates.filter(c => 
-      c.channel === portalChannel && 
-      (c.status === "portal_paid" || c.status === "finished")
-    );
-    
-    // If Booking.com, try to narrow down by property using objectId
-    if (isBookingPayout && oid) {
-      if (ENV.hacjendaBookingId && oid === ENV.hacjendaBookingId) portalCandidates = portalCandidates.filter(c => c.property === "Hacjenda");
-      else if (ENV.sadolesBookingId && oid === ENV.sadolesBookingId) portalCandidates = portalCandidates.filter(c => c.property === "Sadoles");
-    }
-    
-    if (portalCandidates.length > 0) {
+  if (isPortalPayout) {
+    if (candidates.length > 0) {
       // Find candidate with closest hostRevenue
       let bestPortalMatch: any = null;
       let minDiff = Infinity;
 
-      for (const candidate of portalCandidates) {
+      for (const candidate of candidates) {
         const cRevenue = parseFloat(String(candidate.hostRevenue || "0"));
         if (cRevenue <= 0) continue;
 
@@ -103,9 +119,6 @@ export async function findMatchingBookings(
         return [{
           bookingId: bestPortalMatch.id,
           score: 100,
-          bestNameScore: 100,
-          dateScore: 100,
-          amountScore: 100,
           guestName: bestPortalMatch.guestName ?? null,
           checkIn: bestPortalMatch.checkIn,
           channel: bestPortalMatch.channel,
@@ -119,86 +132,141 @@ export async function findMatchingBookings(
   for (const candidate of candidates) {
     let nameScore = 0;
     let titleScore = 0;
+    let bonus = 0;
     const reasons: string[] = [];
 
+    const tTitleNorm = normalizeName(transfer.transferTitle || "").toUpperCase();
+    const hasDepositKeyword = tTitleNorm.includes("KAUCJA") || tTitleNorm.includes("DEPOZYT") || tTitleNorm.includes("DEPOSIT");
+
     // ── Name score (100 points max) ──────────────────────────────────────────
-    if (candidate.guestName && transfer.senderName) {
-      const cName = normalizeName(candidate.guestName);
+    const getNameScore = (nameA: string, nameB: string) => {
+      const distance = levenshtein(nameA, nameB);
+      const maxLen = Math.max(nameA.length, nameB.length);
+      const similarity = 1 - distance / maxLen;
+      
+      if (similarity > 0.95) return 100; // Perfect or near-perfect
+      if (similarity > 0.85) return 90;  // Strong match
+      if (similarity > 0.65) return 40;  // Medium match
+      if (nameA.includes(nameB) || nameB.includes(nameA)) {
+        const wordsA = nameA.split(/\s+/).filter(w => w.length > 2);
+        const wordsB = nameB.split(/\s+/).filter(w => w.length > 2);
+        if (wordsA.length >= 2 || wordsB.length >= 2) return 80;
+        return 50;
+      }
+      
+      // Word overlap check
+      const wordsA = nameA.split(/\s+/);
+      const wordsB = nameB.split(/\s+/);
+      for (const w of wordsA) {
+        if (w.length > 3 && wordsB.includes(w)) return 30;
+      }
+
+      return 0;
+    };
+
+    let localNameScore = 0;
+
+    if (transfer.senderName) {
       const tName = normalizeName(transfer.senderName);
-      
-      const getNameScore = (nameA: string, nameB: string) => {
-        const distance = levenshtein(nameA, nameB);
-        const maxLen = Math.max(nameA.length, nameB.length);
-        const similarity = 1 - distance / maxLen;
+
+      // Check Guest Name
+      if (candidate.guestName) {
+        const cName = normalizeName(candidate.guestName);
         
-        if (similarity > 0.95) return 100; // Perfect or near-perfect
-        if (similarity > 0.85) return 90;  // Strong match
-        if (similarity > 0.65) return 40;  // Medium match (penalized from 60)
-        if (nameA.includes(nameB) || nameB.includes(nameA)) return 50;
-        return 0;
-      };
-
-      // 1. Original match
-      const scoreOriginal = getNameScore(cName, tName);
-      
-      // 2. Swapped match (First and last words swapped)
-      const tParts = tName.split(/\s+/).filter(p => p.length > 0);
-      let scoreSwapped = 0;
-      if (tParts.length >= 2) {
-        const swapped = [tParts[tParts.length - 1], ...tParts.slice(1, -1), tParts[0]].join(" ");
-        scoreSwapped = getNameScore(cName, swapped);
-      }
-
-      // 3. Individual part match
-      let partScore = 0;
-      const cParts = cName.split(/\s+/).filter(p => p.length > 3);
-      const tPartsLong = tName.split(/\s+/).filter(p => p.length > 3);
-      let partMatch = false;
-      for (const cp of cParts) {
-        for (const tp of tPartsLong) {
-          if (cp === tp) { partMatch = true; break; }
+        // 1. Original match
+        const scoreOriginal = getNameScore(cName, tName);
+        
+        // 2. Swapped match
+        const tParts = tName.split(/\s+/).filter(p => p.length > 0);
+        let scoreSwapped = 0;
+        if (tParts.length >= 2) {
+          const swapped = [tParts[tParts.length - 1], ...tParts.slice(1, -1), tParts[0]].join(" ");
+          scoreSwapped = getNameScore(cName, swapped);
         }
-        if (partMatch) break;
-      }
-      if (partMatch) partScore = 25; // Penalized from 40
 
-      // Special check: Shared surname
-      let surnameScore = 0;
-      const cPartsNames = cName.split(/\s+/).filter(p => p.length > 0);
-      const tPartsNames = tName.split(/\s+/).filter(p => p.length > 0);
-      const cSurname = cPartsNames[cPartsNames.length - 1];
-      const tSurname = tPartsNames[tPartsNames.length - 1];
-      if (cSurname && tSurname && cSurname === tSurname && cSurname.length > 3) {
-        surnameScore = 30; // Penalized from 40
+        // 3. Individual part match
+        let partScore = 0;
+        const cParts = cName.split(/\s+/).filter(p => p.length > 3);
+        const tPartsLong = tName.split(/\s+/).filter(p => p.length > 3);
+        let partMatch = false;
+        for (const cp of cParts) {
+          for (const tp of tPartsLong) {
+            if (cp === tp) { partMatch = true; break; }
+          }
+          if (partMatch) break;
+        }
+        if (partMatch) partScore = 25;
+
+        // Special check: Shared surname
+        let surnameScore = 0;
+        const cPartsNames = cName.split(/\s+/).filter(p => p.length > 0);
+        const cSurname = cPartsNames[cPartsNames.length - 1];
+        const tPartsNames = tName.split(/\s+/).filter(p => p.length > 0);
+        const tSurname = tPartsNames[tPartsNames.length - 1];
+        if (cSurname && tSurname && cSurname === tSurname && cSurname.length > 3) {
+          surnameScore = 70; 
+        }
+        if (cSurname && tName.includes(cSurname)) {
+          surnameScore = Math.max(surnameScore, 40); 
+        }
+
+        localNameScore = Math.max(localNameScore, scoreOriginal, scoreSwapped, partScore, surnameScore);
       }
 
-      nameScore = Math.max(scoreOriginal, scoreSwapped, partScore, surnameScore);
-      if (nameScore >= 90) reasons.push("Guest name match (high)");
-      else if (nameScore === 50) reasons.push("Name is subset of sender or vice-versa");
-      else if (nameScore > 0) reasons.push(surnameScore === nameScore ? `Shared surname: ${cSurname}` : "Partial name match");
+      // Check Company Name
+      if (candidate.companyName) {
+        const compName = normalizeName(candidate.companyName);
+        const compScore = getNameScore(compName, tName);
+        localNameScore = Math.max(localNameScore, compScore);
+        if (compScore >= 90) reasons.push("Company name match (high)");
+        else if (compScore >= 50) reasons.push("Partial company name match");
+      }
     }
+
+    nameScore = localNameScore;
+
+    if (nameScore >= 90) reasons.push("Guest name match (high)");
+    else if (nameScore === 50) reasons.push("Name is subset of sender or vice-versa");
+    else if (nameScore > 0) reasons.push("Partial name match");
 
     // Also check transfer title for guest name or Airbnb confirmation codes
     if (transfer.transferTitle) {
       const tTitle = normalizeName(transfer.transferTitle).toUpperCase();
       
-      if (candidate.guestName) {
-        const cName = normalizeName(candidate.guestName);
-        if (tTitle.includes(cName)) {
-          titleScore += 70;
-          reasons.push("Guest name found in transfer title");
+      const checkTitleForName = (name: string | null) => {
+        if (!name) return { score: 0, reasons: [] };
+        const nName = normalizeName(name);
+        const nParts = nName.split(/\s+/).filter(p => p.length > 0);
+        const nSurname = nParts[nParts.length - 1];
+        
+        const res: { score: number, reasons: string[] } = { score: 0, reasons: [] };
+
+        if (tTitle.includes(nName.toUpperCase()) || tTitle.replace(/\s/g, "").includes(nName.toUpperCase().replace(/\s/g, ""))) {
+          res.score = 100;
+          res.reasons.push(`Name (${name}) found in transfer title`);
         } else {
-          // Check for individual name parts (surnames)
-          const cPartsTitle = cName.split(/\s+/).filter(p => p.length > 3);
-          for (const part of cPartsTitle) {
+          const nPartsTitle = nName.split(/\s+/).filter(p => p.length > 3);
+          for (const part of nPartsTitle) {
             if (tTitle.includes(part.toUpperCase())) {
-              titleScore += 50;
-              reasons.push(`Name part (${part}) found in transfer title`);
+              res.score = 80;
+              res.reasons.push(`Name part (${part}) found in transfer title`);
               break;
             }
           }
         }
-      }
+
+        if (nSurname && tTitle.includes(nSurname.toUpperCase()) && res.score < 80) {
+          bonus += 40;
+          res.reasons.push(`Surname (${nSurname}) found in transfer title`);
+        }
+        return res;
+      };
+
+      const guestMatch = checkTitleForName(candidate.guestName);
+      const companyMatch = checkTitleForName(candidate.companyName);
+
+      titleScore = Math.max(guestMatch.score, companyMatch.score);
+      reasons.push(...guestMatch.reasons, ...companyMatch.reasons);
       // ... (rest of the code for Airbnb and Booking.com codes)
 
       // Airbnb codes are 10-character alphanumeric starting with HM...
@@ -330,12 +398,14 @@ export async function findMatchingBookings(
 
       if (!isMatch && candidate.channel === "slowhop") {
         // Slowhop Target 1: Rest of pre-payment (Portal -> Host)
-        // GuestPrepayment (cResFee) - Commission (cComm)
-        const hostPrepayment = cResFee - cComm;
+        // GuestPrepayment (cResFee) - Commission_Gross (cComm * 1.23)
+        const hostPrepayment = cResFee - (cComm * 1.23);
         if (cResFee > 0 && Math.abs(transfer.amount - hostPrepayment) < 1.0) {
           amountScore = 100;
-          reasons.push("Matches Slowhop host pre-payment (ResFee - Commission)");
+          reasons.push("Matches Slowhop host pre-payment (ResFee - Gross Commission)");
           isMatch = true;
+          // Obvious match bonus: amount matches exact host payout formula
+          bonus += 20;
         }
         
         // Slowhop Target 2: Balance + Deposit from Guest
@@ -357,30 +427,53 @@ export async function findMatchingBookings(
       }
 
       if (!isMatch) {
-        const isTotalMatch = cTotal > 0 && Math.abs(transfer.amount - cTotal) < 1.0;
-        const isRemainingMatch = cRemaining > 0 && Math.abs(transfer.amount - cRemaining) < 1.0;
-        const isResFeeMatch = cResFee > 0 && Math.abs(transfer.amount - cResFee) < 1.0;
+        const isTotalMatch = cTotal > 0 && Math.abs(transfer.amount - cTotal) < 80.0;
+        const isRemainingMatch = cRemaining > 0 && Math.abs(transfer.amount - cRemaining) < 80.0;
+        const isResFeeMatch = cResFee > 0 && Math.abs(transfer.amount - cResFee) < 80.0;
         const isDepositMatch = Math.abs(transfer.amount - cDeposit) < 1.0;
-        const isBothMatch = cRemaining > 0 && Math.abs(transfer.amount - (cRemaining + cDeposit)) < 1.0;
+        const isBothMatch = cRemaining > 0 && Math.abs(transfer.amount - (cRemaining + cDeposit)) <= 81.0;
+        const isFullBothMatch = cTotal > 0 && Math.abs(transfer.amount - (cTotal + cDeposit)) <= 81.0;
+        const isJustTotal = cTotal > 0 && Math.abs(transfer.amount - (cTotal - cDeposit)) <= 81.0;
+        const isJustRemaining = cRemaining > 0 && Math.abs(transfer.amount - (cRemaining - cDeposit)) <= 81.0;
         const isRevenueMatch = cRevenue > 0 && Math.abs(transfer.amount - cRevenue) < 1.0;
+        
+        // Simulation of "Rest of stay" (Total - ReservationFee)
+        const isRestOfStayMatch = cTotal > 0 && cResFee > 0 && Math.abs(transfer.amount - (cTotal - cResFee)) <= 81.0;
+        const isRestPlusDepositMatch = cTotal > 0 && cResFee > 0 && Math.abs(transfer.amount - (cTotal - cResFee + cDeposit)) <= 81.0;
 
-        if (isTotalMatch || isRemainingMatch || isBothMatch || isRevenueMatch || isResFeeMatch) {
+        if (isTotalMatch || isRemainingMatch || isBothMatch || isFullBothMatch || isRevenueMatch || isResFeeMatch || isJustTotal || isJustRemaining || isRestOfStayMatch || isRestPlusDepositMatch) {
           amountScore = 100;
-          reasons.push(isTotalMatch ? "Matches total price" : isRemainingMatch ? "Matches remaining balance" : isRevenueMatch ? "Matches host revenue" : isResFeeMatch ? "Matches reservation fee" : "Matches balance + deposit");
+          reasons.push(
+            isTotalMatch ? "Matches total price" : 
+            isRemainingMatch ? "Matches remaining balance" : 
+            isRevenueMatch ? "Matches host revenue" : 
+            isResFeeMatch ? "Matches reservation fee" : 
+            isFullBothMatch ? "Matches total + deposit" : 
+            isBothMatch ? "Matches balance + deposit" : 
+            isJustTotal ? "Matches stay price (no deposit)" : 
+            isJustRemaining ? "Matches stay balance (no deposit)" :
+            isRestOfStayMatch ? "Matches rest of stay price" :
+            "Matches rest of stay + deposit"
+          );
           isMatch = true;
         } else if (isDepositMatch) {
           amountScore = 90;
           reasons.push("Matches deposit amount");
+          if (hasDepositKeyword) {
+            amountScore = 100;
+            bonus += 20;
+            reasons.push("Matches deposit amount + keyword");
+          }
           isMatch = true;
         }
       }
 
       if (!isMatch && cTotal > 0) {
-        // Near matches (e.g. within 10% of total or balance+deposit)
+        // Near matches (e.g. within 15% of total or balance+deposit)
         const diffTotal = Math.abs(transfer.amount - cTotal) / cTotal;
         const diffBoth = cRemaining > 0 ? Math.abs(transfer.amount - (cRemaining + cDeposit)) / (cRemaining + cDeposit) : 1.0;
         
-        if (diffTotal < 0.1 || diffBoth < 0.1) {
+        if (diffTotal < 0.15 || diffBoth < 0.15) {
           amountScore = 80;
           reasons.push(`Near match to total or balance+deposit (${Math.round(Math.min(diffTotal, diffBoth) * 100)}% diff)`);
         } else {
@@ -400,10 +493,20 @@ export async function findMatchingBookings(
     }
 
     // ── Composite score ────────────────────────────────────────────────────
-    // Weights: name 50%, date 10%, amount 40%
+    // Weights: name 40%, date 10%, amount 50%
     // titleDateMatch is a bonus that can override date proximity if it's high
     const finalDateScore = Math.max(dateScore, titleDateMatch);
-    let score = Math.round(finalNameScore * 0.5 + finalDateScore * 0.1 + amountScore * 0.4);
+    let score = Math.round(finalNameScore * 0.4 + finalDateScore * 0.1 + amountScore * 0.5) + bonus;
+
+    // Bonus for "Shared Surname + Exact Amount"
+    if (reasons.some(r => r.includes("Shared surname")) && amountScore === 100) {
+      score += 40;
+      reasons.push("Surname + Amount match bonus");
+    }
+
+    if (testMode && candidate.id === 38) {
+       // Removed debug detail
+    }
 
     // Bonus for "Obvious Match" — both name and amount are very strong
     if (finalNameScore >= 90 && amountScore >= 90) {
@@ -427,8 +530,14 @@ export async function findMatchingBookings(
     }
   }
 
-  // Sort by score descending, return top 5
-  return results.sort((a, b) => b.score - a.score).slice(0, 5);
+  // Sort by score descending
+  const sortedResults = results.sort((a, b) => b.score - a.score);
+  
+  // In test mode, return everything that met the minimal score
+  if (testMode) return sortedResults;
+
+  // Otherwise return top 5
+  return sortedResults.slice(0, 5);
 }
 
 /**
@@ -437,7 +546,7 @@ export async function findMatchingBookings(
  */
 export async function applyTransferMatch(
   bookingId: number,
-  transfer: ParsedBankEmail,
+  transfer: ParsedBankData,
   score: number
 ): Promise<void> {
   const db = await getDb();
@@ -472,7 +581,7 @@ export async function applyTransferMatch(
   const cRevenue = parseFloat(String(b.hostRevenue || "0"));
 
   if (b.channel === "slowhop") {
-    const hostPrepayment = cResFee - cComm;
+    const hostPrepayment = cResFee - (cComm * 1.23);
     const guestBalance = totalPrice - cResFee;
     const guestBalancePlusDeposit = guestBalance + depositReq;
 

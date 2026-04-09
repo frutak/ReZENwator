@@ -28,7 +28,7 @@ export function levenshtein(a: string, b: string): number {
 export function normalizeName(name: string): string {
   return name
     .toLowerCase()
-    .replace(/[^\w\sąśćęłńóśźż]/g, " ") // replace non-word with space
+    .replace(/[^\w\sąśćęłńóśźżŁĄŚĆĘŃÓŚŹŻ]/g, " ") // replace non-word with space, including all Polish chars
     // Strip common honorifics
     .replace(/\b(pan|pani|mgr|dr|inż)\b/g, "")
     // Strip common Polish address parts that might appear in sender names
