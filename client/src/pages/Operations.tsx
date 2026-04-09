@@ -26,12 +26,12 @@ export default function Operations() {
   const [isGenerating, setIsGenerating] = useState(false);
 
   const triggerIcal = trpc.sync.triggerIcal.useMutation({
-    onSuccess: () => {
+    onSuccess: (data) => {
       utils.sync.logs.invalidate();
       utils.sync.lastRun.invalidate();
       utils.sync.status.invalidate();
       utils.bookings.stats.invalidate();
-      toast.success("iCal sync triggered successfully");
+      toast.success(`iCal sync complete — ${data.newBookings} new, ${data.updatedBookings} updated`);
     },
     onError: (e) => toast.error(`Sync failed: ${e.message}`),
   });
@@ -42,7 +42,7 @@ export default function Operations() {
       utils.sync.lastRun.invalidate();
       utils.sync.status.invalidate();
       toast.success(
-        `Email check complete — ${data.processed} processed, ${data.enriched} enriched, ${data.matched} matched`
+        `Email check complete — ${data.processed} processed, ${data.added} added, ${data.enriched} enriched, ${data.matched} matched`
       );
     },
     onError: (e) => toast.error(`Email check failed: ${e.message}`),

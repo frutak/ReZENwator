@@ -1,3 +1,9 @@
+import dotenv from "dotenv";
+import path from "path";
+
+// Load environment variables from .env in the root directory
+dotenv.config({ path: path.resolve(process.cwd(), ".env") });
+
 export const ENV = {
   get appId() { return process.env.VITE_APP_ID ?? ""; },
   get cookieSecret() { return process.env.JWT_SECRET ?? ""; },
@@ -15,6 +21,9 @@ export const ENV = {
   // Business info
   get ownerName() { return process.env.OWNER_NAME ?? "Owner Name"; },
   get businessName() { return process.env.BUSINESS_NAME ?? "Business Name"; },
+  get businessAddress() { return process.env.BUSINESS_ADDRESS ?? "Business Address"; },
+  get businessNip() { return process.env.BUSINESS_NIP ?? "__________"; },
+  get businessRegon() { return process.env.BUSINESS_REGON ?? "__________"; },
   get bankAccountNumber() { return process.env.BANK_ACCOUNT_NUMBER ?? "00 0000 0000 0000 0000 0000 0000"; },
   get bankNotificationEmail() { return process.env.BANK_NOTIFICATION_EMAIL ?? "nestinfo@powiadomienia.nestbank.pl"; },
   get blikNumber() { return process.env.BLIK_NUMBER ?? ""; },
@@ -27,6 +36,11 @@ export const ENV = {
   get hacjendaManagerName() { return process.env.HACJENDA_MANAGER_NAME ?? "Manager"; },
   get sadolesManagerName() { return process.env.SADOLES_MANAGER_NAME ?? "Manager"; },
   get sadolesManagerPhone() { return process.env.SADOLES_MANAGER_PHONE ?? ""; },
+
+  get sadolesGuidePl() { return process.env.SADOLES_GUIDE_PL ?? "#"; },
+  get sadolesGuideEn() { return process.env.SADOLES_GUIDE_EN ?? "#"; },
+  get hacjendaGuidePl() { return process.env.HACJENDA_GUIDE_PL ?? "#"; },
+  get hacjendaGuideEn() { return process.env.HACJENDA_GUIDE_EN ?? "#"; },
 
   // Portal property IDs
   get hacjendaBookingId() { return process.env.HACJENDA_BOOKING_ID ?? ""; },

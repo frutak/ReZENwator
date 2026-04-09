@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { format, setHours, setMinutes } from "date-fns";
+import { format, setHours, setMinutes, startOfDay } from "date-fns";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -412,7 +412,12 @@ const bookingRouter = router({
 const syncRouter = router({
   triggerIcal: publicProcedure.mutation(async () => {
     const result = await pollAllICalFeeds();
-    return { success: true, message: "iCal sync triggered" };
+    return { 
+      success: result.errors.length === 0, 
+      newBookings: result.newBookings, 
+      updatedBookings: result.updatedBookings,
+      errors: result.errors
+    };
   }),
 
   triggerEmail: publicProcedure.mutation(async () => {
@@ -420,6 +425,7 @@ const syncRouter = router({
     return {
       success: true,
       processed: result.processed,
+      added: result.added,
       enriched: result.enriched,
       matched: result.matched,
       errors: result.errors,
