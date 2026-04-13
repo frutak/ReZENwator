@@ -1,10 +1,11 @@
-import { and, eq, lte, gte, lt, ne, sql, or, isNull, inArray, desc } from "drizzle-orm";
-import { getDb } from "../db";
-import { bookings, syncLogs, guestEmails as guestEmailsTable, portalAnalytics } from "../../drizzle/schema";
 import { format, subDays, startOfDay, endOfDay } from "date-fns";
 import { getTransporter, GMAIL_USER, sendAlertEmail, sendGuestEmail, getRecipientForEmail } from "../_core/email";
 import { processGuestEmails, GuestEmailSummary } from "./guestEmailWorker";
 import { Logger } from "../_core/logger";
+import { BookingRepository } from "../repositories/BookingRepository";
+import { SyncRepository } from "../repositories/SyncRepository";
+import { GuestEmailRepository } from "../repositories/GuestEmailRepository";
+import { PortalRepository } from "../repositories/PortalRepository";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -81,14 +82,7 @@ async function transitionBookingStatus(
   details: string
 ) {
   try {
-    const db = await getDb();
-    if (!db) return;
-
-    await db
-      .update(bookings)
-      .set({ status })
-      .where(eq(bookings.id, bookingId));
-    
+    await BookingRepository.updateBookingStatus(bookingId, status);
     await Logger.bookingAction(bookingId, "status_change", reason, details);
   } catch (err) {
     console.error(`[DailyAlerts] Failed to transition booking #${bookingId}:`, err);
@@ -98,11 +92,6 @@ async function transitionBookingStatus(
 export async function runDailyMaintenance() {
   console.log("[DailyAlerts] Starting daily maintenance...");
   const start = Date.now();
-  const db = await getDb();
-  if (!db) {
-    console.warn("[DailyAlerts] Database not available, skipping.");
-    return;
-  }
 
   const transitions: string[] = [];
   let guestEmailSummary: GuestEmailSummary = { sentCount: 0, failedCount: 0, details: [] };
@@ -130,21 +119,7 @@ export async function runDailyMaintenance() {
 
     // ─── 0.1 Portal Analytics ──────────────────────────────────────────────────
     try {
-      const stats = await db
-        .select({
-          page: portalAnalytics.page,
-          count: sql`count(distinct ${portalAnalytics.ipHash})`,
-        })
-        .from(portalAnalytics)
-        .where(
-          and(
-            gte(portalAnalytics.date, yesterdayStart),
-            lte(portalAnalytics.date, yesterdayEnd)
-          )
-        )
-        .groupBy(portalAnalytics.page);
-      
-      portalStats = stats.map(s => ({ page: s.page, count: Number(s.count) }));
+      portalStats = await PortalRepository.getYesterdayStats(yesterdayStart, yesterdayEnd);
     } catch (err) {
       console.error("[DailyAlerts] Portal analytics step failed:", err);
     }
@@ -156,38 +131,14 @@ export async function runDailyMaintenance() {
 
     // ─── 0.2 Find Bookings Missing Essential Data ──────────────────────────────────
     try {
-      bookingsMissingData = await db
-        .select()
-        .from(bookings)
-        .where(
-          and(
-            or(
-              isNull(bookings.guestName), 
-              eq(bookings.guestName, ""), 
-              isNull(bookings.guestEmail), 
-              eq(bookings.guestEmail, "")
-            ),
-            inArray(bookings.status, ["confirmed", "portal_paid", "paid", "pending"]),
-            gte(bookings.checkOut, now)
-          )
-        );
+      bookingsMissingData = await BookingRepository.findBookingsMissingData(now);
     } catch (err) {
       console.error("[DailyAlerts] Finding bookings missing data failed:", err);
     }
 
     // ─── 1. Automatic status transitions (Confirmed -> Portal Paid) ────────────────
     try {
-      const portalBookings = await db
-        .select()
-        .from(bookings)
-        .where(
-          and(
-            lte(bookings.checkIn, thirtyDaysFromNow),
-            eq(bookings.status, "confirmed")
-          )
-        );
-
-      const toPortalPaid = portalBookings.filter(b => ["airbnb", "booking"].includes(b.channel));
+      const toPortalPaid = await BookingRepository.findPortalBookingsForTransition(thirtyDaysFromNow);
 
       for (const b of toPortalPaid) {
         await transitionBookingStatus(
@@ -204,15 +155,7 @@ export async function runDailyMaintenance() {
 
     // ─── 1.1 Cancel stale pending bookings (> 5 days) ──────────────────────────────
     try {
-      const expiredPending = await db
-        .select()
-        .from(bookings)
-        .where(
-          and(
-            eq(bookings.status, "pending"),
-            lt(bookings.createdAt, fiveDaysAgo)
-          )
-        );
+      const expiredPending = await BookingRepository.findExpiredPending(fiveDaysAgo);
 
       for (const b of expiredPending) {
         await transitionBookingStatus(
@@ -222,7 +165,7 @@ export async function runDailyMaintenance() {
           "Pending booking exceeded 5-day payment window"
         );
         
-        await sendGuestEmail("booking_cancelled_no_payment", b);
+        await sendGuestEmail("booking_cancelled_no_payment", b as any);
         
         const msg = `Booking #${b.id} (${b.guestName || "Unknown"}) auto-cancelled (no payment received for > 5 days)`;
         transitions.push(msg);
@@ -234,24 +177,19 @@ export async function runDailyMaintenance() {
 
     // ─── 2. Automatic status transitions (Paid -> Finished) ────────────────────────
     try {
-      const paidEnded = await db
-        .select({ id: bookings.id, checkOut: bookings.checkOut, guestName: bookings.guestName })
-        .from(bookings)
-        .where(eq(bookings.status, "paid"));
+      const paidEnded = await BookingRepository.findPaidEnded(now);
 
       for (const b of paidEnded) {
-        if (b.checkOut && new Date(b.checkOut) < now) {
-          await transitionBookingStatus(
-            b.id,
-            "finished",
-            "Automatic transition to finished",
-            "Checkout date passed and booking was fully paid"
-          );
-          
-          const msg = `Booking #${b.id} (${b.guestName || "Unknown"}) auto-finished (checkout date passed)`;
-          transitions.push(msg);
-          console.log(`[DailyAlerts] ${msg}`);
-        }
+        await transitionBookingStatus(
+          b.id,
+          "finished",
+          "Automatic transition to finished",
+          "Checkout date passed and booking was fully paid"
+        );
+        
+        const msg = `Booking #${b.id} (${b.guestName || "Unknown"}) auto-finished (checkout date passed)`;
+        transitions.push(msg);
+        console.log(`[DailyAlerts] ${msg}`);
       }
     } catch (err) {
       console.error("[DailyAlerts] Paid transition step failed:", err);
@@ -266,114 +204,24 @@ export async function runDailyMaintenance() {
 
     // ─── 4. Identify alerts and errors ──────────────────────────────────────────
     try {
-      stalePending = await db
-        .select()
-        .from(bookings)
-        .where(
-          and(
-            eq(bookings.status, "pending"), 
-            lt(bookings.createdAt, twoDaysAgo),
-            gte(bookings.createdAt, fiveDaysAgo)
-          )
-        );
-
-      upcomingUnpaid = await db
-        .select()
-        .from(bookings)
-        .where(
-          and(
-            eq(bookings.status, "confirmed"),
-            lte(bookings.checkIn, oneWeekFromNow),
-            gte(bookings.checkIn, now)
-          )
-        );
-
-      upcomingPendingDeposits = await db
-        .select()
-        .from(bookings)
-        .where(
-          and(
-            eq(bookings.depositStatus, "pending"),
-            lte(bookings.checkIn, oneWeekFromNow),
-            gte(bookings.checkIn, now),
-            ne(bookings.status, "cancelled")
-          )
-        );
-
-      depositsToReturn = await db
-        .select()
-        .from(bookings)
-        .where(and(eq(bookings.status, "finished"), eq(bookings.depositStatus, "paid")));
+      stalePending = await BookingRepository.findStalePending(twoDaysAgo, fiveDaysAgo);
+      upcomingUnpaid = await BookingRepository.findUpcomingUnpaid(oneWeekFromNow, now);
+      upcomingPendingDeposits = await BookingRepository.findUpcomingPendingDeposits(oneWeekFromNow, now);
+      depositsToReturn = await BookingRepository.findDepositsToReturn();
 
       const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-      stalePortalPaid = await db
-        .select()
-        .from(bookings)
-        .where(
-          and(
-            eq(bookings.status, "portal_paid"),
-            lte(bookings.checkOut, sevenDaysAgo)
-          )
-        );
+      stalePortalPaid = await BookingRepository.findStalePortalPaid(sevenDaysAgo);
 
       // Fetch Errors from last 24h
-      failedSyncs = await db
-        .select()
-        .from(syncLogs)
-        .where(
-          and(
-            eq(syncLogs.success, "false"),
-            gte(syncLogs.createdAt, twentyFourHoursAgo)
-          )
-        );
-
-      // Identify current status of each sync source (to see if issue still persists)
-      // We get the latest log for each unique source
-      const allSources = await db
-        .select({ source: syncLogs.source })
-        .from(syncLogs)
-        .where(gte(syncLogs.createdAt, twentyFourHoursAgo));
-      
-      const uniqueSources = Array.from(new Set(allSources.map(s => s.source)));
-      const latestSyncs: any[] = [];
-      
-      for (const source of uniqueSources) {
-        const [latest] = await db
-          .select()
-          .from(syncLogs)
-          .where(eq(syncLogs.source, source))
-          .orderBy(desc(syncLogs.createdAt))
-          .limit(1);
-        if (latest) {
-          latestSyncs.push(latest);
-        }
-      }
-
-      failedGuestEmails = await db
-        .select()
-        .from(guestEmailsTable)
-        .where(
-          and(
-            eq(guestEmailsTable.success, "false"),
-            gte(guestEmailsTable.sentAt, twentyFourHoursAgo)
-          )
-        );
+      failedSyncs = await SyncRepository.findFailedSyncs(twentyFourHoursAgo);
+      latestSyncs = await SyncRepository.findLatestSyncsBySource(twentyFourHoursAgo);
+      failedGuestEmails = await GuestEmailRepository.findFailedEmails(twentyFourHoursAgo);
 
     } catch (err) {
       console.error("[DailyAlerts] Alert identification failed:", err);
     }
 
     // ─── 5. Send consolidated email ──────────────────────────────────────────────
-    
-    const hasActions = transitions.length > 0 || guestEmailSummary.details.length > 0;
-    const hasAlerts = stalePending.length > 0 || upcomingUnpaid.length > 0 || upcomingPendingDeposits.length > 0 || depositsToReturn.length > 0 || stalePortalPaid.length > 0;
-    const hasErrors = failedSyncs.length > 0 || failedGuestEmails.length > 0;
-
-    const summaryMsg = `Actions: ${transitions.length + guestEmailSummary.sentCount}, Alerts: ${stalePending.length + upcomingUnpaid.length + upcomingPendingDeposits.length + depositsToReturn.length + stalePortalPaid.length}, Errors: ${failedSyncs.length + failedGuestEmails.length}`;
-    console.log(`[DailyAlerts] Maintenance summary: ${summaryMsg}`);
-
-    // We always send the email now if requested to report on "absence of errors"
-    // or if there are any actions/alerts/errors.
     
     let emailSent = false;
     try {
@@ -554,12 +402,12 @@ async function sendConsolidatedAlertEmail(data: {
   if (data.bookingsMissingData.length > 0) {
     html += `
       <h4 style="color:#9f1239;margin-bottom:8px">🚨 Bookings Missing Essential Data (Action Required)</h4>
-      <p style="font-size:12px;color:#6b7280;margin-top:-4px">Guest email or name is missing. Reminder emails will NOT be sent until fixed.</p>
+      <p style="font-size:12px;color:#6b7280;margin-top:-4px">Guest email or name is missing. Reminder emails will NOT be sent until fixed (for Airbnb, we allow missing emails and send messages to admin).</p>
       <ul style="font-size:14px;margin-top:0">
         ${data.bookingsMissingData.map(b => `
           <li>
             <strong>${b.property}</strong>: ${b.guestName || "<i>Name missing</i>"} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)}) 
-            — ${!b.guestEmail ? "<span style='color:#9f1239'>Email missing</span>" : ""}
+            — ${!b.guestEmail && b.channel !== "airbnb" ? "<span style='color:#9f1239'>Email missing</span>" : ""}
             ${!b.guestName ? "<span style='color:#9f1239'>Name missing</span>" : ""}
           </li>
         `).join("")}

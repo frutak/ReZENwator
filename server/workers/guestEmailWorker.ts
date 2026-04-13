@@ -1,6 +1,5 @@
-import { and, eq, inArray, lt, gte, ne } from "drizzle-orm";
-import { getDb } from "../db";
-import { bookings, guestEmails } from "../../drizzle/schema";
+import { BookingRepository } from "../repositories/BookingRepository";
+import { GuestEmailRepository } from "../repositories/GuestEmailRepository";
 import { sendGuestEmail, getRecipientForEmail } from "../_core/email";
 import { Logger } from "../_core/logger";
 import type { GuestEmailType } from "../_core/email";
@@ -13,36 +12,27 @@ export interface GuestEmailSummary {
 }
 
 export async function processGuestEmails(): Promise<GuestEmailSummary> {
-  const db = await getDb();
   const summary: GuestEmailSummary = { sentCount: 0, failedCount: 0, details: [] };
-  if (!db) return summary;
 
   console.log("[GuestEmailWorker] Starting guest email processing...");
 
   // 1. Get all bookings that might need an email
   // We care about confirmed, paid, finished bookings
-  const activeBookings = await db
-    .select()
-    .from(bookings)
-    .where(
-      inArray(bookings.status, ["confirmed", "portal_paid", "paid", "finished"])
-    );
+  const activeBookings = await BookingRepository.findActiveBookingsForEmails();
 
   const now = new Date();
 
   for (const booking of activeBookings) {
     try {
       // Skip bookings with missing essential data (name or email)
-      // We don't want to send emails with "Owner Name" placeholders to the admin
-      if (!booking.guestName || !booking.guestEmail) {
+      // Exception: Airbnb bookings don't have guest email, so we allow them
+      const isMissingEssential = !booking.guestName || (!booking.guestEmail && booking.channel !== "airbnb");
+      if (isMissingEssential) {
         console.log(`[GuestEmailWorker] Skipping booking #${booking.id} due to missing essential data (Name: ${booking.guestName || "Missing"}, Email: ${booking.guestEmail || "Missing"})`);
         continue;
       }
 
-      const sentEmails = await db
-        .select()
-        .from(guestEmails)
-        .where(eq(guestEmails.bookingId, booking.id));
+      const sentEmails = await GuestEmailRepository.findEmailsByBookingId(booking.id);
 
       const isSent = (type: GuestEmailType) =>
         sentEmails.some((e) => e.emailType === type && e.success === "true");
@@ -68,8 +58,8 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
             // Arrival is within 4 weeks, skip confirmation email to avoid "mechanical" feeling
             console.log(`[GuestEmailWorker] Skipping confirmation for booking #${booking.id} (arrival within 4 weeks: ${format(checkInDate, "yyyy-MM-dd")})`);
             
-            const recipient = await getRecipientForEmail("booking_confirmed", booking);
-            await db.insert(guestEmails).values({
+            const recipient = await getRecipientForEmail("booking_confirmed", booking as any);
+            await GuestEmailRepository.insertEmailLog({
               bookingId: booking.id,
               emailType: "booking_confirmed",
               recipient,
@@ -86,8 +76,8 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
             
             // We don't increment sentCount/details as nothing was actually sent
           } else {
-            const { success, recipient } = await sendGuestEmail("booking_confirmed", booking);
-            await db.insert(guestEmails).values({
+            const { success, recipient } = await sendGuestEmail("booking_confirmed", booking as any);
+            await GuestEmailRepository.insertEmailLog({
               bookingId: booking.id,
               emailType: "booking_confirmed",
               recipient,
@@ -109,12 +99,13 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
 
       const isDataMissing = !booking.guestCountry || 
                            !booking.guestName || 
+                           (!booking.guestEmail && booking.channel !== "airbnb") ||
                            (!["airbnb", "booking"].includes(booking.channel) && booking.totalPrice === null);
 
       if (isDataMissing && !isSent("missing_data_alert")) {
         if (isAfter(now, threeWeeksBefore) && isBefore(now, twoWeeksBefore)) {
-           const { success, recipient } = await sendGuestEmail("missing_data_alert", booking);
-           await db.insert(guestEmails).values({
+           const { success, recipient } = await sendGuestEmail("missing_data_alert", booking as any);
+           await GuestEmailRepository.insertEmailLog({
              bookingId: booking.id,
              emailType: "missing_data_alert",
              recipient,
@@ -133,38 +124,15 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
           // Calculate early arrival availability
           let isEarlyArrival = true;
           const checkInDate = startOfDay(new Date(booking.checkIn));
+          const prevDay = subDays(checkInDate, 1);
 
-          if (booking.property === "Sadoles") {
-            const prevDay = subDays(checkInDate, 1);
-            const blockingBookings = await db
-              .select()
-              .from(bookings)
-              .where(
-                and(
-                  eq(bookings.property, "Sadoles"),
-                  ne(bookings.id, booking.id),
-                  inArray(bookings.checkOut, [checkInDate, prevDay])
-                )
-              );
-            if (blockingBookings.length > 0) isEarlyArrival = false;
-          } else if (booking.property === "Hacjenda") {
-            const blockingBookings = await db
-              .select()
-              .from(bookings)
-              .where(
-                and(
-                  eq(bookings.property, "Hacjenda"),
-                  ne(bookings.id, booking.id),
-                  eq(bookings.checkOut, checkInDate)
-                )
-              );
-            if (blockingBookings.length > 0) isEarlyArrival = false;
-          }
+          const blockingBookings = await BookingRepository.findBlockingBookingsForEarlyArrival(booking.property as any, booking.id, checkInDate, prevDay);
+          if (blockingBookings.length > 0) isEarlyArrival = false;
 
-          const { success, recipient } = await sendGuestEmail("arrival_reminder", booking, { isEarlyArrival });
+          const { success, recipient } = await sendGuestEmail("arrival_reminder", booking as any, { isEarlyArrival });
           if (success) {
-            await db.update(bookings).set({ reminderSent: 1 }).where(eq(bookings.id, booking.id));
-            await db.insert(guestEmails).values({
+            await BookingRepository.markReminderSent(booking.id);
+            await GuestEmailRepository.insertEmailLog({
               bookingId: booking.id,
               emailType: "arrival_reminder",
               recipient,
@@ -181,8 +149,8 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
       }
       // --- D. Stay Finished ---
       if (!isSent("stay_finished") && booking.depositStatus === "returned") {
-          const { success, recipient } = await sendGuestEmail("stay_finished", booking);
-          await db.insert(guestEmails).values({
+          const { success, recipient } = await sendGuestEmail("stay_finished", booking as any);
+          await GuestEmailRepository.insertEmailLog({
             bookingId: booking.id,
             emailType: "stay_finished",
             recipient,

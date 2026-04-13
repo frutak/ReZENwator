@@ -1,7 +1,7 @@
 export { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
 
 // Generate login URL at runtime so redirect URI reflects the current origin.
-// Returns null when OAuth is not configured (self-hosted deployments without Manus auth).
+// Returns null when OAuth is not configured (self-hosted deployments without OAuth).
 export const getLoginUrl = (): string | null => {
   const oauthPortalUrl = import.meta.env.VITE_OAUTH_PORTAL_URL;
   const appId = import.meta.env.VITE_APP_ID;

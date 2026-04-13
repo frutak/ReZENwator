@@ -7,11 +7,9 @@
 
 import ical from "node-ical";
 import type { VEvent, ParameterValue } from "node-ical";
-import { and, eq, ne, inArray, gte } from "drizzle-orm";
-import { setHours, setMinutes } from "date-fns";
+import { setHours, setMinutes, format } from "date-fns";
 import axios from "axios";
-import { getDb } from "../db";
-import { bookings } from "../../drizzle/schema";
+import { BookingRepository } from "../repositories/BookingRepository";
 import { getICalFeeds, type ICalFeed } from "./icalConfig";
 import { checkAndAlertDoubleBookings } from "./doubleBookingDetector";
 import { sendAlertEmail } from "../_core/email";
@@ -99,11 +97,6 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
   let updatedBookings = 0;
   const errors: string[] = [];
 
-  const db = await getDb();
-  if (!db) {
-    return { newBookings: 0, updatedBookings: 0, errors: ["Database not available"] };
-  }
-
   const seenUids: string[] = [];
 
   let events: Awaited<ReturnType<typeof ical.async.parseICS>>;
@@ -136,10 +129,13 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
     if (isNaN(checkIn.getTime()) || isNaN(checkOut.getTime())) continue;
 
     // Set default times if not present (iCal dates are often just YYYYMMDD)
-    if (checkIn.getHours() === 0 && checkIn.getMinutes() === 0) {
+    const isCheckInDateOnly = checkIn.getHours() === 0 && checkIn.getMinutes() === 0;
+    const isCheckOutDateOnly = checkOut.getHours() === 0 && checkOut.getMinutes() === 0;
+
+    if (isCheckInDateOnly) {
       checkIn = setMinutes(setHours(checkIn, 16), 0);
     }
-    if (checkOut.getHours() === 0 && checkOut.getMinutes() === 0) {
+    if (isCheckOutDateOnly) {
       checkOut = setMinutes(setHours(checkOut, 10), 0);
     }
     // Skip events that ended more than 1 year ago (historical cleanup)
@@ -188,33 +184,34 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
 
     try {
       // Primary deduplication: by iCal UID
-      const existingByUid = await db
-        .select({ id: bookings.id })
-        .from(bookings)
-        .where(eq(bookings.icalUid, icalUid))
-        .limit(1);
+      const b = await BookingRepository.getBookingByIcalUid(icalUid);
 
-      if (existingByUid.length > 0) {
-        const existing = await db
-          .select({ id: bookings.id, checkIn: bookings.checkIn, checkOut: bookings.checkOut, icalSummary: bookings.icalSummary })
-          .from(bookings)
-          .where(eq(bookings.icalUid, icalUid))
-          .limit(1);
-        
-        const b = existing[0]!;
+      if (b) {
         const normalizedSummary = summary.substring(0, 500);
+
+        // If the incoming iCal event was date-only (00:00), and the date part (YYYY-MM-DD)
+        // hasn't changed, we should preserve the existing booking's custom times.
+        if (isCheckInDateOnly) {
+          const bIn = new Date(b.checkIn);
+          if (format(bIn, "yyyy-MM-dd") === format(checkIn, "yyyy-MM-dd")) {
+            checkIn = bIn; // preserve custom time
+          }
+        }
+        if (isCheckOutDateOnly) {
+          const bOut = new Date(b.checkOut);
+          if (format(bOut, "yyyy-MM-dd") === format(checkOut, "yyyy-MM-dd")) {
+            checkOut = bOut; // preserve custom time
+          }
+        }
         
         // Compare values to avoid redundant updates/logs
         const datesChanged = b.checkIn.getTime() !== checkIn.getTime() || b.checkOut.getTime() !== checkOut.getTime();
         const summaryChanged = b.icalSummary !== normalizedSummary;
 
         if (datesChanged || summaryChanged) {
-          await db
-            .update(bookings)
-            .set({ checkIn, checkOut, icalSummary: normalizedSummary })
-            .where(eq(bookings.icalUid, icalUid));
+          await BookingRepository.updateIcalBooking(icalUid, { checkIn, checkOut, icalSummary: normalizedSummary });
           
-          const changeDetail = datesChanged ? `Dates updated: ${checkIn.toLocaleDateString()} - ${checkOut.toLocaleDateString()}` : "Summary updated";
+          const changeDetail = datesChanged ? `Dates updated: ${format(checkIn, "dd.MM.yyyy HH:mm")} - ${format(checkOut, "dd.MM.yyyy HH:mm")}` : "Summary updated";
           await Logger.bookingAction(b.id, "enrichment", changeDetail, `Feed: ${feed.label}`);
           updatedBookings++;
         }
@@ -222,21 +219,14 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
       }
 
       // Secondary deduplication: same property + same date range (ignoring exact time)
-      // This catches cross-channel sync (e.g. Booking.com booking appearing in both
-      // the Slowhop feed and the Booking.com feed with different UIDs/times)
-      
-      // Normalize to midnight for comparison
-      const checkInDate = new Date(checkIn); checkInDate.setHours(0,0,0,0);
-      const checkOutDate = new Date(checkOut); checkOutDate.setHours(0,0,0,0);
-
-      const allBookings = await db
-        .select({ id: bookings.id, channel: bookings.channel, checkIn: bookings.checkIn, checkOut: bookings.checkOut })
-        .from(bookings)
-        .where(eq(bookings.property, feed.property));
+      const allBookings = await BookingRepository.findOverlapCandidates(feed.property as any, checkIn, checkOut);
 
       const duplicate = allBookings.find(b => {
         const bIn = new Date(b.checkIn); bIn.setHours(0,0,0,0);
         const bOut = new Date(b.checkOut); bOut.setHours(0,0,0,0);
+        // Normalize incoming to midnight for comparison
+        const checkInDate = new Date(checkIn); checkInDate.setHours(0,0,0,0);
+        const checkOutDate = new Date(checkOut); checkOutDate.setHours(0,0,0,0);
         return bIn.getTime() === checkInDate.getTime() && bOut.getTime() === checkOutDate.getTime();
       });
 
@@ -245,11 +235,22 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
         // Prefer the channel-specific UID over a cross-sync UID.
         const existingIsFromOtherFeed = duplicate.channel !== channel;
         if (existingIsFromOtherFeed && (channel === "airbnb" || channel === "booking")) {
+          // Preserve existing times if incoming was date-only
+          if (isCheckInDateOnly) {
+            const bIn = new Date(duplicate.checkIn);
+            if (format(bIn, "yyyy-MM-dd") === format(checkIn, "yyyy-MM-dd")) {
+              checkIn = bIn;
+            }
+          }
+          if (isCheckOutDateOnly) {
+            const bOut = new Date(duplicate.checkOut);
+            if (format(bOut, "yyyy-MM-dd") === format(checkOut, "yyyy-MM-dd")) {
+              checkOut = bOut;
+            }
+          }
+
           // Upgrade channel attribution to the more authoritative source
-          await db
-            .update(bookings)
-            .set({ channel, icalUid, icalSummary: summary.substring(0, 500), checkIn, checkOut })
-            .where(eq(bookings.id, duplicate.id));
+          await BookingRepository.updateBookingDetails(duplicate.id, { channel, icalUid, icalSummary: summary.substring(0, 500), checkIn, checkOut });
           console.log(
             `[iCal] Merged duplicate: ${feed.label} | ${checkIn.toDateString()} → ${checkOut.toDateString()} (upgraded channel from ${duplicate.channel} to ${channel})`
           );
@@ -263,7 +264,7 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
       }
 
       // No existing booking found — insert as new
-      const [insertResult] = await db.insert(bookings).values({
+      const [insertResult] = await BookingRepository.insertBooking({
         icalUid,
         property: feed.property,
         channel,
@@ -308,57 +309,39 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-    const missingBookings = await db
-      .select()
-      .from(bookings)
-      .where(
-        and(
-          eq(bookings.property, feed.property),
-          eq(bookings.channel, feed.channel),
-          ne(bookings.status, "finished"),
-          ne(bookings.status, "cancelled"),
-          gte(bookings.checkIn, todayStart), // Only consider future/starting-today bookings for auto-cancel
-          seenUids.length > 0 ? ne(bookings.icalUid, "manual") : undefined
-        )
-      );
+    const missingBookings = await BookingRepository.findMissingBookings(feed.property as any, feed.channel as any, todayStart, seenUids);
 
     for (const b of missingBookings) {
-      // If the UID is not in seenUids, it means it's gone from the feed
-      if (!seenUids.includes(b.icalUid)) {
-        // REFINEMENT: Only auto-cancel if the booking starts AFTER today.
-        // If it starts today or in the past, it disappearing from iCal is normal cleanup/housekeeping.
-        const checkInDate = new Date(b.checkIn);
-        const isFutureBooking = checkInDate > now;
+      // REFINEMENT: Only auto-cancel if the booking starts AFTER today.
+      // If it starts today or in the past, it disappearing from iCal is normal cleanup/housekeeping.
+      const checkInDate = new Date(b.checkIn);
+      const isFutureBooking = checkInDate > now;
+      
+      if (isFutureBooking) {
+        await BookingRepository.updateBookingStatus(b.id, "cancelled");
         
-        if (isFutureBooking) {
-          await db
-            .update(bookings)
-            .set({ status: "cancelled" })
-            .where(eq(bookings.id, b.id));
+        await Logger.bookingAction(b.id, "status_change", "Marked as CANCELLED", `Reason: Removed from ${feed.label} iCal feed`);
+        
+        console.log(`[iCal] Booking #${b.id} marked as CANCELLED (removed from future calendar: ${feed.label})`);
+        
+        // Notify host
+        const checkInStr = new Date(b.checkIn).toLocaleDateString();
+        const checkOutStr = new Date(b.checkOut).toLocaleDateString();
+        const subject = `❌ Booking CANCELLED: ${b.guestName || "Unknown"} (${b.property})`;
+        const text = `
+          The following booking has been removed from the ${feed.channel} iCal feed and marked as CANCELLED.
           
-          await Logger.bookingAction(b.id, "status_change", "Marked as CANCELLED", `Reason: Removed from ${feed.label} iCal feed`);
+          Guest: ${b.guestName || "Unknown"}
+          Property: ${b.property}
+          Channel: ${b.channel}
+          Dates: ${checkInStr} - ${checkOutStr}
           
-          console.log(`[iCal] Booking #${b.id} marked as CANCELLED (removed from future calendar: ${feed.label})`);
-          
-          // Notify host
-          const checkInStr = new Date(b.checkIn).toLocaleDateString();
-          const checkOutStr = new Date(b.checkOut).toLocaleDateString();
-          const subject = `❌ Booking CANCELLED: ${b.guestName || "Unknown"} (${b.property})`;
-          const text = `
-            The following booking has been removed from the ${feed.channel} iCal feed and marked as CANCELLED.
-            
-            Guest: ${b.guestName || "Unknown"}
-            Property: ${b.property}
-            Channel: ${b.channel}
-            Dates: ${checkInStr} - ${checkOutStr}
-            
-            The dates are now available for new bookings.
-          `.trim();
-          
-          await sendAlertEmail(subject, text);
-        } else {
-          console.log(`[iCal] Booking #${b.id} (${b.guestName}) removed from feed but not cancelled (already started/historical)`);
-        }
+          The dates are now available for new bookings.
+        `.trim();
+        
+        await sendAlertEmail(subject, text);
+      } else {
+        console.log(`[iCal] Booking #${b.id} (${b.guestName}) removed from feed but not cancelled (already started/historical)`);
       }
     }
   } catch (err) {
