@@ -12,20 +12,18 @@ The following software must be installed on your server before proceeding.
 |---|---|---|
 | Node.js | 22.x LTS | Install via NodeSource |
 | pnpm | 10.x | `npm install -g pnpm` |
-| MySQL / TiDB | 8.x | Or use the hosted DB from your Manus project |
+| MySQL / TiDB | 8.x | Local or remote database |
 | Git | Any | For cloning the repository |
 
 ---
 
-## Step 1 — Export and Transfer the Project
+## Step 1 — Clone and Transfer the Project
 
-In the Manus Management UI, navigate to **Code → Download all files** to get a ZIP of the project. Transfer it to your server:
+Clone the repository directly on your server or transfer the files:
 
 ```bash
-scp rental-manager.zip user@your-server:/opt/
-ssh user@your-server
-cd /opt && unzip rental-manager.zip
-mv rental-manager /opt/rental-manager
+git clone <your-repo-url> /opt/rental-manager
+cd /opt/rental-manager
 ```
 
 ---
@@ -33,7 +31,6 @@ mv rental-manager /opt/rental-manager
 ## Step 2 — Install Dependencies
 
 ```bash
-cd /opt/rental-manager
 pnpm install --frozen-lockfile
 ```
 
@@ -50,7 +47,7 @@ nano /opt/rental-manager/.env
 Paste and fill in the following:
 
 ```env
-# Database — use the connection string from your Manus project dashboard
+# Database
 DATABASE_URL=mysql://user:password@host:3306/rental_manager
 
 # Auth
@@ -75,7 +72,6 @@ PORT=3000
 ## Step 4 — Build the Application
 
 ```bash
-cd /opt/rental-manager
 pnpm build
 ```
 

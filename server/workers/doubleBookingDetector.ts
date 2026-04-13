@@ -11,9 +11,7 @@
  */
 
 import nodemailer from "nodemailer";
-import { and, eq, ne, lt, gt } from "drizzle-orm";
-import { getDb } from "../db";
-import { bookings } from "../../drizzle/schema";
+import { BookingRepository } from "../repositories/BookingRepository";
 import type { Booking } from "../../drizzle/schema";
 import { getRecipientForEmail } from "../_core/email";
 
@@ -32,27 +30,8 @@ export type DoubleBookingConflict = {
  * date ranges, excluding finished bookings.
  */
 export async function detectDoubleBookings(): Promise<DoubleBookingConflict[]> {
-  const db = await getDb();
-  if (!db) return [];
-
   // Fetch all active (non-finished) bookings
-  const active = await db
-    .select({
-      id: bookings.id,
-      property: bookings.property,
-      channel: bookings.channel,
-      checkIn: bookings.checkIn,
-      checkOut: bookings.checkOut,
-      guestName: bookings.guestName,
-      status: bookings.status,
-    })
-    .from(bookings)
-    .where(
-      and(
-        ne(bookings.status, "finished"),
-        ne(bookings.status, "cancelled")
-      )
-    );
+  const active = await BookingRepository.getActiveBookingsForOverlapCheck();
 
   const conflicts: DoubleBookingConflict[] = [];
   const seen = new Set<string>();

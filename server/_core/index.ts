@@ -9,9 +9,7 @@ import { registerThumbnailRoute } from "./thumbnails";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
-import { getDb } from "../db";
-import { bookings } from "../../drizzle/schema";
-import { eq, and, ne } from "drizzle-orm";
+import { BookingRepository } from "../repositories/BookingRepository";
 import { generateIcalString } from "./ics";
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -49,20 +47,7 @@ async function startServer() {
     const propertyParam = req.params.property;
     const property = propertyParam === "sadoles" ? "Sadoles" : "Hacjenda";
     
-    const db = await getDb();
-    if (!db) return res.status(500).send("Database unavailable");
-
-    // Only include bookings that are NOT cancelled.
-    // We include 'pending' and 'confirmed' to ensure dates are blocked as requested by the user.
-    const activeBookings = await db
-      .select()
-      .from(bookings)
-      .where(
-        and(
-          eq(bookings.property, property as any),
-          ne(bookings.status, "cancelled")
-        )
-      );
+    const activeBookings = await BookingRepository.getBookingsForExport(property as any);
 
     const ics = generateIcalString(property, activeBookings);
     res.setHeader("Content-Type", "text/calendar; charset=utf-8");

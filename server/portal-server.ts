@@ -5,9 +5,7 @@ import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { appRouter } from "./routers";
 import { createContext } from "./_core/context";
 import { registerThumbnailRoute } from "./_core/thumbnails";
-import { getDb } from "./db";
-import { bookings } from "../drizzle/schema";
-import { eq, and, ne } from "drizzle-orm";
+import { BookingRepository } from "./repositories/BookingRepository";
 import { generateIcalString } from "./_core/ics";
 import path from "path";
 import fs from "fs";
@@ -27,18 +25,7 @@ async function startPortalServer() {
     const propertyParam = req.params.property;
     const property = propertyParam === "sadoles" ? "Sadoles" : "Hacjenda";
     
-    const db = await getDb();
-    if (!db) return res.status(500).send("Database unavailable");
-
-    const activeBookings = await db
-      .select()
-      .from(bookings)
-      .where(
-        and(
-          eq(bookings.property, property as any),
-          ne(bookings.status, "cancelled")
-        )
-      );
+    const activeBookings = await BookingRepository.getBookingsForExport(property as any);
 
     const ics = generateIcalString(property, activeBookings);
     res.setHeader("Content-Type", "text/calendar; charset=utf-8");
