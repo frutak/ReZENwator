@@ -17,6 +17,15 @@ export default defineConfig({
   build: {
     outDir: path.resolve(import.meta.dirname, "../dist/portal"),
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-react": ["react", "react-dom", "wouter"],
+          "vendor-utils": ["date-fns", "lucide-react", "clsx", "tailwind-merge"],
+          "vendor-ui": ["@tanstack/react-query", "@trpc/client", "@trpc/react-query", "sonner", "react-day-picker"],
+        },
+      },
+    },
   },
   server: {
     port: 3001,
