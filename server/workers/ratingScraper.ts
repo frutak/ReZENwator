@@ -1,7 +1,6 @@
 import axios from "axios";
-import { getDb } from "../db";
+import { PropertyRepository } from "../repositories/PropertyRepository";
 import { propertyRatings } from "../../drizzle/schema";
-import { and, eq } from "drizzle-orm";
 import { Logger } from "../_core/logger";
 
 const RATING_URLS = {
@@ -135,29 +134,20 @@ async function scrapePortal(property: "Sadoles" | "Hacjenda", url: string, porta
 export async function updateAllPropertyRatings() {
   console.log("[RatingScraper] Starting ratings update...");
   const start = Date.now();
-  const db = await getDb();
-  if (!db) return;
 
   for (const [property, portals] of Object.entries(RATING_URLS)) {
     for (const [portal, url] of Object.entries(portals)) {
       const result = await scrapePortal(property as any, url, portal as any);
       if (result) {
         console.log(`[RatingScraper] ${property} on ${portal}: ${result.rating} (${result.count} reviews)`);
-        
-        await db.insert(propertyRatings).values({
+
+        await PropertyRepository.upsertPropertyRating({
           property: property as any,
           portal: portal as any,
           rating: String(result.rating),
           count: result.count,
-        }).onDuplicateKeyUpdate({
-          set: {
-            rating: String(result.rating),
-            count: result.count,
-            updatedAt: new Date(),
-          }
         });
-      }
-    }
+      }    }
   }
   
   await Logger.system("ical", { // Using 'ical' as a generic background type or I could add 'rating' if needed

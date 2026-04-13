@@ -5,7 +5,7 @@ import { parse as parseCookieHeader } from "cookie";
 import type { Request } from "express";
 import { SignJWT, jwtVerify } from "jose";
 import type { User } from "../../drizzle/schema";
-import * as db from "../db";
+import { UserRepository } from "../repositories/UserRepository";
 import { ENV } from "./env";
 import type {
   ExchangeTokenRequest,
@@ -13,7 +13,7 @@ import type {
   GetUserInfoResponse,
   GetUserInfoWithJwtRequest,
   GetUserInfoWithJwtResponse,
-} from "./types/manusTypes";
+} from "./types/authTypes";
 // Utility function
 const isNonEmptyString = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0;
@@ -160,7 +160,7 @@ class SDKServer {
   }
 
   /**
-   * Create a session token for a Manus user openId
+   * Create a session token for a user openId
    * @example
    * const sessionToken = await sdk.createSessionToken(userInfo.openId);
    */
@@ -266,23 +266,23 @@ class SDKServer {
     const signedInAt = new Date();
     
     // Try both openId and username
-    let user = await db.getUserByOpenId(sessionUserId);
+    let user = await UserRepository.getUserByOpenId(sessionUserId);
     if (!user) {
-      user = await db.getUserByUsername(sessionUserId);
+      user = await UserRepository.getUserByUsername(sessionUserId);
     }
 
     // If user not in DB, sync from OAuth server automatically
     if (!user) {
       try {
         const userInfo = await this.getUserInfoWithJwt(sessionCookie ?? "");
-        await db.upsertUser({
+        await UserRepository.upsertUser({
           openId: userInfo.openId,
           name: userInfo.name || null,
           email: userInfo.email ?? null,
           loginMethod: userInfo.loginMethod ?? userInfo.platform ?? null,
           lastSignedIn: signedInAt,
         });
-        user = await db.getUserByOpenId(userInfo.openId);
+        user = await UserRepository.getUserByOpenId(userInfo.openId);
       } catch (error) {
         console.error("[Auth] Failed to sync user from OAuth:", error);
         throw new TRPCError({ code: "FORBIDDEN", message: "Failed to sync user info" });
@@ -293,7 +293,7 @@ class SDKServer {
       throw new TRPCError({ code: "FORBIDDEN", message: "User not found" });
     }
 
-    await db.upsertUser({
+    await UserRepository.upsertUser({
       id: user.id,
       lastSignedIn: signedInAt,
     });

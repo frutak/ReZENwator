@@ -1,9 +1,7 @@
 import { ENV } from "../_core/env";
 import Imap from "imap";
 import { simpleParser } from "mailparser";
-import { and, eq, or, like, lte, gte, isNull } from "drizzle-orm";
-import { getDb } from "../db";
-import { bookings } from "../../drizzle/schema";
+import { BookingRepository } from "../repositories/BookingRepository";
 import { qualifyEmail, QualifiedEmail, ParsedBookingData, ParsedBankData } from "./emailParsers";
 import { findMatchingBookings, applyTransferMatch } from "./bookingMatcher";
 import { sendAlertEmail, forwardUnmatchedEmail } from "../_core/email";
@@ -106,8 +104,7 @@ async function fetchEmails(testMode: boolean): Promise<
  * Purpose: Filling-out all possible booking data.
  */
 async function handleBookingConfirmation(subTemplate: string, data: ParsedBookingData, email: any, testMode: boolean): Promise<"created" | "updated" | null> {
-  const db = await getDb();
-  if (!db || !data.checkIn || !data.checkOut) return null;
+  if (!data.checkIn || !data.checkOut) return null;
 
   // 1. Find existing booking by channel + dates (±1 day)
   const dayMs = 24 * 60 * 60 * 1000;
@@ -116,15 +113,7 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
   const checkOutMin = new Date(data.checkOut.getTime() - dayMs);
   const checkOutMax = new Date(data.checkOut.getTime() + dayMs);
 
-  const candidates = await db
-    .select()
-    .from(bookings)
-    .where(
-      and(
-        eq(bookings.channel, data.channel),
-        data.property ? eq(bookings.property, data.property) : undefined
-      )
-    );
+  const candidates = await BookingRepository.findEmailMatchCandidates(data.channel as any, data.property as any);
 
   const match = candidates.find((b) => 
     b.checkIn >= checkInMin && b.checkIn <= checkInMax &&
@@ -135,14 +124,14 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
     if (testMode) return "created";
     // If not found, create it (iCal hasn't seen it yet)
     console.log(`[Email] No match for ${subTemplate} confirmation. Creating new booking.`);
-    const [insertResult] = await db.insert(bookings).values({
+    const [insertResult] = await BookingRepository.insertBooking({
       icalUid: `email-${data.channel}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       property: data.property ?? "Sadoles",
-      channel: data.channel,
+      channel: data.channel as any,
       checkIn: data.checkIn,
       checkOut: data.checkOut,
-      status: initialStatus(data.channel),
-      depositStatus: initialDepositStatus(data.channel),
+      status: initialStatus(data.channel as any),
+      depositStatus: initialDepositStatus(data.channel as any),
       guestName: data.guestName,
       guestEmail: data.guestEmail,
       guestPhone: data.guestPhone,
@@ -168,7 +157,10 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
   // 2. Enrich existing booking
   if (testMode) return "updated";
 
-  await db.update(bookings).set({
+  await BookingRepository.updateBookingDetails(match.id, {
+    // For Slowhop, S1 only enriches data; it does NOT confirm the booking (that's for S2).
+    // For others (Airbnb/Booking), S1 is the confirmation trigger.
+    status: (data.channel === "slowhop" || data.channel === "direct") ? match.status : "confirmed",
     guestName: data.guestName ?? match.guestName,
     guestEmail: data.guestEmail ?? match.guestEmail,
     guestPhone: data.guestPhone ?? match.guestPhone,
@@ -183,7 +175,7 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
     amountPaid: data.amountPaid ? String(data.amountPaid) : match.amountPaid,
     reservationFee: data.amountPaid ? String(data.amountPaid) : match.reservationFee,
     currency: data.currency ?? match.currency,
-  }).where(eq(bookings.id, match.id));
+  });
 
   await Logger.bookingAction(match.id, "enrichment", `Enriched via ${subTemplate} email`, `Data filled: Name, Contact, Prices`);
   return "updated";
@@ -194,25 +186,20 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
  * Purpose: Fill out commission and prepayment details.
  */
 async function handleSlowhopS2(data: ParsedBookingData, testMode: boolean): Promise<boolean> {
-  const db = await getDb();
-  if (!db || !data.bookingId) return false;
+  if (!data.bookingId) return false;
 
-  const match = await db.select().from(bookings).where(
-    and(
-      eq(bookings.channel, "slowhop"),
-      like(bookings.icalSummary, `%${data.bookingId}%`)
-    )
-  ).limit(1);
+  const match = await BookingRepository.findSlowhopBySummaryId(data.bookingId);
 
-  if (match[0]) {
+  if (match) {
     if (testMode) return true;
-    await db.update(bookings).set({
-      commission: data.commission ? String(data.commission) : match[0].commission,
-      hostRevenue: data.hostRevenue ? String(data.hostRevenue) : match[0].hostRevenue,
-      reservationFee: data.amountPaid ? String(data.amountPaid) : match[0].reservationFee,
-    }).where(eq(bookings.id, match[0].id));
+    await BookingRepository.updateBookingDetails(match.id, {
+      status: "confirmed",
+      commission: data.commission ? String(data.commission) : match.commission,
+      hostRevenue: data.hostRevenue ? String(data.hostRevenue) : match.hostRevenue,
+      reservationFee: data.amountPaid ? String(data.amountPaid) : match.reservationFee,
+    });
     
-    await Logger.bookingAction(match[0].id, "enrichment", "Enriched via S2 (Accounting) email", "Filled: Commission, Host Revenue, Reservation Fee");
+    await Logger.bookingAction(match.id, "enrichment", "Enriched via S2 (Accounting) email", "Filled: Commission, Host Revenue, Reservation Fee");
     return true;
   }
   return false;
@@ -222,9 +209,6 @@ async function handleSlowhopS2(data: ParsedBookingData, testMode: boolean): Prom
  * Handle Bank Transfer (Template 1).
  */
 async function handleBankTransfer(data: ParsedBankData, email: any, testMode: boolean): Promise<boolean> {
-  const db = await getDb();
-  if (!db) return false;
-
   // Use the fuzzy matcher logic
   const results = await findMatchingBookings(data as any, testMode); 
   

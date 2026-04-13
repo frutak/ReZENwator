@@ -8,18 +8,13 @@
  *   - Amount matching (exact match or partial payment)
  */
 
-import { and, eq, gte, lte, or, inArray } from "drizzle-orm";
-import { getDb } from "../db";
-import { bookings } from "../../drizzle/schema";
+import { BookingRepository } from "../repositories/BookingRepository";
 import type { ParsedBankData } from "./emailParsers";
-import type { Booking } from "../../drizzle/schema";
 import { sendAlertEmail } from "../_core/email";
 import { levenshtein, normalizeName } from "../_core/utils/string";
 import { Logger } from "../_core/logger";
-
-// ─── Fuzzy matching ───────────────────────────────────────────────────────────
-
 import { ENV } from "../_core/env";
+import { type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
 
 /**
  * Scores how well a bank transfer matches a candidate booking.
@@ -28,9 +23,6 @@ export async function findMatchingBookings(
   transfer: ParsedBankData,
   testMode = false
 ): Promise<Array<{ bookingId: number; score: number; guestName: string | null; checkIn: Date; channel: string; property: string; reasons: string[] }>> {
-  const db = await getDb();
-  if (!db) return [];
-
   const tTitle = normalizeName(transfer.transferTitle || "").toUpperCase();
   const tSender = normalizeName(transfer.senderName || "").toUpperCase();
 
@@ -51,20 +43,11 @@ export async function findMatchingBookings(
   const windowEnd = new Date(transfer.transferDate?.getTime() ?? Date.now());
   windowEnd.setFullYear(windowEnd.getFullYear() + 5); 
 
-  let candidates: Booking[] = [];
+  let candidates: any[] = [];
 
   if (isPortalPayout) {
     const channel = isAirbnbPayout ? "airbnb" : "booking";
-    let query = db.select().from(bookings).where(
-      and(
-        eq(bookings.channel, channel),
-        testMode ? undefined : inArray(bookings.status, ["portal_paid", "confirmed", "finished"]),
-        gte(bookings.checkIn, windowStart),
-        lte(bookings.checkIn, windowEnd)
-      )
-    );
-
-    candidates = await query;
+    candidates = await BookingRepository.findPortalPayoutCandidates(channel as Channel, windowStart, windowEnd, testMode);
 
     // Further filter Booking.com by property ID if possible
     if (isBookingPayout && oid) {
@@ -72,24 +55,8 @@ export async function findMatchingBookings(
       else if (ENV.sadolesBookingId && oid === ENV.sadolesBookingId) candidates = candidates.filter(c => c.channel !== "booking" || c.property === "Sadoles");
     }
   } else {
-    // Guest direct transfer: pending/confirmed or finished (for deposits)
-    // Also include portal_paid just in case portal detection failed but it's a portal payout
-    candidates = await db
-      .select()
-      .from(bookings)
-      .where(
-        and(
-          testMode ? undefined : or(
-            eq(bookings.status, "pending"),
-            eq(bookings.status, "confirmed"),
-            eq(bookings.status, "paid"),
-            eq(bookings.status, "portal_paid"),
-            eq(bookings.status, "finished")
-          ),
-          gte(bookings.checkIn, windowStart),
-          lte(bookings.checkIn, windowEnd)
-        )
-      );
+    // Guest direct transfer
+    candidates = await BookingRepository.findDirectTransferCandidates(windowStart, windowEnd, testMode);
   }
 
   const results: any[] = [];
@@ -549,13 +516,9 @@ export async function applyTransferMatch(
   transfer: ParsedBankData,
   score: number
 ): Promise<void> {
-  const db = await getDb();
-  if (!db) return;
-
   // Fetch current booking to determine status transition
-  const rows = await db.select().from(bookings).where(eq(bookings.id, bookingId)).limit(1);
-  if (rows.length === 0) return;
-  const b = rows[0]!;
+  const b = await BookingRepository.getBookingById(bookingId);
+  if (!b) return;
 
   const transferAmount = transfer.amount ?? 0;
   let newStatus = b.status;
@@ -581,7 +544,7 @@ export async function applyTransferMatch(
   const cRevenue = parseFloat(String(b.hostRevenue || "0"));
 
   if (b.channel === "slowhop") {
-    const hostPrepayment = cResFee - (cComm * 1.23);
+    const hostPrepayment = cResFee - cComm;
     const guestBalance = totalPrice - cResFee;
     const guestBalancePlusDeposit = guestBalance + depositReq;
 
@@ -596,7 +559,7 @@ export async function applyTransferMatch(
     } else if (isDepositMatch) {
       newDepositStatus = "paid";
     } else {
-      await sendPaymentMismatchEmail(b, transferAmount, { toBePaid: guestBalance, depositReq, resFee: cResFee });
+      await sendPaymentMismatchEmail(b as any, transferAmount, { toBePaid: guestBalance, depositReq, resFee: cResFee });
     }
   } else if (b.status === "portal_paid") {
     // Portals (Airbnb/Booking) that were already marked as portal_paid
@@ -610,7 +573,7 @@ export async function applyTransferMatch(
     } else if (isPetFeeMatch) {
       // Pet fee paid
     } else {
-      await sendPaymentMismatchEmail(b, transferAmount, { toBePaid: cRevenue, depositReq });
+      await sendPaymentMismatchEmail(b as any, transferAmount, { toBePaid: cRevenue, depositReq });
     }
   } else if (b.channel === "direct") {
     if (isBothMatch) {
@@ -635,7 +598,7 @@ export async function applyTransferMatch(
         }
       }
       // Notify about unusual amount
-      await sendPaymentMismatchEmail(b, transferAmount, { toBePaid, depositReq, resFee: cResFee });
+      await sendPaymentMismatchEmail(b as any, transferAmount, { toBePaid, depositReq, resFee: cResFee });
     }
   } else {
     // Default portal logic (if not portal_paid yet)
@@ -652,33 +615,30 @@ export async function applyTransferMatch(
     } else {
       newStatus = "paid"; // Usually the portal payment
       if (!isToBePaidMatch && toBePaid > 0) {
-        await sendPaymentMismatchEmail(b, transferAmount, { toBePaid, depositReq, resFee: cResFee });
+        await sendPaymentMismatchEmail(b as any, transferAmount, { toBePaid, depositReq, resFee: cResFee });
       }
     }
   }
 
   const newPaid = currentPaid + transferAmount;
 
-  await db
-    .update(bookings)
-    .set({
-      status: newStatus as any,
-      depositStatus: newDepositStatus as any,
-      amountPaid: String(newPaid.toFixed(2)),
-      transferAmount: transfer.amount ? String(transfer.amount) : undefined,
-      transferSender: transfer.senderName,
-      transferTitle: transfer.transferTitle,
-      transferDate: transfer.transferDate,
-      matchScore: score,
-    })
-    .where(eq(bookings.id, bookingId));
+  await BookingRepository.updateBookingPayment(bookingId, {
+    status: newStatus as BookingStatus,
+    depositStatus: newDepositStatus as DepositStatus,
+    amountPaid: String(newPaid.toFixed(2)),
+    transferAmount: transfer.amount ? String(transfer.amount) : undefined,
+    transferSender: transfer.senderName,
+    transferTitle: transfer.transferTitle,
+    transferDate: transfer.transferDate,
+    matchScore: score,
+  });
 
   await Logger.bookingAction(bookingId, "status_change", `Auto-matched bank transfer (Score: ${score})`, `Sender: ${transfer.senderName}, Amount: ${transferAmount} PLN, New Status: ${newStatus}`);
 
   console.log(`[Matcher] Booking #${bookingId} updated: status=${newStatus}, deposit=${newDepositStatus}`);
 }
 
-async function sendPaymentMismatchEmail(booking: Booking, amount: number, expected: { toBePaid: number; depositReq: number; resFee?: number }) {
+async function sendPaymentMismatchEmail(booking: any, amount: number, expected: { toBePaid: number; depositReq: number; resFee?: number }) {
   const subject = `⚠️ Payment Amount Mismatch: ${booking.guestName || "Unknown"} (${booking.property})`;
   const expectedPetFee = (booking.channel === "booking" && booking.animalsCount != null && booking.animalsCount > 0)
     ? booking.animalsCount * 200

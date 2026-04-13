@@ -1,6 +1,7 @@
 import { Booking } from "../../drizzle/schema";
 import { parsePrice, parseDMY, parseDotDate, parseAirbnbDate, parseAirbnbFullDate, parseBookingComDate } from "../_core/utils/index";
 import { setHours, setMinutes } from "date-fns";
+import { type Property } from "@shared/config";
 import { ENV } from "../_core/env";
 
 // ─── Template Types ───────────────────────────────────────────────────────────
@@ -52,7 +53,7 @@ export interface ParsedBookingData {
   commission?: number;
   hostRevenue?: number;
   currency?: string;
-  property?: "Sadoles" | "Hacjenda";
+  property?: Property;
 }
 
 // ─── Qualification Logic ──────────────────────────────────────────────────────
@@ -190,7 +191,7 @@ function parseSlowhopS1(subject: string, body: string): ParsedBookingData {
   const priceData = priceMatch ? parsePrice(priceMatch[1]!) : null;
   const paidData = paidMatch ? parsePrice(paidMatch[1]!) : null;
 
-  let property: "Sadoles" | "Hacjenda" | undefined;
+  let property: Property | undefined;
   if (body.toLowerCase().includes("hacjenda")) property = "Hacjenda";
   else if (body.toLowerCase().includes("sadoles") || body.toLowerCase().includes("sadoleś")) property = "Sadoles";
 
@@ -219,12 +220,18 @@ function parseSlowhopS2(subject: string, body: string): ParsedBookingData {
   // structured table: Total, Prepayment, Commission, Net to Host
   const totalPrice = prices[0] ? parsePrice(prices[0][0])?.amount : undefined;
   const amountPaid = prices[1] ? parsePrice(prices[1][0])?.amount : undefined;
-  const commission = prices[2] ? parsePrice(prices[2][0])?.amount : undefined;
+  
+  let commission = prices[2] ? parsePrice(prices[2][0])?.amount : undefined;
+  if (commission != null) {
+    // Manually add 23% VAT to commission as requested
+    commission = Math.round(commission * 1.23 * 100) / 100;
+  }
+
   const hostRevenue = (totalPrice != null && commission != null) ? totalPrice - commission : undefined;
 
   const detailMatch = body.match(/\(([^,)]+),\s*(\d{2}-\d{2}-\d{4})\s*-\s*(\d{2}-\d{2}-\d{4})\)/i);
   
-  let property: "Sadoles" | "Hacjenda" | undefined;
+  let property: Property | undefined;
   if (body.toLowerCase().includes("hacjenda")) property = "Hacjenda";
   else if (body.toLowerCase().includes("sadoles") || body.toLowerCase().includes("sadoleś")) property = "Sadoles";
 
@@ -301,14 +308,14 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
     checkOut = setMinutes(setHours(checkOut, 11), 0);
   }
 
-  const guestCountMatch = body.match(/(\d+)\s+adults?(?:,\s*(\d+)\s+children)?/i);
+  const guestCountMatch = body.match(/(\d+)\s+adults?(?:,\s*(\d+)\s+(?:children|child))?/i);
   const totalMatch = body.match(/Total\s*\(PLN\)\s*\n?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
   const revenueMatch = body.match(/You earn\s*\n?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
 
   const totalData = totalMatch ? parsePrice(totalMatch[1]!) : null;
   const revenueData = revenueMatch ? parsePrice(revenueMatch[1]!) : null;
 
-  let property: "Sadoles" | "Hacjenda" | undefined;
+  let property: Property | undefined;
   if (body.toLowerCase().includes("hacjenda")) property = "Hacjenda";
   else if (body.toLowerCase().includes("sadoles") || body.toLowerCase().includes("sadoleś")) property = "Sadoles";
 
@@ -341,7 +348,7 @@ function parseBookingB1(subject: string, body: string): ParsedBookingData {
   const priceData = priceMatch ? parsePrice(priceMatch[1]!) : null;
   const commData = commMatch ? parsePrice(commMatch[1]!) : null;
 
-  let property: "Sadoles" | "Hacjenda" | undefined;
+  let property: Property | undefined;
   if (body.toLowerCase().includes("hacjenda")) property = "Hacjenda";
   else if (body.toLowerCase().includes("sadoles") || body.toLowerCase().includes("sadoleś")) property = "Sadoles";
 
@@ -361,3 +368,38 @@ function parseBookingB1(subject: string, body: string): ParsedBookingData {
     property,
   };
 }
+
+/**
+ * Detects the source of an email based on sender and subject.
+ */
+export function detectEmailSource(from: string, subject: string, body: string): "slowhop" | "airbnb" | "nestbank" | "booking" | "unknown" {
+  const fromLower = from.toLowerCase();
+  const subjectLower = subject.toLowerCase();
+  const bodyLower = body.toLowerCase();
+
+  if (subjectLower.includes("slowhop") || fromLower.includes("slowhop.com")) return "slowhop";
+  if (subjectLower.includes("reservation confirmed") || fromLower.includes("airbnb.com") || bodyLower.includes("automated@airbnb.com")) return "airbnb";
+  if (subjectLower.includes("nowa rezerwacja") || fromLower.includes("booking.com")) return "booking";
+  if (fromLower.includes("nestbank.pl") || subjectLower.includes("wpływ na konto")) return "nestbank";
+
+  return "unknown";
+}
+
+/**
+ * High-level entry point for parsing any system email.
+ */
+export function parseEmail(from: string, subject: string, body: string): QualifiedEmail | null {
+  const qualified = qualifyEmail(from, subject, body);
+  if (qualified.template === "OTHER" && qualified.subTemplate === "UNKNOWN") {
+    return null;
+  }
+  return qualified;
+}
+
+// Export individual parsers for testing
+export {
+  parseNestBankBody as parseNestbankEmail,
+  parseSlowhopS1 as parseSlowhoEmail,
+  parseAirbnbA1 as parseAirbnbEmail,
+  parseBookingB1 as parseBookingComEmail
+};
