@@ -122,12 +122,9 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
       if (booking.reminderSent === 0) {
         if (isAfter(now, twoWeeksBefore) && isBefore(now, new Date(booking.checkIn))) {
           // Calculate early arrival availability
-          let isEarlyArrival = true;
           const checkInDate = startOfDay(new Date(booking.checkIn));
-          const prevDay = subDays(checkInDate, 1);
-
-          const blockingBookings = await BookingRepository.findBlockingBookingsForEarlyArrival(booking.property as any, booking.id, checkInDate, prevDay);
-          if (blockingBookings.length > 0) isEarlyArrival = false;
+          const blockingBookings = await BookingRepository.findBlockingBookingsForEarlyArrival(booking.property as any, booking.id, checkInDate);
+          const isEarlyArrival = blockingBookings.length === 0;
 
           const { success, recipient } = await sendGuestEmail("arrival_reminder", booking as any, { isEarlyArrival });
           if (success) {

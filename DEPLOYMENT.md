@@ -1,6 +1,6 @@
-# Deployment Guide — Rental Manager on Ubuntu 24.04
+# Deployment Guide — ReZENwator on Ubuntu 24.04
 
-This guide covers deploying the Rental Manager application on your own Ubuntu 24.04 server. The application consists of a single Node.js process that serves both the web dashboard and runs the background polling jobs (iCal + email) on a 30-minute schedule.
+This guide covers deploying the ReZENwator application on your own Ubuntu 24.04 server. The application consists of a single Node.js process that serves both the web dashboard and runs the background polling jobs (iCal + email) on a 30-minute schedule.
 
 ---
 
@@ -22,8 +22,8 @@ The following software must be installed on your server before proceeding.
 Clone the repository directly on your server or transfer the files:
 
 ```bash
-git clone <your-repo-url> /opt/rental-manager
-cd /opt/rental-manager
+git clone <your-repo-url> /opt/rezenwator
+cd /opt/rezenwator
 ```
 
 ---
@@ -41,7 +41,7 @@ pnpm install --frozen-lockfile
 Create a `.env` file in the project root:
 
 ```bash
-nano /opt/rental-manager/.env
+nano /opt/rezenwator/.env
 ```
 
 Paste and fill in the following:
@@ -64,7 +64,7 @@ PORT=3000
 
 > **Security note:** Restrict permissions on the `.env` file:
 > ```bash
-> chmod 600 /opt/rental-manager/.env
+> chmod 600 /opt/rezenwator/.env
 > ```
 
 ---
@@ -84,27 +84,27 @@ This compiles the React frontend and bundles the Express server into the `dist/`
 Create a service file so the application starts automatically on boot and restarts on failure:
 
 ```bash
-sudo nano /etc/systemd/system/rental-manager.service
+sudo nano /etc/systemd/system/rezenwator.service
 ```
 
 Paste the following content:
 
 ```ini
 [Unit]
-Description=Rental Manager — Short-Term Rental Dashboard
+Description=ReZENwator — Short-Term Rental Dashboard
 After=network.target
 
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/opt/rental-manager
+WorkingDirectory=/opt/rezenwator
 ExecStart=/usr/bin/node dist/index.js
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=rental-manager
-EnvironmentFile=/opt/rental-manager/.env
+SyslogIdentifier=rezenwator
+EnvironmentFile=/opt/rezenwator/.env
 
 [Install]
 WantedBy=multi-user.target
@@ -114,9 +114,9 @@ Enable and start the service:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable rental-manager
-sudo systemctl start rental-manager
-sudo systemctl status rental-manager
+sudo systemctl enable rezenwator
+sudo systemctl start rezenwator
+sudo systemctl status rezenwator
 ```
 
 ---
@@ -132,7 +132,7 @@ sudo apt install nginx certbot python3-certbot-nginx -y
 Create a site configuration:
 
 ```bash
-sudo nano /etc/nginx/sites-available/rental-manager
+sudo nano /etc/nginx/sites-available/rezenwator
 ```
 
 ```nginx
@@ -152,7 +152,7 @@ server {
 ```
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/rental-manager /etc/nginx/sites-enabled/
+sudo ln -s /etc/nginx/sites-available/rezenwator /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
 # Obtain SSL certificate:
 sudo certbot --nginx -d your-domain.com
@@ -172,10 +172,10 @@ Add:
 
 ```cron
 # iCal sync every 30 minutes
-*/30 * * * * cd /opt/rental-manager && node -e "import('./dist/workers/icalPoller.js').then(m => m.pollAllICalFeeds())" >> /var/log/rental-ical.log 2>&1
+*/30 * * * * cd /opt/rezenwator && node -e "import('./dist/workers/icalPoller.js').then(m => m.pollAllICalFeeds())" >> /var/log/rental-ical.log 2>&1
 
 # Email check every 30 minutes (offset by 5 minutes)
-5,35 * * * * cd /opt/rental-manager && node -e "import('./dist/workers/emailPoller.js').then(m => m.pollEmails())" >> /var/log/rental-email.log 2>&1
+5,35 * * * * cd /opt/rezenwator && node -e "import('./dist/workers/emailPoller.js').then(m => m.pollEmails())" >> /var/log/rental-email.log 2>&1
 ```
 
 ---
@@ -185,13 +185,13 @@ Add:
 View live application logs:
 
 ```bash
-sudo journalctl -u rental-manager -f
+sudo journalctl -u rezenwator -f
 ```
 
 View the last 100 lines:
 
 ```bash
-sudo journalctl -u rental-manager -n 100
+sudo journalctl -u rezenwator -n 100
 ```
 
 ---
@@ -212,9 +212,9 @@ To forward relevant emails from your primary account to your configured `GMAIL_U
 ## Updating the Application
 
 ```bash
-cd /opt/rental-manager
+cd /opt/rezenwator
 git pull  # or re-upload and unzip
 pnpm install --frozen-lockfile
 pnpm build
-sudo systemctl restart rental-manager
+sudo systemctl restart rezenwator
 ```

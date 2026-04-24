@@ -59,7 +59,7 @@ export function useAuth(options?: UseAuthOptions) {
   useEffect(() => {
     if (meQuery.data) {
       localStorage.setItem(
-        "rental-manager-user-info",
+        "rezenwator-user-info",
         JSON.stringify(meQuery.data)
       );
     }

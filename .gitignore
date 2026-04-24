@@ -109,6 +109,9 @@ temp/
 # Backups and sensitive data
 backups/
 server/tests/emailParsers.generated.test.ts
+server/tests/emailTemplates.test.ts
+server/tests/bookingMatcher.test.ts
+server/tests/emailParsers.test.ts
 verify_bookings.ts
 verify_id5.ts
 rules.md

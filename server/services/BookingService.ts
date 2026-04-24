@@ -89,7 +89,9 @@ export class BookingService {
     try {
       const newBooking = await BookingRepository.getBookingById(bookingId);
       if (newBooking) {
-        await sendGuestEmail("booking_pending", newBooking as any);
+        console.log(`[BookingService] Sending booking_pending email for #${bookingId} to ${newBooking.guestEmail}`);
+        const emailRes = await sendGuestEmail("booking_pending", newBooking as any);
+        console.log(`[BookingService] Guest email result for #${bookingId}:`, emailRes);
 
         // Notify admin about new portal booking
         const checkInStr = format(new Date(newBooking.checkIn), "dd.MM.yyyy");

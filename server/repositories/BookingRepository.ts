@@ -1,4 +1,5 @@
 import { and, desc, eq, gte, lte, ne, inArray, or, sql, isNull, lt, notInArray } from "drizzle-orm";
+import { format } from "date-fns";
 import { getDb } from "../db";
 import { bookings, bookingActivities } from "../../drizzle/schema";
 import { Logger } from "../_core/logger";
@@ -224,8 +225,19 @@ export class BookingRepository {
       .where(
         and(
           or(
-            isNull(bookings.guestName),
-            eq(bookings.guestName, ""),
+            // Leisure: must have guestName
+            and(
+              ne(bookings.purpose, "company"),
+              ne(bookings.purpose, "production"),
+              or(isNull(bookings.guestName), eq(bookings.guestName, ""))
+            ),
+            // Company/Production: must have either guestName or companyName
+            and(
+              or(eq(bookings.purpose, "company"), eq(bookings.purpose, "production")),
+              or(isNull(bookings.guestName), eq(bookings.guestName, "")),
+              or(isNull(bookings.companyName), eq(bookings.companyName, ""))
+            ),
+            // Email check (except Airbnb)
             and(
               or(isNull(bookings.guestEmail), eq(bookings.guestEmail, "")),
               ne(bookings.channel, "airbnb")
@@ -360,9 +372,10 @@ export class BookingRepository {
       );
   }
 
-  static async findBlockingBookingsForEarlyArrival(property: Property, bookingId: number, checkInDate: Date, prevDay: Date) {
+  static async findBlockingBookingsForEarlyArrival(property: Property, bookingId: number, checkInDate: Date) {
     const db = await getDb();
     if (!db) return [];
+    const checkInDateStr = format(checkInDate, "yyyy-MM-dd");
     return db
       .select()
       .from(bookings)
@@ -370,7 +383,8 @@ export class BookingRepository {
         and(
           eq(bookings.property, property),
           ne(bookings.id, bookingId),
-          inArray(bookings.checkOut, [checkInDate, prevDay])
+          ne(bookings.status, "cancelled"),
+          sql`DATE(${bookings.checkOut}) = ${checkInDateStr}`
         )
       );
   }
@@ -440,6 +454,7 @@ export class BookingRepository {
   static async findPreviousDayCheckOut(property: Property, checkInDate: Date, currentBookingId: number) {
     const db = await getDb();
     if (!db) return [];
+    const dateStr = format(checkInDate, "yyyy-MM-dd");
     return db
       .select()
       .from(bookings)
@@ -447,7 +462,7 @@ export class BookingRepository {
         and(
           eq(bookings.property, property),
           ne(bookings.id, currentBookingId),
-          eq(bookings.checkOut, checkInDate)
+          sql`DATE(${bookings.checkOut}) = ${dateStr}`
         )
       );
   }
@@ -545,7 +560,12 @@ export class BookingRepository {
         checkOut: bookings.checkOut,
       })
       .from(bookings)
-      .where(eq(bookings.property, property));
+      .where(
+        and(
+          eq(bookings.property, property),
+          ne(bookings.status, "cancelled")
+        )
+      );
   }
 
   static async getBookingsForExport(property: Property) {
