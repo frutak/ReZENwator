@@ -40,13 +40,32 @@ const PORTAL_URLS = {
 export class PricingAuditor {
   private static isRunning = false;
 
-  static async runManualAudit(property: "Sadoles" | "Hacjenda", checkIn: Date, checkOut: Date) {
+  static getIsRunning() {
+    return this.isRunning;
+  }
+
+  static async checkPreconditions(property: "Sadoles" | "Hacjenda", checkIn: Date, checkOut: Date) {
     if (this.isRunning) {
-      console.warn("[PricingAuditor] Audit already in progress, skipping manual trigger.");
-      return;
+      throw new Error("Audit already in progress");
     }
+
+    // Check availability before starting
+    const bookings = await BookingRepository.getAvailability(property);
+    const isTaken = bookings.some(b => {
+      const bIn = startOfDay(new Date(b.checkIn));
+      const bOut = startOfDay(new Date(b.checkOut));
+      return isBefore(checkIn, bOut) && isAfter(checkOut, bIn);
+    });
+
+    if (isTaken) {
+      throw new Error("Selected dates are already booked");
+    }
+  }
+
+  static async runManualAudit(property: "Sadoles" | "Hacjenda", checkIn: Date, checkOut: Date) {
+    await this.checkPreconditions(property, checkIn, checkOut);
+
     this.isRunning = true;
-    
     console.log(`[PricingAuditor] Starting manual audit for ${property}: ${format(checkIn, "yyyy-MM-dd")} to ${format(checkOut, "yyyy-MM-dd")}...`);
     const start = Date.now();
 
@@ -123,7 +142,16 @@ export class PricingAuditor {
         // We want roughly 5 per property, but can go up to 10 if needed to hit the total
         const MAX_PER_PROPERTY = 7; 
         
-        // Generate standard candidates
+        const availability = await BookingRepository.getAvailability(property);
+        const isAvailable = (start: Date, end: Date) => {
+          return !availability.some(b => {
+            const bIn = startOfDay(new Date(b.checkIn));
+            const bOut = startOfDay(new Date(b.checkOut));
+            return isBefore(start, bOut) && isAfter(end, bIn);
+          });
+        };
+
+        // Generate standard candidates (these already use isAvailable internally)
         const standardCandidates = await this.generateCandidateDates(property);
         
         // Find "red" audits for this property to prioritize
@@ -135,6 +163,9 @@ export class PricingAuditor {
           const rangeKey = `${format(audit.checkIn, "yyyy-MM-dd")}_${format(audit.checkOut, "yyyy-MM-dd")}`;
           if (processedRanges.has(rangeKey)) continue;
           processedRanges.add(rangeKey);
+
+          // SKIP if now booked
+          if (!isAvailable(audit.checkIn, audit.checkOut)) continue;
 
           try {
             const benchmark = await PricingService.getBenchmarkPrice(property, audit.checkIn, audit.checkOut);
@@ -252,7 +283,7 @@ export class PricingAuditor {
       // Heuristic: Min price for a house must be at least the cleaning fee + some nightly rate.
       // Sadoles cleaning: 900, Hacjenda: 700.
       const cleaningFee = property === "Sadoles" ? 900 : 700;
-      const minNightly = property === "Sadoles" ? 700 : 300;
+      const minNightly = property === "Sadoles" ? 500 : 300;
       const minPrice = cleaningFee + (minNightly * nights);
       
       const benchmarkArg = benchmark ? ` "${benchmark}"` : "";
