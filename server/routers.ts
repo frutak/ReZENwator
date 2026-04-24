@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { format, setHours, setMinutes, startOfDay } from "date-fns";
+import { format, setHours, setMinutes, startOfDay, addMonths, addDays } from "date-fns";
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
@@ -13,6 +13,9 @@ import { TRPCError } from "@trpc/server";
 import { pollAllICalFeeds, pollICalFeed } from "./workers/icalPoller";
 import { pollEmails } from "./workers/emailPoller";
 import { findMatchingBookings, applyTransferMatch } from "./workers/bookingMatcher";
+import { updateAllPropertyRatings } from "./workers/ratingScraper";
+import { PricingAuditor } from "./workers/pricingAuditor";
+import { PricingAuditRepository } from "./repositories/PricingAuditRepository";
 import { sendGuestEmail, sendAlertEmail } from "./_core/email";
 import { detectDoubleBookings } from "./workers/doubleBookingDetector";
 import { getICalFeeds } from "./workers/icalConfig";
@@ -380,12 +383,22 @@ const syncRouter = router({
     };
   }),
 
+  triggerRatings: publicProcedure.mutation(async () => {
+    await updateAllPropertyRatings();
+    return { success: true };
+  }),
+
   lastRun: publicProcedure.query(async () => {
     const [icalLast, emailLast] = await Promise.all([
       SyncRepository.getLastSyncTime("ical"),
       SyncRepository.getLastSyncTime("email"),
     ]);
-    return { ical: icalLast, email: emailLast };
+
+    // For ratings, it uses 'ical' type with 'Rating Scraper' source
+    const logs = await SyncRepository.getRecentSyncLogs(100);
+    const ratingsLast = logs.find(l => l.source === "Rating Scraper" && l.success === "true")?.createdAt ?? null;
+
+    return { ical: icalLast, email: emailLast, ratings: ratingsLast };
   }),
 
   logs: publicProcedure
@@ -536,6 +549,99 @@ const pricingRouter = router({
     }),
 });
 
+// ─── Pricing audit router ───────────────────────────────────────────────────
+
+const pricingAuditRouter = router({
+  getAudits: publicProcedure
+    .input(z.object({
+      property: z.enum(PROPERTIES),
+      from: z.coerce.date(),
+      to: z.coerce.date(),
+    }))
+    .query(async ({ input }) => {
+      const audits = await PricingAuditRepository.getAudits(input.property, input.from, input.to);
+
+      const enrichedAudits = await Promise.all(audits.map(async (audit: any) => {
+        try {
+          const checkIn = new Date(audit.checkIn);
+          const checkOut = new Date(audit.checkOut);
+          
+          const pricing = await PricingService.getAuditPricing(input.property, checkIn, checkOut);
+          const { benchmarkPrice, portalPrice, offset: offsetPrice } = pricing;
+
+          // Deviation calculation
+          const deviations: Record<string, number> = {};
+          const triggers: number[] = [];
+          const channels = ["booking", "airbnb", "slowhop", "alohacamp"] as const;
+
+          for (const channel of channels) {
+            const price = audit[`${channel}Price` as keyof typeof audit] as string | null;
+            const status = audit[`${channel}Status` as keyof typeof audit] as string | null;
+
+            if (price && status === "OK") {
+              const pPrice = parseFloat(price);
+              const rawDeviation = (pPrice - benchmarkPrice) / benchmarkPrice;
+              const absDeviation = Math.abs(rawDeviation);
+              
+              deviations[channel] = absDeviation;
+
+              // AlohaCamp constraint relaxation: only downside (lower price) matters for the red/green trigger.
+              if (channel === "alohacamp") {
+                if (rawDeviation < -0.05) {
+                  triggers.push(absDeviation);
+                } else {
+                  triggers.push(0);
+                }
+              } else {
+                triggers.push(absDeviation);
+              }
+            }
+          }
+
+          const maxDeviation = triggers.length > 0 
+            ? Math.max(...triggers) 
+            : 0;
+
+          return {
+            ...audit,
+            internalPrice: benchmarkPrice,
+            portalPrice,
+            offsetPrice,
+            internalValid: true,
+            deviations,
+            maxDeviation,
+          };
+        } catch (e) {
+          return { ...audit, internalValid: false, internalError: (e as Error).message, deviations: {}, maxDeviation: 0 };
+        }
+      }));
+
+      return enrichedAudits;
+    }),
+
+  trigger: publicProcedure.mutation(async () => {
+    // Run in background to avoid UI timeout (takes ~10-15 minutes)
+    PricingAuditor.runDailyAudit().catch(err => {
+      console.error("[PricingAuditor] Triggered audit failed:", err);
+    });
+    return { success: true };
+  }),
+
+  triggerManual: publicProcedure
+    .input(z.object({
+      property: z.enum(["Sadoles", "Hacjenda"]),
+      checkIn: z.date(),
+      checkOut: z.date(),
+    }))
+    .mutation(async ({ input }) => {
+      // Also run in background but return immediately
+      PricingAuditor.runManualAudit(input.property, input.checkIn, input.checkOut).catch(err => {
+        console.error("[PricingAuditor] Manual audit failed:", err);
+      });
+      return { success: true };
+    }),
+});
+
 // ─── App router ───────────────────────────────────────────────────────────────
 
 export const appRouter = router({
@@ -572,6 +678,7 @@ export const appRouter = router({
   portal: publicPortalRouter,
   sync: syncRouter,
   pricing: pricingRouter,
+  pricingAudit: pricingAuditRouter,
 });
 
 export type AppRouter = typeof appRouter;

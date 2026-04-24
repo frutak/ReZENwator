@@ -1,7 +1,7 @@
 import { format } from "date-fns";
 import { enUS } from "date-fns/locale";
 import type { Booking } from "../../drizzle/schema";
-import { predictFirstName } from "../_core/utils";
+import { predictFirstName, getGuestName } from "../_core/utils";
 import { ENV } from "../_core/env";
 
 export type GuestEmailType =
@@ -18,10 +18,6 @@ export interface EmailTemplate {
 }
 
 export class EmailTemplateService {
-  private static getFirstName(name: string | null): string {
-    return predictFirstName(name);
-  }
-
   private static getDayOfWeek(date: Date, isPL: boolean): string {
     if (isPL) {
       const days = ["W niedzielę", "W poniedziałek", "We wtorek", "W środę", "W czwartek", "W piątek", "W sobotę"];
@@ -31,7 +27,8 @@ export class EmailTemplateService {
   }
 
   private static getArrivalReminderTemplate(booking: Booking, isPL: boolean, isEarlyArrival: boolean): EmailTemplate {
-    const firstName = this.getFirstName(booking.guestName);
+    const displayName = getGuestName(booking);
+    const firstName = predictFirstName(displayName);
     const isSadoles = booking.property === "Sadoles";
     const checkInDate = new Date(booking.checkIn);
     const dayOfWeek = this.getDayOfWeek(checkInDate, isPL);
@@ -130,7 +127,8 @@ export class EmailTemplateService {
 
   static getTemplates(type: GuestEmailType, booking: Booking, language: "PL" | "EN", extraData?: any): EmailTemplate {
     const isPL = language === "PL";
-    const firstName = this.getFirstName(booking.guestName);
+    const displayName = getGuestName(booking);
+    const firstName = predictFirstName(displayName);
     const propertyName = booking.property === "Sadoles" ? "Sadoleś 66" : "Hacjenda Kiekrz";
 
     switch (type) {
@@ -163,7 +161,7 @@ export class EmailTemplateService {
             <h3 style="margin-top: 0;">Szczegóły rezerwacji:</h3>
             <p style="margin-bottom: 5px;"><b>Obiekt:</b> ${booking.property === "Sadoles" ? "Sadoleś 66" : "Hacjenda Kiekrz"}</p>
             <p style="margin-bottom: 5px;"><b>Termin:</b> ${checkInFormatted} - ${checkOutFormatted}</p>
-            <p style="margin-bottom: 5px;"><b>Gość:</b> ${booking.guestName || booking.companyName || "---"} (${bookingEmailDisplay})</p>
+            <p style="margin-bottom: 5px;"><b>Gość:</b> ${displayName} (${bookingEmailDisplay})</p>
             <p style="margin-bottom: 5px;"><b>Liczba osób:</b> ${booking.guestCount}</p>
             ${booking.animalsCount ? `<p style="margin-bottom: 5px;"><b>Zwierzęta:</b> ${booking.animalsCount}</p>` : ""}
             <p style="margin-bottom: 5px;"><b>Cel pobytu:</b> ${purposeMapPL[booking.purpose || "leisure"]}</p>
@@ -177,7 +175,7 @@ export class EmailTemplateService {
             <h3 style="margin-top: 0;">Booking Details:</h3>
             <p style="margin-bottom: 5px;"><b>Property:</b> ${propertyNameEN}</p>
             <p style="margin-bottom: 5px;"><b>Dates:</b> ${checkInFormatted} - ${checkOutFormatted}</p>
-            <p style="margin-bottom: 5px;"><b>Guest:</b> ${booking.guestName || booking.companyName || "---"} (${bookingEmailDisplay})</p>
+            <p style="margin-bottom: 5px;"><b>Guest:</b> ${displayName} (${bookingEmailDisplay})</p>
             <p style="margin-bottom: 5px;"><b>Guests:</b> ${booking.guestCount}</p>
             ${booking.animalsCount ? `<p style="margin-bottom: 5px;"><b>Pets:</b> ${booking.animalsCount}</p>` : ""}
             <p style="margin-bottom: 5px;"><b>Purpose of stay:</b> ${purposeMapEN[booking.purpose || "leisure"]}</p>
@@ -245,12 +243,12 @@ export class EmailTemplateService {
       case "missing_data_alert":
         const missingFields = [];
         if (!booking.guestCountry) missingFields.push("Country");
-        if (!booking.guestName) missingFields.push("Guest Name");
+        if (displayName === "Unknown guest") missingFields.push("Guest Name / Company Name");
         if (!booking.guestEmail && booking.channel !== "airbnb") missingFields.push("Email");
         if (!["airbnb", "booking"].includes(booking.channel) && booking.totalPrice === null) missingFields.push("Total Price");
         
         return {
-          subject: `Action Required: Missing Data for Booking #${booking.id} (${booking.guestName})`,
+          subject: `Action Required: Missing Data for Booking #${booking.id} (${displayName})`,
           html: `<p>The following information is missing for an upcoming booking:</p>
                  <ul>${missingFields.map(f => `<li>${f}</li>`).join("")}</ul>
                  <p>Please update the booking details so the reminder email can be sent correctly.</p>

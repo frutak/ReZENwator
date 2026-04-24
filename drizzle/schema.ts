@@ -188,10 +188,11 @@ export const guestEmails = mysqlTable("guest_emails", {
   id: int("id").autoincrement().primaryKey(),
   bookingId: int("bookingId").notNull(),
   emailType: mysqlEnum("emailType", [
+    "booking_pending",
     "booking_confirmed",
+    "booking_cancelled_no_payment",
     "arrival_reminder",
     "stay_finished",
-    "missing_country_alert",
     "missing_data_alert",
   ]).notNull(),
   sentAt: timestamp("sentAt").defaultNow().notNull(),
@@ -342,3 +343,36 @@ export const portalAnalytics = mysqlTable("portal_analytics", {
 
 export type PortalAnalytics = typeof portalAnalytics.$inferSelect;
 export type InsertPortalAnalytics = typeof portalAnalytics.$inferInsert;
+
+/**
+ * Price audits — stores raw prices and statuses scraped from portals for comparison.
+ */
+export const priceAudits = mysqlTable("price_audits", {
+  id: int("id").autoincrement().primaryKey(),
+  property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).notNull(),
+  checkIn: datetime("checkIn").notNull(),
+  checkOut: datetime("checkOut").notNull(),
+  dateScraped: timestamp("dateScraped").defaultNow().notNull(),
+
+  // Scraped data per portal
+  bookingPrice: decimal("bookingPrice", { precision: 10, scale: 2 }),
+  bookingStatus: varchar("bookingStatus", { length: 64 }), // e.g. "OK", "SOLD_OUT", "MIN_STAY_VIOLATION"
+
+  airbnbPrice: decimal("airbnbPrice", { precision: 10, scale: 2 }),
+  airbnbStatus: varchar("airbnbStatus", { length: 64 }),
+
+  slowhopPrice: decimal("slowhopPrice", { precision: 10, scale: 2 }),
+  slowhopStatus: varchar("slowhopStatus", { length: 64 }),
+
+  alohacampPrice: decimal("alohacampPrice", { precision: 10, scale: 2 }),
+  alohacampStatus: varchar("alohacampStatus", { length: 64 }),
+
+  /** Whether this probe was specifically intended to test a minimum stay violation */
+  isMinStayTest: int("isMinStayTest").default(0).notNull(),
+}, (table) => [
+  index("idx_audit_property_dates").on(table.property, table.checkIn, table.checkOut),
+  index("idx_audit_date_scraped").on(table.dateScraped),
+]);
+
+export type PriceAudit = typeof priceAudits.$inferSelect;
+export type InsertPriceAudit = typeof priceAudits.$inferInsert;

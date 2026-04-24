@@ -12,6 +12,7 @@ import { pollAllICalFeeds } from "./icalPoller";
 import { pollEmails } from "./emailPoller";
 import { runDailyMaintenance } from "./dailyAlerts";
 import { updateAllPropertyRatings } from "./ratingScraper";
+import { PricingAuditor } from "./pricingAuditor";
 
 let schedulerStarted = false;
 
@@ -70,7 +71,19 @@ export function startScheduler(): void {
     timezone: "Europe/Warsaw"
   });
 
-  console.log("[Scheduler] Background jobs registered (iCal + Email + Daily Maintenance + Weekly Ratings)");
+  // ── Daily Pricing Audit: every day at 03:00 AM ────────────────────────────
+  cron.schedule("0 0 3 * * *", async () => {
+    console.log("[Scheduler] Running daily pricing audit...");
+    try {
+      await PricingAuditor.runDailyAudit();
+    } catch (err) {
+      console.error("[Scheduler] Pricing audit failed:", err);
+    }
+  }, {
+    timezone: "Europe/Warsaw"
+  });
+
+  console.log("[Scheduler] Background jobs registered (iCal + Email + Daily Maintenance + Weekly Ratings + Pricing Audit)");
 
   // Run an initial poll shortly after startup (60 seconds delay)
   setTimeout(async () => {
@@ -90,4 +103,13 @@ export function startScheduler(): void {
       console.error("[Scheduler] Initial ratings update failed:", err);
     }
   }, 65_000);
+
+  setTimeout(async () => {
+    console.log("[Scheduler] Running initial pricing audit on startup...");
+    try {
+      await PricingAuditor.runDailyAudit();
+    } catch (err) {
+      console.error("[Scheduler] Initial pricing audit failed:", err);
+    }
+  }, 70_000);
 }

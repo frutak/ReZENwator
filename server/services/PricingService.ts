@@ -164,4 +164,41 @@ export class PricingService {
       currency: "PLN"
     };
   }
+
+  /**
+   * Calculates the benchmark and portal prices used for price audits.
+   * Logic: (calculated price for max occupancy) + 200 offset.
+   */
+  static async getAuditPricing(property: Property, checkIn: Date, checkOut: Date): Promise<{ portalPrice: number, benchmarkPrice: number, offset: number }> {
+    const maxGuests = property === "Sadoles" ? 11 : 4;
+
+    // Normalize to standard hours (16:00 check-in, 10:00 check-out) for audit comparison
+    const cin = new Date(checkIn);
+    cin.setHours(16, 0, 0, 0);
+    const cout = new Date(checkOut);
+    cout.setHours(10, 0, 0, 0);
+
+    const pricing = await this.calculatePrice({
+      property,
+      checkIn: cin,
+      checkOut: cout,
+      guestCount: maxGuests,
+      animalsCount: 0
+    });
+    
+    const offset = 200;
+    return {
+      portalPrice: pricing.totalPrice,
+      benchmarkPrice: pricing.totalPrice + offset,
+      offset
+    };
+  }
+
+  /**
+   * Calculates the benchmark price used for price audits.
+   */
+  static async getBenchmarkPrice(property: Property, checkIn: Date, checkOut: Date): Promise<number> {
+    const pricing = await this.getAuditPricing(property, checkIn, checkOut);
+    return pricing.benchmarkPrice;
+  }
 }

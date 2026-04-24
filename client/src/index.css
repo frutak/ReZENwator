@@ -43,7 +43,7 @@
 }
 
 :root {
-  /* Rental manager: deep teal primary */
+  /* ReZENwator: deep teal primary */
   --primary: oklch(0.42 0.12 210);
   --primary-foreground: oklch(0.98 0 0);
   --sidebar: oklch(0.22 0.03 240);
@@ -199,7 +199,7 @@
     }
   }
 }
-/* ── Rental Manager status badge utilities ───────────────────────────────── */
+/* ── ReZENwator status badge utilities ───────────────────────────────── */
 .status-pending    { background-color: #fef3c7; color: #92400e; border-color: #fde68a; }
 .status-confirmed  { background-color: #dbeafe; color: #1e40af; border-color: #bfdbfe; }
 .status-portal_paid { background-color: #f3e8ff; color: #6b21a8; border-color: #e9d5ff; }

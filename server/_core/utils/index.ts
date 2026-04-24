@@ -6,7 +6,8 @@ import {
   parseBookingComDate,
 } from "./date";
 import { parsePrice } from "./currency";
-import { predictFirstName } from "../utils";
+import { predictFirstName } from "./names";
+import { getGuestName } from "./booking";
 
 export {
   parseDMY,
@@ -16,4 +17,5 @@ export {
   parseBookingComDate,
   parsePrice,
   predictFirstName,
+  getGuestName,
 };
