@@ -2,67 +2,154 @@ import sys
 import json
 import asyncio
 import re
+import random
 from playwright.async_api import async_playwright
 from playwright_stealth import Stealth
 
-# Specialized scraper for PricingAuditor worker
+# Refined helper to extract all valid prices from text and return the largest one
+def extract_best_price(text, min_p):
+    if not text: return None
+    # Allow commas and dots in the price part, and optionally allow text after currency
+    matches = re.findall(r'(\d[\d\s\xa0,.]+?)(?:\s?zł|PLN)', text, re.IGNORECASE)
+    valid_values = []
+    for m in matches:
+        try:
+            # Clean up: remove spaces, nbsp
+            m_clean = m.replace('\xa0', '').replace(' ', '')
+            # Handle decimals: if the string ends with a separator followed by 2 digits, remove them
+            if len(m_clean) > 3 and m_clean[-3] in [',', '.']:
+                val_str = m_clean[:-3].replace(',', '').replace('.', '')
+            else:
+                val_str = m_clean.replace(',', '').replace('.', '')
+            
+            if not val_str: continue
+            val = int(val_str)
+            if val in [2024, 2025, 2026, 2027]: continue
+            if float(min_p) <= val <= 40000:
+                valid_values.append(val)
+        except: pass
+    
+    # Return the LAST valid value found, as it's typically the final total or the new price after a discount
+    return valid_values[-1] if valid_values else None
+
 async def scrape_audit(platform, url, min_price, benchmark=None, nights=1):
     async with async_playwright() as pw:
-        # Use firefox for variety and better stealth on some platforms
-        browser = await pw.firefox.launch(headless=True)
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) Gecko/20100101 Firefox/119.0"
-        )
+        browser = await pw.chromium.launch(headless=True)
+        
+        # User Agent switching for Airbnb to potentially bypass bot detection
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+        if platform == "airbnb":
+            # Try a mobile User Agent for Airbnb
+            ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+
+        context = await browser.new_context(user_agent=ua)
         page = await context.new_page()
         await Stealth().apply_stealth_async(page)
 
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            # Give it more time for heavy JS sites like Airbnb
-            await asyncio.sleep(8)
+            # Randomized delay
+            await asyncio.sleep(random.uniform(8, 12))
             
-            content = await page.content()
             text = await page.inner_text("body")
+            
+            # 1. Platform-specific validation / Redirection check
+            if platform == "slowhop":
+                expected_start = re.search(r'start_date=([\d-]+)', url)
+                if expected_start and expected_start.group(1) not in page.url:
+                    return {"price": None, "status": "SOLD_OUT"}
+            elif platform == "alohacamp":
+                 expected_start = re.search(r'start=([\d-]+)', url)
+                 if expected_start and expected_start.group(1)[:7] not in page.url: 
+                    return {"price": None, "status": "SOLD_OUT"}
+            elif platform == "booking":
+                 if "minimum stay" in text.lower() or "pobyt minimalny" in text.lower():
+                     return {"price": None, "status": "SOLD_OUT"}
+                 if "wybierz daty" in text.lower() and not await page.locator(".prco-valign-middle-helper").first.is_visible(timeout=1000):
+                     return {"price": None, "status": "SOLD_OUT"}
 
-            # Basic availability check
-            sold_out_markers = ["brak wolnych", "sold out", "zajęty", "termin jest zajęty", "not available", "minimum stay"]
-            if any(m in text.lower() for m in sold_out_markers):
-                return {"price": None, "status": "SOLD_OUT"}
-
-            # Regex for prices with spaces or NBSP
-            price_patterns = [
-                r'(\d[\d\s]{2,5})(?:\s?zł|PLN)',
-                r'price.*?(\d[\d\s]{2,5})'
+            # 2. Availability Check (Markers)
+            sold_out_markers = [
+                "brak wolnych pokoi", "nie znaleźliśmy ofert", "sold out", "termin jest zajęty", 
+                "not available", "minimum stay", "pobyt minimalny",
+                "wybrany termin jest zajęty", "zapytaj o inny termin", "brak miejsc",
+                "wybierz daty", "wpisz daty", "zobacz dostępność"
             ]
             
-            found_prices = []
-            for pattern in price_patterns:
-                matches = re.findall(pattern, content, re.IGNORECASE)
-                for m in matches:
-                    try:
-                        val = int(re.sub(r'[^\d]', '', m))
-                        if float(min_price) <= val <= 40000:
-                            found_prices.append(val)
-                    except: continue
-
-            if not found_prices:
-                # Last resort: find all 4-5 digit numbers
-                digits = re.findall(r'\b\d{4,5}\b', text)
-                for d in digits:
-                    val = int(d)
-                    if float(min_price) <= val <= 40000:
-                        found_prices.append(val)
-
-            if found_prices:
-                # If benchmark is provided, pick the price closest to it
-                if benchmark:
-                    target = float(benchmark)
-                    best_price = min(found_prices, key=lambda x: abs(x - target))
-                else:
-                    best_price = max(found_prices)
+            if any(m in text.lower() for m in sold_out_markers):
+                any_price = False
+                if platform == "booking":
+                    any_price = await page.locator(".prco-valign-middle-helper").first.is_visible(timeout=1000)
                 
-                return {"price": best_price, "status": "OK"}
+                if not any_price:
+                    return {"price": None, "status": "SOLD_OUT"}
+
+            # 3. Pinpoint Price by Platform Selectors
+            found_price = None
             
+            if platform == "booking":
+                selectors = [".prco-valign-middle-helper", "[data-testid='price-and-pos-availability']", ".bui-price-display__value"]
+                for sel in selectors:
+                    elements = page.locator(sel)
+                    if await elements.count() > 0:
+                        combined_text = " ".join(await elements.all_inner_texts())
+                        found_price = extract_best_price(combined_text, min_price)
+                        if found_price: break
+
+            elif platform == "airbnb":
+                # Extended selectors for mobile and desktop versions
+                selectors = [
+                    "span._1y74zjx", # Total price span
+                    "div[data-testid='book-it-default']",
+                    "[data-section-id='BOOK_IT_SIDEBAR']",
+                    "span:has-text('zł total')",
+                    "div:has-text('Łącznie') + div"
+                ]
+                for sel in selectors:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=2000):
+                        found_price = extract_best_price(await el.inner_text(), min_price)
+                        if found_price: break
+
+            elif platform == "slowhop":
+                selectors = [
+                    ".price-summary-row--main", 
+                    ".price-summary-row__value", 
+                    ".summary-price", 
+                    ".total-amount",
+                    "div:has-text('Łącznie') + div",
+                    "div:has-text('Łącznie') ~ div"
+                ]
+                for sel in selectors:
+                    el = page.locator(sel).last
+                    if await el.is_visible(timeout=2000):
+                        found_price = extract_best_price(await el.inner_text(), min_price)
+                        if found_price: break
+
+            elif platform == "alohacamp":
+                selectors = [
+                    "[data-testid='price-summary-total-price']", 
+                    ".price-total", 
+                    "div:has-text('Ostateczna cena')", 
+                    "div:has-text('Razem')",
+                    ".booking-card__price",
+                    "span:has-text('zł')",
+                    "div:has-text('zł')"
+                ]
+                for sel in selectors:
+                    el = page.locator(sel).first
+                    if await el.is_visible(timeout=2000):
+                        found_price = extract_best_price(await el.inner_text(), min_price)
+                        if found_price: break
+
+            if found_price:
+                return {"price": found_price, "status": "OK"}
+
+            # Debug: if we are here, we didn't find a price. 
+            # Check if there is a captcha marker in the text
+            if "robot" in text.lower() or "captcha" in text.lower() or "verify you are human" in text.lower():
+                return {"price": None, "status": "ERROR", "error": "CAPTCHA_DETECTED"}
+
             return {"price": None, "status": "SOLD_OUT"}
 
         except Exception as e:
@@ -71,16 +158,8 @@ async def scrape_audit(platform, url, min_price, benchmark=None, nights=1):
             await browser.close()
 
 if __name__ == "__main__":
-    # Args: platform, url, min_price, [benchmark], [nights]
     if len(sys.argv) < 4:
-        print(json.dumps({"error": "Missing arguments"}))
         sys.exit(1)
-
-    platform = sys.argv[1]
-    url = sys.argv[2]
-    min_price = sys.argv[3]
-    benchmark = sys.argv[4] if len(sys.argv) > 4 else None
-    nights = sys.argv[5] if len(sys.argv) > 5 else 1
-
-    result = asyncio.run(scrape_audit(platform, url, min_price, benchmark, nights))
+    platform, url, min_price = sys.argv[1:4]
+    result = asyncio.run(scrape_audit(platform, url, min_price))
     print(json.dumps(result))

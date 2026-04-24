@@ -416,11 +416,13 @@ function ManualAuditModal({
 function AuditorCalendar({
   property,
   audits,
+  availability,
   month,
   onDateClick,
 }: {
   property: string;
   audits: any[];
+  availability: any[];
   month: Date;
   onDateClick: (date: Date) => void;
 }) {
@@ -469,29 +471,44 @@ function AuditorCalendar({
         ))}
 
         {days.map((day) => {
-          // Audits starting today
-          const startingAudits = latestAudits.filter(a => isSameDay(new Date(a.checkIn), day));
+          const d = startOfDay(day);
           
-          // Audits ongoing today (after check-in, before check-out)
-          const ongoingAudits = latestAudits.filter(a => {
-            const cin = startOfDay(new Date(a.checkIn));
-            const cout = startOfDay(new Date(a.checkOut));
-            const d = startOfDay(day);
-            return d > cin && d < cout;
+          // Check if this date is currently booked
+          const booking = availability.find(b => {
+            const cin = startOfDay(new Date(b.checkIn));
+            const cout = startOfDay(new Date(b.checkOut));
+            return d >= cin && d < cout;
           });
 
-          // Audits ending today
-          const endingAudits = latestAudits.filter(a => isSameDay(new Date(a.checkOut), day));
+          // Audits starting today - ONLY if not booked
+          const startingAudits = !booking ? latestAudits.filter(a => isSameDay(new Date(a.checkIn), day)) : [];
+          
+          // Audits ongoing today (after check-in, before check-out) - ONLY if not booked
+          const ongoingAudits = !booking ? latestAudits.filter(a => {
+            const cin = startOfDay(new Date(a.checkIn));
+            const cout = startOfDay(new Date(a.checkOut));
+            return d > cin && d < cout;
+          }) : [];
+
+          // Audits ending today - ONLY if not booked
+          const endingAudits = !booking ? latestAudits.filter(a => isSameDay(new Date(a.checkOut), day)) : [];
 
           return (
             <div 
               key={day.toString()} 
               className={cn(
-                "border-r border-b p-1 min-h-[80px] last:border-r-0 group transition-colors bg-white cursor-pointer hover:bg-muted/10"
+                "border-r border-b p-1 min-h-[80px] last:border-r-0 group transition-colors bg-white cursor-pointer hover:bg-muted/10 relative",
+                booking && "bg-slate-50 cursor-not-allowed"
               )}
-              onClick={() => onDateClick(day)}
+              onClick={() => {
+                if (!booking) onDateClick(day);
+                else toast.info(`This date is booked (${booking.channel})`);
+              }}
             >
               <div className="text-right flex justify-between items-start">
+                {booking && isSameDay(new Date(booking.checkIn), day) && (
+                   <span className="text-[8px] font-bold uppercase bg-slate-200 px-1 rounded">Booked</span>
+                )}
                 <div className="flex-1" />
                 <span className={`text-xs ${isSameDay(day, new Date()) ? "bg-primary text-white h-5 w-5 inline-flex items-center justify-center rounded-full" : "text-muted-foreground"}`}>
                   {format(day, "d")}
@@ -499,76 +516,88 @@ function AuditorCalendar({
               </div>
 
               <div className="mt-2 flex flex-col gap-1.5">
-                {/* Ongoing/Ending audit bars (thin lines) */}
-                {[...ongoingAudits, ...endingAudits].map((audit, idx) => {
-                  const isEnding = isSameDay(new Date(audit.checkOut), day);
-                  const isRed = audit.maxDeviation > 0.15;
-                  return (
-                    <div 
-                      key={`ongoing-${audit.id}-${idx}`}
-                      className={cn(
-                        "h-1.5 opacity-60",
-                        isRed ? "bg-red-500" : "bg-green-500",
-                        isEnding ? "rounded-l-none rounded-r-full mr-2" : "rounded-none"
-                      )}
-                    />
-                  );
-                })}
+                {/* Booking Overlay (if date is booked) */}
+                {booking ? (
+                  <div className={cn(
+                    "h-full w-full opacity-40 bg-slate-200 border-t border-slate-300 absolute inset-0 pointer-events-none z-0",
+                    isSameDay(new Date(booking.checkIn), day) && "rounded-tl-md",
+                    isSameDay(addDays(new Date(booking.checkOut), -1), day) && "rounded-tr-md"
+                  )} />
+                ) : null}
 
-                {/* Starting audit blocks (with tooltip and text) */}
-                {startingAudits.map((audit, idx) => (
-                  <TooltipProvider key={audit.id}>
-                    <Tooltip>
-                      <TooltipTrigger asChild onClick={(e) => e.stopPropagation()}>
+                {/* Auditor Data (only shown if not booked) */}
+                {!booking && (
+                  <>
+                    {[...ongoingAudits, ...endingAudits].map((audit, idx) => {
+                      const isEnding = isSameDay(new Date(audit.checkOut), day);
+                      const isRed = audit.maxDeviation > 0.15;
+                      return (
                         <div 
+                          key={`ongoing-${audit.id}-${idx}`}
                           className={cn(
-                            "text-[9px] font-bold px-1.5 py-1 rounded-l-md shadow-sm cursor-help flex items-center justify-between transition-transform hover:scale-[1.02]",
-                            audit.maxDeviation > 0.15 ? "bg-red-500 text-white" : "bg-green-600 text-white"
+                            "h-1.5 opacity-60 z-10",
+                            isRed ? "bg-red-500" : "bg-green-500",
+                            isEnding ? "rounded-l-none rounded-r-full mr-2" : "rounded-none"
                           )}
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <span className="truncate">Stay {Math.round((new Date(audit.checkOut).getTime() - new Date(audit.checkIn).getTime()) / (1000*60*60*24))}n</span>
-                          <span className="ml-1 opacity-80">{Math.round(audit.maxDeviation * 100)}%</span>
-                        </div>
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom" className="w-64 p-3 z-50">
-                        <div className="space-y-2">
-                          <div className="font-bold border-b pb-1 flex justify-between items-center">
-                            <span>{format(new Date(audit.checkIn), "dd MMM")} - {format(new Date(audit.checkOut), "dd MMM")}</span>
-                            {audit.isMinStayTest === 1 && <span className="bg-blue-100 text-blue-700 text-[8px] px-1 rounded">Min Stay Test</span>}
-                          </div>
-                          <div className="flex flex-col gap-0.5 border-b pb-1.5 mb-1.5">
-                            <div className="flex justify-between text-xs">
-                              <span className="text-muted-foreground font-semibold">Portal Price:</span>
-                              <span className="font-bold">{audit.portalPrice} zł</span>
+                        />
+                      );
+                    })}
+
+                    {startingAudits.map((audit, idx) => (
+                      <TooltipProvider key={audit.id}>
+                        <Tooltip>
+                          <TooltipTrigger asChild onClick={(e) => e.stopPropagation()}>
+                            <div 
+                              className={cn(
+                                "text-[9px] font-bold px-1.5 py-1 rounded-l-md shadow-sm cursor-help flex items-center justify-between transition-transform hover:scale-[1.02] z-10",
+                                audit.maxDeviation > 0.15 ? "bg-red-500 text-white" : "bg-green-600 text-white"
+                              )}
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <span className="truncate">Stay {Math.round((new Date(audit.checkOut).getTime() - new Date(audit.checkIn).getTime()) / (1000*60*60*24))}n</span>
+                              <span className="ml-1 opacity-80">{Math.round(audit.maxDeviation * 100)}%</span>
                             </div>
-                            <div className="flex justify-between text-xs">
-                              <span className="text-muted-foreground font-semibold">Benchmark Price:</span>
-                              <span className="font-bold">{audit.portalPrice} + {audit.offsetPrice} = {audit.internalPrice} zł</span>
-                            </div>
-                          </div>
-                          {Object.entries(audit.deviations).map(([portal, dev]: [any, any]) => (
-                            <div key={portal} className="flex justify-between text-xs">
-                              <span className="capitalize">{portal}:</span>
-                              <div className="flex gap-2 items-center">
-                                <span className="text-muted-foreground">{audit[`${portal}Price`]} zł</span>
-                                <span className={cn("font-bold", dev > 0.15 ? "text-red-500" : "text-green-600")}>
-                                  {dev > 0 ? `+${Math.round(dev * 100)}%` : "0%"}
-                                </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="bottom" className="w-64 p-3 z-50">
+                            <div className="space-y-2">
+                              <div className="font-bold border-b pb-1 flex justify-between items-center">
+                                <span>{format(new Date(audit.checkIn), "dd MMM")} - {format(new Date(audit.checkOut), "dd MMM")}</span>
+                                {audit.isMinStayTest === 1 && <span className="bg-blue-100 text-blue-700 text-[8px] px-1 rounded">Min Stay Test</span>}
+                              </div>
+                              <div className="flex flex-col gap-0.5 border-b pb-1.5 mb-1.5">
+                                <div className="flex justify-between text-xs">
+                                  <span className="text-muted-foreground font-semibold">Portal Price:</span>
+                                  <span className="font-bold">{audit.portalPrice} zł</span>
+                                </div>
+                                <div className="flex justify-between text-xs">
+                                  <span className="text-muted-foreground font-semibold">Benchmark Price:</span>
+                                  <span className="font-bold">{audit.portalPrice} + {audit.offsetPrice} = {audit.internalPrice} zł</span>
+                                </div>
+                              </div>
+                              {Object.entries(audit.deviations || {}).map(([portal, dev]: [any, any]) => (
+                                <div key={portal} className="flex justify-between text-xs">
+                                  <span className="capitalize">{portal}:</span>
+                                  <div className="flex gap-2 items-center">
+                                    <span className="text-muted-foreground">{audit[`${portal}Price`]} zł</span>
+                                    <span className={cn("font-bold", dev > 0.15 ? "text-red-500" : "text-green-600")}>
+                                      {dev > 0 ? `+${Math.round(dev * 100)}%` : "0%"}
+                                    </span>
+                                  </div>
+                                </div>
+                              ))}
+                              <div className="text-[10px] italic text-muted-foreground pt-1 border-t mt-1">
+                                {audit.bookingStatus !== "OK" && <div>Booking: {audit.bookingStatus}</div>}
+                                {audit.airbnbStatus !== "OK" && <div>Airbnb: {audit.airbnbStatus}</div>}
+                                {audit.slowhopStatus !== "OK" && <div>Slowhop: {audit.slowhopStatus}</div>}
+                                {audit.alohacampStatus !== "OK" && audit.alohacampStatus && <div>Alohacamp: {audit.alohacampStatus}</div>}
                               </div>
                             </div>
-                          ))}
-                          <div className="text-[10px] italic text-muted-foreground pt-1 border-t mt-1">
-                            {audit.bookingStatus !== "OK" && <div>Booking: {audit.bookingStatus}</div>}
-                            {audit.airbnbStatus !== "OK" && <div>Airbnb: {audit.airbnbStatus}</div>}
-                            {audit.slowhopStatus !== "OK" && <div>Slowhop: {audit.slowhopStatus}</div>}
-                            {audit.alohacampStatus !== "OK" && audit.alohacampStatus && <div>Alohacamp: {audit.alohacampStatus}</div>}
-                          </div>
-                        </div>
-                      </TooltipContent>
-                    </Tooltip>
-                  </TooltipProvider>
-                ))}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    ))}
+                  </>
+                )}
               </div>
             </div>
           );
@@ -661,14 +690,32 @@ export default function PricingDashboard() {
     to: windowEnd,
   }, { enabled: activeTab === "auditor" && (!user?.propertyAccess || user.propertyAccess === "Hacjenda") });
 
+  const { data: availabilityS = [] } = trpc.portal.getAvailability.useQuery({ property: "Sadoles" }, { enabled: activeTab === "auditor" });
+  const { data: availabilityH = [] } = trpc.portal.getAvailability.useQuery({ property: "Hacjenda" }, { enabled: activeTab === "auditor" });
+
   const triggerAuditMutation = trpc.pricingAudit.trigger.useMutation({
     onSuccess: () => toast.success("Audit worker started in background"),
-    onError: (err) => toast.error(err.message),
+    onError: (err) => {
+      if (err.message.includes("already in progress")) {
+        toast.error("Audit already in progress. Please wait a few minutes.");
+      } else {
+        toast.error(err.message);
+      }
+    },
   });
 
   const triggerManualMutation = trpc.pricingAudit.triggerManual.useMutation({
     onSuccess: () => toast.success("Manual audit started in background"),
-    onError: (err) => toast.error(err.message),
+    onError: (err) => {
+      // Handle the specialized error messages from the worker
+      if (err.message.includes("already in progress")) {
+        toast.error("Audit already in progress. Please wait a few minutes.");
+      } else if (err.message.includes("already booked")) {
+        toast.error("Cannot audit these dates because they are already booked.");
+      } else {
+        toast.error(err.message);
+      }
+    },
   });
 
   const handleAuditClick = (property: "Sadoles" | "Hacjenda", date: Date) => {
@@ -776,6 +823,7 @@ export default function PricingDashboard() {
                   <AuditorCalendar
                     property="Sadoles"
                     audits={auditsS}
+                    availability={availabilityS}
                     month={month}
                     onDateClick={(date) => handleAuditClick("Sadoles", date)}
                   />
@@ -784,6 +832,7 @@ export default function PricingDashboard() {
                   <AuditorCalendar
                     property="Hacjenda"
                     audits={auditsH}
+                    availability={availabilityH}
                     month={month}
                     onDateClick={(date) => handleAuditClick("Hacjenda", date)}
                   />

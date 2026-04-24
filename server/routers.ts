@@ -620,6 +620,9 @@ const pricingAuditRouter = router({
     }),
 
   trigger: publicProcedure.mutation(async () => {
+    if (PricingAuditor.getIsRunning()) {
+      throw new Error("Audit already in progress");
+    }
     // Run in background to avoid UI timeout (takes ~10-15 minutes)
     PricingAuditor.runDailyAudit().catch(err => {
       console.error("[PricingAuditor] Triggered audit failed:", err);
@@ -634,7 +637,10 @@ const pricingAuditRouter = router({
       checkOut: z.date(),
     }))
     .mutation(async ({ input }) => {
-      // Also run in background but return immediately
+      // Validate preconditions synchronously (awaited)
+      await PricingAuditor.checkPreconditions(input.property, input.checkIn, input.checkOut);
+
+      // Once validated, run in background but return immediately
       PricingAuditor.runManualAudit(input.property, input.checkIn, input.checkOut).catch(err => {
         console.error("[PricingAuditor] Manual audit failed:", err);
       });

@@ -338,7 +338,28 @@ function parseBookingB1(subject: string, body: string): ParsedBookingData {
   const nameMatch = normalizedBody.match(/Go[śs][ćc]:\s*(.+?)(?:\s+Kraj|\s+Termin|$)/i);
   const idMatch = normalizedBody.match(/ID Rezerwacji:\s*(\d+)/i);
   const countryMatch = normalizedBody.match(/Kraj:\s*(.+?)(?:\s+Liczba|$)/i);
-  const guestCountMatch = normalizedBody.match(/Liczba go[śs]ci:?\s*(\d+)/i);
+  
+  // Improved guest count parsing
+  const guestLineMatch = normalizedBody.match(/Liczba go[śs]ci:?\s*(.+?)(?:\s+Termin|\s+Cena|\s+Email|$)/i);
+  let guestCount: number | undefined;
+  let adultsCount: number | undefined;
+  let childrenCount: number | undefined;
+
+  if (guestLineMatch) {
+    const line = guestLineMatch[1].trim();
+    const adults = line.match(/(\d+)\s+doros[łl]ych/i);
+    const children = line.match(/(\d+)\s+dzieci/i);
+    
+    if (adults || children) {
+      adultsCount = adults ? parseInt(adults[1]) : 0;
+      childrenCount = children ? parseInt(children[1]) : 0;
+      guestCount = adultsCount + childrenCount;
+    } else {
+      const simple = line.match(/^(\d+)/);
+      if (simple) guestCount = parseInt(simple[1]);
+    }
+  }
+
   const emailMatch = normalizedBody.match(/Email go[śs]cia:\s*([^\s]+@[^\s]+)/i);
   
   const datesMatch = normalizedBody.match(/Termin:\s*(.+?)\s+(?:do|-|–)\s+(.+?)(?:\s+Cena|$)/i);
@@ -358,7 +379,9 @@ function parseBookingB1(subject: string, body: string): ParsedBookingData {
     guestName: nameMatch ? nameMatch[1].trim() : undefined,
     guestEmail: emailMatch ? emailMatch[1].trim().replace(/\.$/, "") : undefined,
     guestCountry: countryMatch ? countryMatch[1].trim() : undefined,
-    guestCount: guestCountMatch ? parseInt(guestCountMatch[1]) : undefined,
+    guestCount,
+    adultsCount,
+    childrenCount,
     checkIn: datesMatch ? parseBookingComDate(datesMatch[1]!) : undefined,
     checkOut: datesMatch ? parseBookingComDate(datesMatch[2]!) : undefined,
     totalPrice: priceData?.amount,
