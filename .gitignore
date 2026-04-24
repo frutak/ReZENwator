@@ -116,13 +116,8 @@ server/tests/emailParsers.generated.test.ts
 server/tests/emailTemplates.test.ts
 server/tests/bookingMatcher.test.ts
 server/tests/emailParsers.test.ts
-price_auditor.py
-scripts/scrape_auditor_pw.py
-scripts/scrape_price_pw.py
-scripts/scrape_ratings_pw.py
 verify_bookings.ts
 verify_id5.ts
-rules.md
 PRICING_RULES.md
 .gitkeep
 
