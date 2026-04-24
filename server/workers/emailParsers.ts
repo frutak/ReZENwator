@@ -363,7 +363,7 @@ function parseBookingB1(subject: string, body: string): ParsedBookingData {
     checkOut: datesMatch ? parseBookingComDate(datesMatch[2]!) : undefined,
     totalPrice: priceData?.amount,
     commission: commData?.amount,
-    hostRevenue: priceData && commData ? priceData.amount - commData.amount : undefined,
+    hostRevenue: priceData && commData ? Math.round((priceData.amount - commData.amount) * 100) / 100 : undefined,
     currency: priceData?.currency ?? "PLN",
     property,
   };

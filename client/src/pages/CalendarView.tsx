@@ -2,17 +2,14 @@ import { useState, useMemo, useEffect } from "react";
 import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
-import { ChevronLeft, ChevronRight, Home, Calendar as CalendarIcon, Tag, Loader2, Settings, Plus, Trash2, SoapDispenserDroplet, Clock } from "lucide-react";
+import { ChevronLeft, ChevronRight, Home, Calendar as CalendarIcon, Loader2, SoapDispenserDroplet, Clock } from "lucide-react";
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, isSameDay, addMonths, subMonths, addDays, startOfDay } from "date-fns";
 import BookingDetailModal from "@/components/BookingDetailModal";
 import { Booking } from "@shared/types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { DoubleBookingBanner } from "@/components/DoubleBookingBanner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { toast } from "sonner";
-import { cn } from "@/lib/utils";
+import { cn, getGuestName } from "@/lib/utils";
 import { useAuth } from "@/_core/hooks/useAuth";
 
 // ─── Channel colours ──────────────────────────────────────────────────────────
@@ -26,14 +23,6 @@ const CHANNEL_COLORS: Record<string, { bg: string; text: string; border: string 
   unknown:   { bg: "#f1f5f9", text: "#475569", border: "#e2e8f0" },
 };
 
-const PLAN_COLORS: Record<string, string> = {
-  Low: "#f1f5f9",      // Slate 100
-  Mixed: "#fef9c3",    // Yellow 100
-  High: "#ffedd5",     // Orange 100
-  Special: "#fee2e2",  // Red 100
-  New: "#fae8ff",      // Fuchsia 100
-};
-
 const CHANNEL_LABELS: Record<string, string> = {
   airbnb: "Airbnb",
   booking: "Booking.com",
@@ -41,53 +30,6 @@ const CHANNEL_LABELS: Record<string, string> = {
   alohacamp: "Alohacamp",
   direct: "Direct",
 };
-
-// ─── Pricing Plan Modal ────────────────────────────────────────────────────────
-
-function PricingPlanModal({ plan, onClose, onUpdated }: { plan: any, onClose: () => void, onUpdated: () => void }) {
-  const [price, setPrice] = useState(plan.nightlyPrice);
-  const [minStay, setMinStay] = useState(plan.minStay);
-
-  const updateMutation = trpc.pricing.updatePlan.useMutation({
-    onSuccess: () => {
-      toast.success("Pricing plan updated");
-      onUpdated();
-      onClose();
-    },
-    onError: (err) => toast.error(err.message)
-  });
-
-  return (
-    <DialogContent>
-      <DialogHeader>
-        <DialogTitle>Edit Pricing Plan</DialogTitle>
-      </DialogHeader>
-      <div className="space-y-4 py-4">
-        <div className="space-y-2">
-          <Label>Plan Name</Label>
-          <Input value={plan.planName} disabled className="bg-muted" />
-        </div>
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label>Nightly Price (PLN)</Label>
-            <Input type="number" value={price} onChange={e => setPrice(parseInt(e.target.value))} />
-          </div>
-          <div className="space-y-2">
-            <Label>Min Stay (Nights)</Label>
-            <Input type="number" value={minStay} onChange={e => setMinStay(parseInt(e.target.value))} />
-          </div>
-        </div>
-      </div>
-      <DialogFooter>
-        <Button variant="outline" onClick={onClose}>Cancel</Button>
-        <Button onClick={() => updateMutation.mutate({ id: plan.planId, nightlyPrice: price, minStay })} disabled={updateMutation.isPending}>
-          {updateMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          Save Changes
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  );
-}
 
 const CLEANING_COLORS = [
   { bg: "bg-emerald-50", border: "border-emerald-200", text: "text-emerald-700", icon: "text-emerald-500" },
@@ -158,202 +100,23 @@ function CleaningSlotModal({ slot, onClose }: { slot: { from: Date; to: Date; pr
   );
 }
 
-// ─── Property Settings Modal ──────────────────────────────────────────────────
-
-function PropertySettingsModal({ property, onClose }: { property: "Sadoles" | "Hacjenda", onClose: () => void }) {
-  const utils = trpc.useUtils();
-  const { data: settings, isLoading } = trpc.booking.getPropertySettings.useQuery({ property });
-  
-  const [fixedFee, setFixedFee] = useState(800);
-  const [petFee, setPetFee] = useState(200);
-  const [lmDiscount, setLmDiscount] = useState(0.05);
-  const [lmDays, setLmDays] = useState(14);
-  const [peopleDiscounts, setPeopleDiscounts] = useState<{ maxGuests: number, multiplier: number }[]>([]);
-  const [stayDiscounts, setStayDiscounts] = useState<{ minNights: number, discount: number }[]>([]);
-
-  useEffect(() => {
-    if (settings) {
-      setFixedFee(settings.fixedBookingPrice);
-      setPetFee(settings.petFee ?? 200);
-      setLmDiscount(parseFloat(String(settings.lastMinuteDiscount ?? "0.05")));
-      setLmDays(settings.lastMinuteDays ?? 14);
-      
-      const pDisc = typeof settings.peopleDiscount === 'string' 
-        ? JSON.parse(settings.peopleDiscount) 
-        : (settings.peopleDiscount || []);
-      setPeopleDiscounts(pDisc);
-      
-      const sDisc = typeof settings.stayDurationDiscounts === 'string'
-        ? JSON.parse(settings.stayDurationDiscounts)
-        : (settings.stayDurationDiscounts || []);
-      setStayDiscounts(sDisc);
-    }
-  }, [settings]);
-
-  const updateMutation = trpc.pricing.updateSettings.useMutation({
-    onSuccess: () => {
-      toast.success("Property settings updated");
-      utils.booking.getPropertySettings.invalidate({ property });
-      onClose();
-    },
-    onError: (err) => toast.error(err.message)
-  });
-
-  if (isLoading) return <div className="p-10 text-center"><Loader2 className="h-8 w-8 animate-spin mx-auto" /></div>;
-
-  const handleSave = () => {
-    updateMutation.mutate({
-      property,
-      fixedBookingPrice: fixedFee,
-      petFee,
-      peopleDiscount: peopleDiscounts,
-      lastMinuteDiscount: lmDiscount,
-      lastMinuteDays: lmDays,
-      stayDurationDiscounts: stayDiscounts,
-    });
-  };
-
-  return (
-    <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-      <DialogHeader>
-        <DialogTitle>Object Price Settings — {property}</DialogTitle>
-      </DialogHeader>
-      
-      <div className="space-y-6 py-4">
-        {/* Basic Fees */}
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label>Fixed Booking Fee (PLN)</Label>
-            <Input type="number" value={fixedFee} onChange={e => setFixedFee(parseInt(e.target.value) || 0)} />
-          </div>
-          <div className="space-y-2">
-            <Label>Pet Fee (PLN per pet)</Label>
-            <Input type="number" value={petFee} onChange={e => setPetFee(parseInt(e.target.value) || 0)} />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label>Last Minute Discount (%)</Label>
-            <Input type="number" step="0.01" value={lmDiscount} onChange={e => setLmDiscount(parseFloat(e.target.value) || 0)} />
-            <p className="text-[10px] text-muted-foreground">e.g. 0.05 for 5%</p>
-          </div>
-          <div className="space-y-2">
-            <Label>Last Minute Days</Label>
-            <Input type="number" value={lmDays} onChange={e => setLmDays(parseInt(e.target.value) || 0)} />
-          </div>
-        </div>
-
-        {/* People Discounts */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <Label className="text-base font-semibold">People Multipliers</Label>
-            <Button variant="outline" size="sm" onClick={() => setPeopleDiscounts([...peopleDiscounts, { maxGuests: 0, multiplier: 1.0 }])}>
-              <Plus className="h-3.5 w-3.5 mr-1" /> Add Bracket
-            </Button>
-          </div>
-          <div className="space-y-2">
-            {[...peopleDiscounts].sort((a,b) => a.maxGuests - b.maxGuests).map((d, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <div className="flex-1 flex items-center gap-2">
-                  <span className="text-xs text-muted-foreground min-w-[60px]">Up to</span>
-                  <Input type="number" className="h-8" value={d.maxGuests} onChange={e => {
-                    const newD = [...peopleDiscounts];
-                    newD[i].maxGuests = parseInt(e.target.value) || 0;
-                    setPeopleDiscounts(newD);
-                  }} />
-                  <span className="text-xs text-muted-foreground">guests:</span>
-                </div>
-                <div className="flex-1 flex items-center gap-2">
-                  <Input type="number" step="0.01" className="h-8" value={d.multiplier} onChange={e => {
-                    const newD = [...peopleDiscounts];
-                    newD[i].multiplier = parseFloat(e.target.value) || 0;
-                    setPeopleDiscounts(newD);
-                  }} />
-                  <span className="text-xs text-muted-foreground">multiplier</span>
-                </div>
-                <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => {
-                  setPeopleDiscounts(peopleDiscounts.filter((_, idx) => idx !== i));
-                }}>
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
-            {peopleDiscounts.length === 0 && <p className="text-xs text-muted-foreground italic">No guest count multipliers defined.</p>}
-          </div>
-        </div>
-
-        {/* Stay Duration Discounts */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <Label className="text-base font-semibold">Stay Duration Discounts</Label>
-            <Button variant="outline" size="sm" onClick={() => setStayDiscounts([...stayDiscounts, { minNights: 0, discount: 0 }])}>
-              <Plus className="h-3.5 w-3.5 mr-1" /> Add Discount
-            </Button>
-          </div>
-          <div className="space-y-2">
-            {[...stayDiscounts].sort((a,b) => b.minNights - a.minNights).map((d, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <div className="flex-1 flex items-center gap-2">
-                  <Input type="number" className="h-8" value={d.minNights} onChange={e => {
-                    const newD = [...stayDiscounts];
-                    newD[i].minNights = parseInt(e.target.value) || 0;
-                    setStayDiscounts(newD);
-                  }} />
-                  <span className="text-xs text-muted-foreground">nights or more:</span>
-                </div>
-                <div className="flex-1 flex items-center gap-2">
-                  <Input type="number" step="0.01" className="h-8" value={d.discount} onChange={e => {
-                    const newD = [...stayDiscounts];
-                    newD[i].discount = parseFloat(e.target.value) || 0;
-                    setStayDiscounts(newD);
-                  }} />
-                  <span className="text-xs text-muted-foreground">discount (%)</span>
-                </div>
-                <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive" onClick={() => {
-                  setStayDiscounts(stayDiscounts.filter((_, idx) => idx !== i));
-                }}>
-                  <Trash2 className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            ))}
-            {stayDiscounts.length === 0 && <p className="text-xs text-muted-foreground italic">No duration-based discounts defined.</p>}
-          </div>
-        </div>
-      </div>
-
-      <DialogFooter>
-        <Button variant="outline" onClick={onClose}>Cancel</Button>
-        <Button onClick={handleSave} disabled={updateMutation.isPending}>
-          {updateMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          Save All Settings
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  );
-}
-
 // ─── Property Calendar Component ──────────────────────────────────────────────
 
 function PropertyCalendar({
   property,
   bookings,
-  pricing,
   viewMode,
   month,
   onSelectBooking,
   onCreateBooking,
-  onSelectPricingPlan,
   onSelectCleaningSlot,
 }: {
   property: string;
   bookings: Booking[];
-  pricing: any[];
-  viewMode: "bookings" | "pricing" | "cleaning";
+  viewMode: "bookings" | "cleaning";
   month: Date;
   onSelectBooking: (b: Partial<Booking>) => void;
   onCreateBooking: (property: string, date: Date) => void;
-  onSelectPricingPlan: (plan: any) => void;
   onSelectCleaningSlot?: (slot: { from: Date; to: Date; property: string }) => void;
 }) {
   const [tooltip, setTooltip] = useState<{ content: React.ReactNode; x: number; y: number } | null>(null);
@@ -394,11 +157,6 @@ function PropertyCalendar({
           <Home className="h-4 w-4 text-muted-foreground" />
           <h3 className="font-semibold">{property}</h3>
         </div>
-        {viewMode === "pricing" && (
-          <span className="text-[10px] font-bold text-muted-foreground uppercase bg-muted px-2 py-0.5 rounded">
-            Pricing Plan View
-          </span>
-        )}
         {viewMode === "cleaning" && (
           <span className="text-[10px] font-bold text-emerald-600 uppercase bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100 flex items-center gap-1">
             <SoapDispenserDroplet className="h-3 w-3" /> Widok sprzątania
@@ -430,20 +188,12 @@ function PropertyCalendar({
             (b) => b.property === propName && new Date(b.checkIn) < day && new Date(b.checkOut) > day
           );
 
-          const dayStr = format(day, "yyyy-MM-dd");
-          const dayPricing = pricing.find(p => p.date === dayStr);
-          
-          let planType = "";
-          if (dayPricing) {
-            const parts = dayPricing.planName.split(" ");
-            planType = parts[1] || "";
-            if (planType === "Mid") planType = "Mixed";
-          }
-          
-          let bgColor = "#ffffff";
+          const isClickable = viewMode === "cleaning" 
+            ? !(dayBookings.length > 0 || ongoingBookings.length > 0)
+            : true;
+
           let bgClass = "";
-          if (viewMode === "pricing") bgColor = PLAN_COLORS[planType] || "#ffffff";
-          else if (viewMode === "cleaning") {
+          if (viewMode === "cleaning") {
             const activeBooking = bookings.find(b => b.property === propName && b.status !== "cancelled" && (
               isSameDay(startOfDay(new Date(b.checkIn)), startOfDay(day)) ||
               (startOfDay(day) > startOfDay(new Date(b.checkIn)) && startOfDay(day) <= startOfDay(new Date(b.checkOut)))
@@ -453,13 +203,8 @@ function PropertyCalendar({
               const bIdx = propBookings.findIndex(pb => pb.id === activeBooking.id);
               const color = BOOKING_INFO_COLORS[bIdx % BOOKING_INFO_COLORS.length];
               bgClass = color.bg;
-              bgColor = ""; // Use class instead
             }
           }
-
-          const isClickable = viewMode === "cleaning" 
-            ? !(dayBookings.length > 0 || ongoingBookings.length > 0)
-            : true;
 
           return (
             <div 
@@ -469,19 +214,12 @@ function PropertyCalendar({
                 bgClass,
                 isClickable ? "cursor-pointer hover:border-primary/50" : "cursor-not-allowed"
               )}
-              style={bgColor ? { backgroundColor: bgColor } : {}}
               onClick={() => {
                 if (!isClickable) return;
                 if (viewMode === "bookings") onCreateBooking(property, day);
-                else if (viewMode === "pricing" && dayPricing) onSelectPricingPlan(dayPricing);
               }}
             >
               <div className="text-right flex justify-between items-start">
-                {viewMode === "pricing" && dayPricing && (
-                  <span className="text-[9px] font-bold text-muted-foreground/60 p-0.5 leading-none">
-                    {dayPricing.nightlyPrice} zł
-                  </span>
-                )}
                 <div className="flex-1" />
                 <span className={`text-xs ${isSameDay(day, new Date()) ? "bg-primary text-white h-5 w-5 inline-flex items-center justify-center rounded-full" : "text-muted-foreground"}`}>
                   {format(day, "d")}
@@ -521,7 +259,7 @@ function PropertyCalendar({
                           setTooltip({ 
                             content: (
                               <>
-                                <strong>{b.guestName || "Unknown"}</strong><br />
+                                <strong>{getGuestName(b)}</strong><br />
                                 {format(new Date(b.checkIn), "dd.MM HH:mm")} - {format(new Date(b.checkOut), "dd.MM HH:mm")}<br />
                                 {b.status}
                               </>
@@ -536,23 +274,10 @@ function PropertyCalendar({
                           onSelectBooking(b);
                         }}
                       >
-                        {cin ? "▶ " : ""}{b.guestName ?? CHANNEL_LABELS[b.channel] ?? b.channel}{cout ? " ◀" : ""}
+                        {cin ? "▶ " : ""}{getGuestName(b)}{cout ? " ◀" : ""}
                       </div>
                     );
                   })}
-                </div>
-              ) : viewMode === "pricing" ? (
-                <div className="mt-2 flex flex-col items-center justify-center gap-1">
-                  {dayPricing && (
-                    <>
-                      <div className="text-[8px] font-bold uppercase tracking-tighter text-center leading-none text-muted-foreground/80">
-                        {dayPricing.planName.split(": ")[1]}
-                      </div>
-                      <div className="text-[9px] font-medium text-muted-foreground/60">
-                        min {dayPricing.minStay}n
-                      </div>
-                    </>
-                  )}
                 </div>
               ) : (
                 <div className="mt-1 space-y-1">
@@ -566,7 +291,6 @@ function PropertyCalendar({
                     const starts = isSameDay(slot.from, day);
                     const ends = isSameDay(slot.to, day);
                     
-                    // Use index in original array to ensure color consistency across days
                     const originalIdx = cleaningSlots.findIndex(s => s.from.getTime() === slot.from.getTime());
                     const color = CLEANING_COLORS[originalIdx % CLEANING_COLORS.length];
 
@@ -595,14 +319,12 @@ function PropertyCalendar({
                     );
                   })}
 
-                  {/* Booked blocks in cleaning view - info on first day, thin bar on following days */}
+                  {/* Booked blocks in cleaning view */}
                   {bookings.filter(b => b.property === propName && b.status !== "cancelled" && (
                     isSameDay(startOfDay(new Date(b.checkIn)), startOfDay(day)) ||
                     (startOfDay(day) > startOfDay(new Date(b.checkIn)) && startOfDay(day) <= startOfDay(new Date(b.checkOut)))
                   )).map((b) => {
                     const isFirstDay = isSameDay(startOfDay(new Date(b.checkIn)), startOfDay(day));
-                    
-                    // Determine color based on booking sequence
                     const bIdx = propBookings.findIndex(pb => pb.id === b.id);
                     const color = BOOKING_INFO_COLORS[bIdx % BOOKING_INFO_COLORS.length];
 
@@ -668,27 +390,6 @@ function BookingLegend() {
   );
 }
 
-function PricingLegend() {
-  const types = [
-    { label: "Low Season", color: PLAN_COLORS.Low },
-    { label: "Mixed Season", color: PLAN_COLORS.Mixed },
-    { label: "High Season", color: PLAN_COLORS.High },
-    { label: "Special Holiday", color: PLAN_COLORS.Special },
-    { label: "New Year", color: PLAN_COLORS.New },
-  ];
-
-  return (
-    <div className="flex flex-wrap gap-4 mb-6 px-2">
-      {types.map((t) => (
-        <div key={t.label} className="flex items-center gap-1.5">
-          <div className="h-3 w-3 rounded-sm border" style={{ backgroundColor: t.color }} />
-          <span className="text-xs font-medium text-muted-foreground">{t.label}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function CleaningLegend() {
   return (
     <div className="flex flex-wrap gap-4 mb-6 px-2">
@@ -709,19 +410,16 @@ function CleaningLegend() {
 export default function CalendarView() {
   const { user } = useAuth();
   const [month, setMonth] = useState(() => startOfMonth(new Date()));
-  const [viewMode, setViewMode] = useState<"bookings" | "pricing" | "cleaning">(() => {
-    if (user?.viewAccess) return user.viewAccess as any;
+  const [viewMode, setViewMode] = useState<"bookings" | "cleaning">(() => {
+    if (user?.viewAccess === "cleaning") return "cleaning";
     return "bookings";
   });
   const [selectedBooking, setSelectedBooking] = useState<Partial<Booking> | null>(null);
-  const [selectedPlan, setSelectedPlan] = useState<any>(null);
   const [selectedCleaningSlot, setSelectedCleaningSlot] = useState<{ from: Date; to: Date; property: string } | null>(null);
-  const [settingsProperty, setSettingsProperty] = useState<"Sadoles" | "Hacjenda" | null>(null);
 
-  // Sync viewMode if user changes (rare but good for consistency)
   useEffect(() => {
-    if (user?.viewAccess) {
-      setViewMode(user.viewAccess as any);
+    if (user?.viewAccess === "cleaning") {
+      setViewMode("cleaning");
     }
   }, [user]);
 
@@ -732,19 +430,7 @@ export default function CalendarView() {
     checkInFrom: windowStart,
     checkInTo: windowEnd,
     limit: 500,
-  }, { enabled: viewMode === "bookings" || viewMode === "cleaning" });
-
-  const { data: pricingS = [], isLoading: isLoadingS, refetch: refetchS } = trpc.pricing.getPricing.useQuery({
-    property: "Sadoles",
-    from: windowStart,
-    to: windowEnd,
-  }, { enabled: viewMode === "pricing" && (!user?.propertyAccess || user.propertyAccess === "Sadoles") });
-
-  const { data: pricingH = [], isLoading: isLoadingH, refetch: refetchH } = trpc.pricing.getPricing.useQuery({
-    property: "Hacjenda",
-    from: windowStart,
-    to: windowEnd,
-  }, { enabled: viewMode === "pricing" && (!user?.propertyAccess || user.propertyAccess === "Hacjenda") });
+  });
 
   const allBookings = useMemo(() => {
     let list = bookingList.filter(b => b.status !== "cancelled");
@@ -754,10 +440,7 @@ export default function CalendarView() {
     return list;
   }, [bookingList, user]);
 
-  const isDataLoading = (viewMode === "bookings" || viewMode === "cleaning") ? isLoadingBookings : (isLoadingS || isLoadingH);
-
   const canSeeBookings = !user?.viewAccess || user.viewAccess === "bookings";
-  const canSeePricing = !user?.viewAccess || user.viewAccess === "pricing";
   const canSeeCleaning = !user?.viewAccess || user.viewAccess === "cleaning";
 
   const showSadoles = !user?.propertyAccess || user.propertyAccess === "Sadoles";
@@ -784,28 +467,12 @@ export default function CalendarView() {
           </div>
 
           <div className="flex items-center gap-2">
-            {viewMode === "pricing" && (
-              <div className="flex items-center gap-1 mr-2">
-                <Button variant="outline" size="sm" className="gap-2" onClick={() => setSettingsProperty("Sadoles")}>
-                  <Settings className="h-3.5 w-3.5" /> Sadoleś Settings
-                </Button>
-                <Button variant="outline" size="sm" className="gap-2" onClick={() => setSettingsProperty("Hacjenda")}>
-                  <Settings className="h-3.5 w-3.5" /> Hacjenda Settings
-                </Button>
-              </div>
-            )}
             <Tabs defaultValue="bookings" value={viewMode} onValueChange={(v) => setViewMode(v as any)}>
-              <TabsList className={cn("grid", canSeeBookings && canSeePricing && canSeeCleaning ? "w-[320px] grid-cols-3" : "w-[240px] grid-cols-2")}>
+              <TabsList className={cn("grid", canSeeBookings && canSeeCleaning ? "w-[240px] grid-cols-2" : "w-[120px] grid-cols-1")}>
                 {canSeeBookings && (
                   <TabsTrigger value="bookings" className="flex items-center gap-2">
                     <CalendarIcon className="h-3.5 w-3.5" />
                     Bookings
-                  </TabsTrigger>
-                )}
-                {canSeePricing && (
-                  <TabsTrigger value="pricing" className="flex items-center gap-2">
-                    <Tag className="h-3.5 w-3.5" />
-                    Pricing
                   </TabsTrigger>
                 )}
                 {canSeeCleaning && (
@@ -822,11 +489,11 @@ export default function CalendarView() {
           </div>
         </div>
 
-        {viewMode === "bookings" ? <BookingLegend /> : viewMode === "pricing" ? <PricingLegend /> : <CleaningLegend />}
+        {viewMode === "bookings" ? <BookingLegend /> : <CleaningLegend />}
 
         <DoubleBookingBanner />
 
-        {isDataLoading ? (
+        {isLoadingBookings ? (
           <div className="text-center py-20 text-muted-foreground">Loading calendar data…</div>
         ) : (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
@@ -834,11 +501,9 @@ export default function CalendarView() {
               <PropertyCalendar
                 property="Sadoleś"
                 bookings={allBookings}
-                pricing={pricingS}
                 viewMode={viewMode}
                 month={month}
                 onSelectBooking={setSelectedBooking}
-                onSelectPricingPlan={setSelectedPlan}
                 onSelectCleaningSlot={setSelectedCleaningSlot}
                 onCreateBooking={(p, d) => setSelectedBooking({ 
                   property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
@@ -851,11 +516,9 @@ export default function CalendarView() {
               <PropertyCalendar
                 property="Hacjenda"
                 bookings={allBookings}
-                pricing={pricingH}
                 viewMode={viewMode}
                 month={month}
                 onSelectBooking={setSelectedBooking}
-                onSelectPricingPlan={setSelectedPlan}
                 onSelectCleaningSlot={setSelectedCleaningSlot}
                 onCreateBooking={(p, d) => setSelectedBooking({ 
                   property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
@@ -874,30 +537,6 @@ export default function CalendarView() {
           <BookingDetailModal
             booking={selectedBooking}
             onClose={() => setSelectedBooking(null)}
-          />
-        )}
-      </Dialog>
-
-      {/* Pricing plan editor modal */}
-      <Dialog open={!!selectedPlan} onOpenChange={(open) => !open && setSelectedPlan(null)}>
-        {selectedPlan && (
-          <PricingPlanModal
-            plan={selectedPlan}
-            onClose={() => setSelectedPlan(null)}
-            onUpdated={() => {
-              refetchS();
-              refetchH();
-            }}
-          />
-        )}
-      </Dialog>
-
-      {/* Property settings modal */}
-      <Dialog open={!!settingsProperty} onOpenChange={(open) => !open && setSettingsProperty(null)}>
-        {settingsProperty && (
-          <PropertySettingsModal
-            property={settingsProperty}
-            onClose={() => setSettingsProperty(null)}
           />
         )}
       </Dialog>

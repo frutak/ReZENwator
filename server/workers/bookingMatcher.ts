@@ -543,6 +543,8 @@ export async function applyTransferMatch(
   const cComm = parseFloat(String(b.commission || "0"));
   const cRevenue = parseFloat(String(b.hostRevenue || "0"));
 
+  let isPortalForward = false;
+
   if (b.channel === "slowhop") {
     const hostPrepayment = cResFee - cComm;
     const guestBalance = totalPrice - cResFee;
@@ -551,6 +553,7 @@ export async function applyTransferMatch(
     if (Math.abs(transferAmount - hostPrepayment) < 1.0) {
       // Slowhop pre-payment forward - status stays 'confirmed' (or current)
       newStatus = b.status === "pending" ? "confirmed" : b.status;
+      isPortalForward = true;
     } else if (Math.abs(transferAmount - guestBalancePlusDeposit) < 1.0) {
       newStatus = "paid";
       newDepositStatus = "paid";
@@ -568,6 +571,7 @@ export async function applyTransferMatch(
 
     if (diffPercent < 0.01) {
       newStatus = "paid";
+      isPortalForward = true;
     } else if (isDepositMatch) {
       newDepositStatus = "paid";
     } else if (isPetFeeMatch) {
@@ -612,6 +616,7 @@ export async function applyTransferMatch(
       if (newStatus === "pending") newStatus = "confirmed";
     } else if (Math.abs(transferAmount - cRevenue) < 1.0) {
       newStatus = "paid";
+      isPortalForward = true;
     } else {
       newStatus = "paid"; // Usually the portal payment
       if (!isToBePaidMatch && toBePaid > 0) {
@@ -620,7 +625,12 @@ export async function applyTransferMatch(
     }
   }
 
-  const newPaid = currentPaid + transferAmount;
+  let newPaid = currentPaid + transferAmount;
+  if (isPortalForward && b.channel === "slowhop") {
+    // For Slowhop, the guest has paid the full reservation fee to the portal,
+    // so we set amountPaid to the full fee even though the host gets less (minus commission).
+    newPaid = Math.max(currentPaid, cResFee);
+  }
 
   await BookingRepository.updateBookingPayment(bookingId, {
     status: newStatus as BookingStatus,

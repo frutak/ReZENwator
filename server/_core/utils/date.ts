@@ -90,7 +90,7 @@ export function parseBookingComDate(dateStr: string): Date | undefined {
   }
 
   // 2. Try English/Full: "Fri, Mar 27, 2026" or "Mar 27, 2026"
-  const enMatch = cleaned.match(/(?:\w{2,4},\s+)?(\w{3,10})\s+(\d{1,2}),\s+(\d{4})/i);
+  const enMatch = cleaned.match(/(?:\w{2,4}\.?,?\s+)?(\w{3,10})\.?\s+(\d{1,2}),\s+(\d{4})/i);
   if (enMatch) {
     const monthKey = enMatch[1]!.substring(0, 3).toLowerCase();
     const day = parseInt(enMatch[2]!);
@@ -100,7 +100,7 @@ export function parseBookingComDate(dateStr: string): Date | undefined {
   }
 
   // 3. Try Polish/Alternative: "27 mar 2026" or "śr., 27 mar 2026" or "27 marzec 2026"
-  const plMatch = cleaned.match(/(?:\w{2,4}\.?,\s+)?(\d{1,2})\s+(\w{3,10})\s+(\d{4})/i);
+  const plMatch = cleaned.match(/(?:\w{2,4}\.?,?\s+)?(\d{1,2})\s+(\w{3,10})\.?\s+(\d{4})/i);
   if (plMatch) {
     const day = parseInt(plMatch[1]!);
     const monthKey = plMatch[2]!.substring(0, 3).toLowerCase();

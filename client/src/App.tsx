@@ -10,6 +10,7 @@ import { Spinner } from "./components/ui/spinner";
 const BookingsDashboard = lazy(() => import("./pages/BookingsDashboard"));
 const Operations = lazy(() => import("./pages/Operations"));
 const CalendarView = lazy(() => import("./pages/CalendarView"));
+const PricingDashboard = lazy(() => import("./pages/PricingDashboard"));
 const Login = lazy(() => import("./pages/Login"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
@@ -31,6 +32,7 @@ function Router() {
         <Route path={"/login"} component={Login} />
         <Route path={"/"} component={BookingsDashboard} />
         <Route path={"/calendar"} component={CalendarView} />
+        <Route path={"/pricing"} component={PricingDashboard} />
         <Route path={"/sync"} component={Operations} />
         <Route path={"/404"} component={NotFound} />
         <Route component={NotFound} />

@@ -20,13 +20,14 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, RefreshCw, Home, CalendarDays } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, RefreshCw, Home, CalendarDays, Tag } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState, useMemo } from "react";
 import { useLocation } from "wouter";
 
 const menuItems = [
   { icon: LayoutDashboard, label: "Bookings", path: "/" },
   { icon: CalendarDays, label: "Calendar", path: "/calendar" },
+  { icon: Tag, label: "Pricing", path: "/pricing" },
   { icon: RefreshCw, label: "Operations", path: "/sync" },
 ];
 
@@ -156,7 +157,7 @@ function DashboardLayoutContent({
                 <div className="flex items-center gap-2 min-w-0">
                   <Home className="h-4 w-4 text-sidebar-primary shrink-0" />
                   <span className="font-semibold tracking-tight truncate text-sidebar-foreground">
-                    Rental Manager
+                    ReZENwator
                   </span>
                 </div>
               ) : null}

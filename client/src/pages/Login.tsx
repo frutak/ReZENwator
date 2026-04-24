@@ -45,7 +45,7 @@ export default function Login() {
           <div className="mx-auto bg-primary/10 w-12 h-12 rounded-full flex items-center justify-center mb-4">
             <Home className="h-6 w-6 text-primary" />
           </div>
-          <CardTitle className="text-2xl font-bold tracking-tight">Rental Manager</CardTitle>
+          <CardTitle className="text-2xl font-bold tracking-tight">ReZENwator</CardTitle>
           <CardDescription>
             Enter your credentials to access the admin portal
           </CardDescription>

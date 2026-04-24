@@ -227,8 +227,14 @@ export default function BookingDetailModal({
     const total = parseFloat(form.totalPrice) || 0;
     const revenue = parseFloat(form.hostRevenue) || total;
     const paid = parseFloat(form.amountPaid) || 0;
-    return Math.max(0, revenue - paid).toFixed(2);
-  }, [form.hostRevenue, form.totalPrice, form.amountPaid]);
+
+    // For Airbnb and Booking.com, "Balance Due" is what the host expects from the portal (Host Revenue)
+    // For Slowhop and others, it's what the guest still owes (Total Price - Prepayment)
+    if (form.channel === "airbnb" || form.channel === "booking") {
+      return Math.max(0, revenue - paid).toFixed(2);
+    }
+    return Math.max(0, total - paid).toFixed(2);
+  }, [form.hostRevenue, form.totalPrice, form.amountPaid, form.channel]);
 
   const handleSave = () => {
     const parseDateTime = (dateStr: string, timeStr: string) => {

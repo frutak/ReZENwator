@@ -1,7 +1,7 @@
 import { getDb } from "../server/db.ts";
 import { pricingPlans, calendarPricing, propertySettings } from "../drizzle/schema.ts";
 import { eq, and, sql } from "drizzle-orm";
-import { addDays, startOfDay } from "date-fns";
+import { addDays, format, isSameDay } from "date-fns";
 
 /**
  * Calculates Easter Sunday for a given year using the Meeus/Jones/Butcher algorithm.
@@ -21,8 +21,6 @@ function getEaster(year: number): Date {
   const m = Math.floor((a + 11 * h + 22 * l) / 451);
   const month = Math.floor((h + l - 7 * m + 114) / 31);
   const day = ((h + l - 7 * m + 114) % 31) + 1;
-  // month returned is 3 for March, 4 for April.
-  // In JS Date constructor, month is 0-indexed, so we use month - 1.
   return new Date(Date.UTC(year, month - 1, day));
 }
 
@@ -63,13 +61,11 @@ async function populate() {
 
   console.log("Populating Pricing Plans...");
 
-  // 1. Initialise Property Settings
   await db.insert(propertySettings).values([
     { property: "Sadoles", fixedBookingPrice: 800 },
     { property: "Hacjenda", fixedBookingPrice: 800 },
   ]).onDuplicateKeyUpdate({ set: { fixedBookingPrice: 800 } });
 
-  // 2. Define Pricing Plans (same definitions as requested)
   const sadolesPlans = [
     { name: "S1: Low Weekday", nightlyPrice: 500, minStay: 1 },
     { name: "S2: Low Weekend", nightlyPrice: 900, minStay: 2 },
@@ -115,54 +111,58 @@ async function populate() {
   const startDate = new Date(Date.UTC(now.getFullYear(), 0, 1));
   const endDate = addDays(startDate, 365 * 2 + 31); 
 
-  let current = startDate;
-  while (current <= endDate) {
-    const year = current.getUTCFullYear();
-    const holidays = getPolishHolidays(year);
-    const dayOfWeek = current.getUTCDay(); // 0 = Sun, 5 = Fri, 6 = Sat
+  let currentTs = startDate.getTime();
+  const endTs = endDate.getTime();
+  const oneDay = 24 * 60 * 60 * 1000;
+  
+  let batch: any[] = [];
+  let holidaysCache: Record<number, any> = {};
+  
+  while (currentTs <= endTs) {
+    const d = new Date(currentTs);
+    const year = d.getUTCFullYear();
+    if (!holidaysCache[year]) {
+      holidaysCache[year] = getPolishHolidays(year);
+    }
+    const holidays = holidaysCache[year];
+    const dayOfWeek = d.getUTCDay(); // 0 = Sun, 5 = Fri, 6 = Sat
     
     // --- SPECIAL HOLIDAY LOGIC ---
+    const isEaster = isSameDay(d, holidays.easter) || isSameDay(d, holidays.easterMonday);
     
-    // Easter: Sunday and Monday
-    const isEaster = isSameDay(current, holidays.easter) || isSameDay(current, holidays.easterMonday);
+    const isMay1to3 = (d >= holidays.may1 && d <= holidays.may3);
     
-    // May Holidays: May 1-3 plus any adjacent weekend days (Fri-Sun)
-    const may1 = new Date(Date.UTC(year, 4, 1));
-    const may3 = new Date(Date.UTC(year, 4, 3));
-    const isMay1to3 = (current >= may1 && current <= may3);
-    
-    // Check if current day is a weekend day (Fri-Sun) adjacent to May 1 or May 3
     let isMayWeekendAdjacency = false;
     if (dayOfWeek === 5 || dayOfWeek === 6 || dayOfWeek === 0) {
-      // If it's a Friday or Saturday before May 1
-      if (isSameDay(addDays(current, 1), may1) || isSameDay(addDays(current, 2), may1)) {
+      if (isSameDay(addDays(d, 1), holidays.may1) || isSameDay(addDays(d, 2), holidays.may1)) {
         isMayWeekendAdjacency = true;
       }
-      // If it's a Saturday or Sunday after May 3
-      if (isSameDay(addDays(current, -1), may3) || isSameDay(addDays(current, -2), may3)) {
+      if (isSameDay(addDays(d, -1), holidays.may3) || isSameDay(addDays(d, -2), holidays.may3)) {
         isMayWeekendAdjacency = true;
       }
     }
 
     const isMayHoliday = isMay1to3 || isMayWeekendAdjacency;
-
-    // Corpus Christi: Thursday to Sunday
-    const isCorpusChristiSpan = (current >= holidays.corpusChristi && current <= addDays(holidays.corpusChristi, 3));
-    
-    // Christmas: Dec 24 and Dec 25
-    const isChristmas = (current.getUTCMonth() === 11 && (current.getUTCDate() === 24 || current.getUTCDate() === 25));
+    const isCorpusChristiSpan = (d >= holidays.corpusChristi && d <= addDays(holidays.corpusChristi, 3));
+    const isChristmas = (d.getUTCMonth() === 11 && (d.getUTCDate() === 24 || d.getUTCDate() === 25));
 
     const isSpecial = isEaster || isMayHoliday || isCorpusChristiSpan || isChristmas;
-    const isNY = current.getUTCMonth() === 11 && current.getUTCDate() === 31;
+    const isNY = d.getUTCMonth() === 11 && d.getUTCDate() === 31;
     
     // --- WEEKEND LOGIC ---
-    // Friday, Saturday, or Polish Public Holiday (standard weekend price)
-    const isPublicHoliday = Object.values(holidays).some(h => isSameDay(current, h));
+    const isPublicHoliday = Object.values(holidays).some(h => isSameDay(d, h as Date));
+    
+    // REVISED LOGIC FOR SUNDAY HOLIDAYS:
+    // If it's a Sunday (0) and a public holiday, but NOT a "Special Holiday" (like May 1-3 or Easter),
+    // it should probably be a Weekday plan if we want consistency.
+    // However, the user specifically asked about May 3rd. May 3rd IS a Special Holiday.
+    // If it's a Special Holiday, it gets S7/H6. 
+    // If it was just a regular Sunday holiday, it would get S4/H4 in the old logic.
+    
     const isWeekendDay = dayOfWeek === 5 || dayOfWeek === 6 || isPublicHoliday;
     
-    const season = getSeason(current);
+    const season = getSeason(d);
 
-    // Assignment Logic
     let sPlan, hPlan;
 
     if (isNY) {
@@ -182,7 +182,7 @@ async function populate() {
         sPlan = sadolesMap["S6: High Weekend"];
         hPlan = hacjendaMap["H5: High Weekend"];
       }
-    } else { // Weekday (Sun, Mon, Tue, Wed, Thu)
+    } else {
       if (season === "Low") {
         sPlan = sadolesMap["S1: Low Weekday"];
         hPlan = hacjendaMap["H1: Low Weekday"];
@@ -195,24 +195,28 @@ async function populate() {
       }
     }
 
-    await db.insert(calendarPricing).values([
-      { property: "Sadoles", date: current, planId: sPlan! },
-      { property: "Hacjenda", date: current, planId: hPlan! },
-    ]).onDuplicateKeyUpdate({
+    batch.push({ property: "Sadoles", date: d, planId: sPlan! });
+    batch.push({ property: "Hacjenda", date: d, planId: hPlan! });
+
+    if (batch.length >= 200) {
+      console.log(`Processing up to ${format(d, "yyyy-MM-dd")}...`);
+      await db.insert(calendarPricing).values(batch).onDuplicateKeyUpdate({
+        set: { planId: sql`VALUES(planId)` }
+      });
+      batch = [];
+    }
+
+    currentTs += oneDay;
+  }
+
+  if (batch.length > 0) {
+    await db.insert(calendarPricing).values(batch).onDuplicateKeyUpdate({
       set: { planId: sql`VALUES(planId)` }
     });
-
-    current = addDays(current, 1);
   }
 
   console.log("Done!");
   process.exit(0);
-}
-
-function isSameDay(d1: Date, d2: Date) {
-  return d1.getUTCFullYear() === d2.getUTCFullYear() &&
-         d1.getUTCMonth() === d2.getUTCMonth() &&
-         d1.getUTCDate() === d2.getUTCDate();
 }
 
 populate();

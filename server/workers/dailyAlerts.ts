@@ -6,6 +6,7 @@ import { BookingRepository } from "../repositories/BookingRepository";
 import { SyncRepository } from "../repositories/SyncRepository";
 import { GuestEmailRepository } from "../repositories/GuestEmailRepository";
 import { PortalRepository } from "../repositories/PortalRepository";
+import { getGuestName } from "../_core/utils/booking";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -167,7 +168,7 @@ export async function runDailyMaintenance() {
         
         await sendGuestEmail("booking_cancelled_no_payment", b as any);
         
-        const msg = `Booking #${b.id} (${b.guestName || "Unknown"}) auto-cancelled (no payment received for > 5 days)`;
+        const msg = `Booking #${b.id} (${getGuestName(b)}) auto-cancelled (no payment received for > 5 days)`;
         transitions.push(msg);
         console.log(`[DailyAlerts] ${msg}`);
       }
@@ -187,7 +188,7 @@ export async function runDailyMaintenance() {
           "Checkout date passed and booking was fully paid"
         );
         
-        const msg = `Booking #${b.id} (${b.guestName || "Unknown"}) auto-finished (checkout date passed)`;
+        const msg = `Booking #${b.id} (${getGuestName(b)}) auto-finished (checkout date passed)`;
         transitions.push(msg);
         console.log(`[DailyAlerts] ${msg}`);
       }
@@ -300,7 +301,7 @@ async function sendConsolidatedAlertEmail(data: {
   let html = `
     <div style="font-family:sans-serif;max-width:700px;margin:0 auto">
       <div style="background:#1e40af;color:white;padding:16px 24px;border-radius:8px 8px 0 0">
-        <h2 style="margin:0">📅 Daily Operational Summary — Rental Manager</h2>
+        <h2 style="margin:0">📅 Daily Operational Summary — ReZENwator</h2>
       </div>
       <div style="background:#f8fafc;border:1px solid #e2e8f0;padding:16px 24px">
   `;
@@ -404,13 +405,17 @@ async function sendConsolidatedAlertEmail(data: {
       <h4 style="color:#9f1239;margin-bottom:8px">🚨 Bookings Missing Essential Data (Action Required)</h4>
       <p style="font-size:12px;color:#6b7280;margin-top:-4px">Guest email or name is missing. Reminder emails will NOT be sent until fixed (for Airbnb, we allow missing emails and send messages to admin).</p>
       <ul style="font-size:14px;margin-top:0">
-        ${data.bookingsMissingData.map(b => `
+        ${data.bookingsMissingData.map(b => {
+          const name = getGuestName(b);
+          const isNameMissing = name === "Unknown guest";
+          const isEmailMissing = !b.guestEmail && b.channel !== "airbnb";
+          return `
           <li>
-            <strong>${b.property}</strong>: ${b.guestName || "<i>Name missing</i>"} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)}) 
-            — ${!b.guestEmail && b.channel !== "airbnb" ? "<span style='color:#9f1239'>Email missing</span>" : ""}
-            ${!b.guestName ? "<span style='color:#9f1239'>Name missing</span>" : ""}
+            <strong>${b.property}</strong>: ${name} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)}) 
+            — ${isEmailMissing ? "<span style='color:#9f1239'>Email missing</span>" : ""}
+            ${isNameMissing ? "<span style='color:#9f1239'>Name missing</span>" : ""}
           </li>
-        `).join("")}
+        `}).join("")}
       </ul>
     `;
   }
@@ -419,7 +424,7 @@ async function sendConsolidatedAlertEmail(data: {
     html += `
       <h4 style="color:#9f1239;margin-bottom:8px">⚠️ Stale Pending Bookings (> 48h)</h4>
       <ul style="font-size:14px;margin-top:0">
-        ${data.stalePending.map(b => `<li><strong>${b.property}</strong>: ${b.guestName || "Unknown"} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)}) - Created: ${fmtDate(b.createdAt)}</li>`).join("")}
+        ${data.stalePending.map(b => `<li><strong>${b.property}</strong>: ${getGuestName(b)} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)}) - Created: ${fmtDate(b.createdAt)}</li>`).join("")}
       </ul>
     `;
   }
@@ -428,7 +433,7 @@ async function sendConsolidatedAlertEmail(data: {
     html += `
       <h4 style="color:#b45309;margin-bottom:8px">⏳ Upcoming Unpaid Bookings (starts within 7 days)</h4>
       <ul style="font-size:14px;margin-top:0">
-        ${data.upcomingUnpaid.map(b => `<li><strong>${b.property}</strong>: ${b.guestName || "Unknown"} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)}) - Channel: ${b.channel}</li>`).join("")}
+        ${data.upcomingUnpaid.map(b => `<li><strong>${b.property}</strong>: ${getGuestName(b)} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)}) - Channel: ${b.channel}</li>`).join("")}
       </ul>
     `;
   }
@@ -437,7 +442,7 @@ async function sendConsolidatedAlertEmail(data: {
     html += `
       <h4 style="color:#b45309;margin-bottom:8px">💰 Missing Security Deposits (starts within 7 days)</h4>
       <ul style="font-size:14px;margin-top:0">
-        ${data.upcomingPendingDeposits.map(b => `<li><strong>${b.property}</strong>: ${b.guestName || "Unknown"} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)})</li>`).join("")}
+        ${data.upcomingPendingDeposits.map(b => `<li><strong>${b.property}</strong>: ${getGuestName(b)} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)})</li>`).join("")}
       </ul>
     `;
   }
@@ -447,7 +452,7 @@ async function sendConsolidatedAlertEmail(data: {
       <h4 style="color:#9f1239;margin-bottom:8px">💰 Missing Portal Payouts (> 7 days after checkout)</h4>
       <p style="font-size:12px;color:#6b7280;margin-top:-4px">Please check if money arrived and move to finished manually.</p>
       <ul style="font-size:14px;margin-top:0">
-        ${data.stalePortalPaid.map(b => `<li><strong>${b.property}</strong>: ${b.guestName || "Unknown"} (checkout: ${fmtDate(b.checkOut)}) - Channel: ${b.channel}</li>`).join("")}
+        ${data.stalePortalPaid.map(b => `<li><strong>${b.property}</strong>: ${getGuestName(b)} (checkout: ${fmtDate(b.checkOut)}) - Channel: ${b.channel}</li>`).join("")}
       </ul>
     `;
   }
@@ -456,7 +461,7 @@ async function sendConsolidatedAlertEmail(data: {
     html += `
       <h4 style="color:#15803d;margin-bottom:8px">💰 Deposits to Refund (finished bookings)</h4>
       <ul style="font-size:14px;margin-top:0">
-        ${data.depositsToReturn.map(b => `<li><strong>${b.property}</strong>: ${b.guestName || "Unknown"} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)})</li>`).join("")}
+        ${data.depositsToReturn.map(b => `<li><strong>${b.property}</strong>: ${getGuestName(b)} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)})</li>`).join("")}
       </ul>
     `;
   }
@@ -468,7 +473,7 @@ async function sendConsolidatedAlertEmail(data: {
   html += `
         <hr style="border:0;border-top:1px solid #e2e8f0;margin:20px 0" />
         <p style="font-size:12px;color:#6b7280">
-          Sent automatically by Rental Manager to ${adminEmail}
+          Sent automatically by ReZENwator to ${adminEmail}
         </p>
       </div>
     </div>
@@ -479,7 +484,7 @@ async function sendConsolidatedAlertEmail(data: {
 
   try {
     await transporter.sendMail({
-      from: `"Rental Manager" <${GMAIL_USER}>`,
+      from: `"ReZENwator" <${GMAIL_USER}>`,
       to: adminEmail,
       subject: `📅 Daily Report: ${totalErrors} errors, ${data.guestEmailSummary.sentCount} emails sent, ${totalItems} tasks`,
       html,

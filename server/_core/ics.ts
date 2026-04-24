@@ -8,7 +8,7 @@ export function generateIcalString(property: string, bookings: Booking[]): strin
   const lines = [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
-    "PRODID:-//Rental Manager//Guest Portal//EN",
+    "PRODID:-//ReZENwator//Guest Portal//EN",
     "CALSCALE:GREGORIAN",
     "METHOD:PUBLISH",
     `X-WR-CALNAME:${property} Bookings`,
@@ -17,7 +17,7 @@ export function generateIcalString(property: string, bookings: Booking[]): strin
   for (const b of bookings) {
     const start = format(new Date(b.checkIn), "yyyyMMdd");
     const end = format(new Date(b.checkOut), "yyyyMMdd");
-    const uid = b.icalUid || `manual-${b.id}@rental-manager`;
+    const uid = b.icalUid || `manual-${b.id}@rezenwator`;
     const summary = b.guestName ? `Reserved: ${b.guestName}` : "Reserved";
 
     lines.push("BEGIN:VEVENT");

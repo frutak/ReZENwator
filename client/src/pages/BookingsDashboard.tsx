@@ -32,7 +32,7 @@ import BookingDetailModal from "@/components/BookingDetailModal";
 import { StatusBadge, DepositBadge, ChannelBadge } from "@/components/ui/badges";
 import { Booking } from "@shared/types";
 import { DoubleBookingBanner } from "@/components/DoubleBookingBanner";
-import { cn } from "@/lib/utils";
+import { cn, getGuestName } from "@/lib/utils";
 
 // ─── Sort helpers ─────────────────────────────────────────────────────────────
 
@@ -187,7 +187,7 @@ export default function BookingsDashboard() {
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       list = list.filter(b => 
-        b.guestName?.toLowerCase().includes(q) || 
+        getGuestName(b).toLowerCase().includes(q) || 
         b.property?.toLowerCase().includes(q) ||
         b.channel?.toLowerCase().includes(q)
       );
@@ -199,7 +199,7 @@ export default function BookingsDashboard() {
       switch (sortKey) {
         case "property":      aVal = a.property ?? ""; bVal = b.property ?? ""; break;
         case "channel":       aVal = a.channel ?? ""; bVal = b.channel ?? ""; break;
-        case "guestName":     aVal = a.guestName ?? ""; bVal = b.guestName ?? ""; break;
+        case "guestName":     aVal = getGuestName(a); bVal = getGuestName(b); break;
         case "checkIn":       aVal = new Date(a.checkIn).getTime(); bVal = new Date(b.checkIn).getTime(); break;
         case "checkOut":      aVal = new Date(a.checkOut).getTime(); bVal = new Date(b.checkOut).getTime(); break;
         case "nights":        aVal = nightsCount(a); bVal = nightsCount(b); break;
@@ -382,7 +382,7 @@ export default function BookingsDashboard() {
                           </div>
                         </td>
                         <td className="px-6 py-4">
-                          <div className="font-semibold text-foreground">{b.guestName || "Unknown Guest"}</div>
+                          <div className="font-semibold text-foreground">{getGuestName(b)}</div>
                           <div className="text-xs text-muted-foreground mt-1 flex items-center gap-1.5">
                             {b.guestCountry && (
                               <>

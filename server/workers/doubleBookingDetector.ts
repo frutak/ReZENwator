@@ -51,6 +51,18 @@ export async function detectDoubleBookings(): Promise<DoubleBookingConflict[]> {
       const bOut = new Date(b.checkOut).getTime();
 
       if (aIn < bOut && bIn < aOut) {
+        // 6-hour gap rule: if it's a same-day turnover, check if there's at least 6h gap
+        // Case 1: A ends, B starts
+        if (aOut <= bIn) {
+          const gap = bIn - aOut;
+          if (gap >= 6 * 60 * 60 * 1000) continue;
+        }
+        // Case 2: B ends, A starts
+        if (bOut <= aIn) {
+          const gap = aIn - bOut;
+          if (gap >= 6 * 60 * 60 * 1000) continue;
+        }
+
         const key = [Math.min(a.id, b.id), Math.max(a.id, b.id)].join("-");
         if (!seen.has(key)) {
           seen.add(key);
@@ -123,7 +135,7 @@ Conflict ${i + 1}: ${c.property}
   const html = `
     <div style="font-family:sans-serif;max-width:700px;margin:0 auto">
       <div style="background:#9f1239;color:white;padding:16px 24px;border-radius:8px 8px 0 0">
-        <h2 style="margin:0">⚠️ Double-Booking Alert — Rental Manager</h2>
+        <h2 style="margin:0">⚠️ Double-Booking Alert — ReZENwator</h2>
       </div>
       <div style="background:#fff7f7;border:1px solid #fca5a5;padding:16px 24px">
         <p style="margin:0 0 12px">
@@ -142,7 +154,7 @@ Conflict ${i + 1}: ${c.property}
           <tbody>${htmlLines}</tbody>
         </table>
         <p style="margin:16px 0 0;font-size:12px;color:#6b7280">
-          Sent automatically by Rental Manager · ${gmailUser}
+          Sent automatically by ReZENwator · ${gmailUser}
         </p>
       </div>
     </div>
@@ -150,7 +162,7 @@ Conflict ${i + 1}: ${c.property}
 
   try {
     await transporter.sendMail({
-      from: `"Rental Manager" <${gmailUser}>`,
+      from: `"ReZENwator" <${gmailUser}>`,
       to: adminEmail,
       subject: `⚠️ DOUBLE BOOKING DETECTED — ${conflicts.length} conflict${conflicts.length > 1 ? "s" : ""} on ${conflicts[0].property}`,
       text: `Double-booking alert!\n\n${conflictLines}`,

@@ -196,6 +196,7 @@ async function handleSlowhopS2(data: ParsedBookingData, testMode: boolean): Prom
       status: "confirmed",
       commission: data.commission ? String(data.commission) : match.commission,
       hostRevenue: data.hostRevenue ? String(data.hostRevenue) : match.hostRevenue,
+      amountPaid: data.amountPaid ? String(data.amountPaid) : match.amountPaid,
       reservationFee: data.amountPaid ? String(data.amountPaid) : match.reservationFee,
     });
     

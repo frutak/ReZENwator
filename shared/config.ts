@@ -1,5 +1,5 @@
 /**
- * Centralized business configuration for the Rental Manager.
+ * Centralized business configuration for the ReZENwator.
  * Adding a new property or channel here will update types across the system.
  */
 

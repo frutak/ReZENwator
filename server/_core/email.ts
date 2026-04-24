@@ -5,6 +5,8 @@ import { SettingRepository } from "../repositories/SettingRepository";
 import { ENV } from "./env";
 import { PdfGeneratorService } from "../services/PdfGeneratorService";
 import { EmailTemplateService, type GuestEmailType, type EmailTemplate } from "../services/EmailTemplateService";
+import { GuestEmailRepository } from "../repositories/GuestEmailRepository";
+import { getGuestName } from "./utils/booking";
 
 export { type GuestEmailType, type EmailTemplate };
 
@@ -31,23 +33,33 @@ export async function getRecipientForEmail(type: GuestEmailType | "alert", booki
 }
 
 export async function sendGuestEmail(type: GuestEmailType, booking: Booking, extraData?: any): Promise<{ success: boolean; recipient: string }> {
-  // Global safeguard: if guest name or email is missing, do not send the email
+  console.log(`[Email] Starting sendGuestEmail for type: ${type}, Booking: #${booking.id}`);
+  
+  // Global safeguard: if guest name/email is missing, do not send the email
   // (unless it's specifically a missing_data_alert which is intended for the admin)
-  // Exception: Airbnb bookings don't have guest email, so we allow them
-  const isMissingEssential = !booking.guestName || (!booking.guestEmail && booking.channel !== "airbnb");
+  // For business or production bookings, we allow companyName instead of guestName
+  const displayName = getGuestName(booking);
+  const isMissingEssential = (!displayName || displayName === "Unknown guest") || (!booking.guestEmail && booking.channel !== "airbnb");
+  
   if (type !== "missing_data_alert" && isMissingEssential) {
-    console.log(`[Email] Skipping guest email ${type} for booking #${booking.id} due to missing essential data (Name: ${booking.guestName || "Missing"}, Email: ${booking.guestEmail || "Missing"})`);
+    console.log(`[Email] Skipping guest email ${type} for booking #${booking.id} due to missing essential data (Display Name: ${displayName}, Email: ${booking.guestEmail || "Missing"})`);
     return { success: false, recipient: "N/A" };
   }
 
   const transporter = getTransporter();
   const recipient = await getRecipientForEmail(type, booking);
-  if (!transporter) return { success: false, recipient };
+  console.log(`[Email] Recipient resolved to: ${recipient}`);
+  
+  if (!transporter) {
+    console.warn(`[Email] No transporter available for booking #${booking.id}`);
+    return { success: false, recipient };
+  }
 
   let template: EmailTemplate;
   let language: "PL" | "EN";
   
   if (!booking.guestCountry) {
+    console.log(`[Email] No guestCountry for booking #${booking.id}, using dual language mode`);
     // Dual language mode: Polish on top, English underneath
     const templatePL = EmailTemplateService.getTemplates(type, booking, "PL", extraData);
     const templateEN = EmailTemplateService.getTemplates(type, booking, "EN", extraData);
@@ -66,7 +78,8 @@ export async function sendGuestEmail(type: GuestEmailType, booking: Booking, ext
     };
     language = "PL"; // Default language for attachments/PDFs
   } else {
-    language = booking.guestCountry === "PL" ? "PL" : "EN";
+    language = booking.guestCountry.toUpperCase() === "PL" ? "PL" : "EN";
+    console.log(`[Email] Using language ${language} for booking #${booking.id}`);
     template = EmailTemplateService.getTemplates(type, booking, language, extraData);
   }
 
@@ -74,25 +87,36 @@ export async function sendGuestEmail(type: GuestEmailType, booking: Booking, ext
 
   const attachments = [];
   if (type === "booking_pending") {
-    const pdfBuffer = await PdfGeneratorService.generateContractPDF(booking, language);
-    attachments.push({
-      filename: language === "PL" 
-        ? `Umowa_Najmu_${booking.property}_${format(new Date(booking.checkIn), "yyyy-MM-dd")}.pdf`
-        : `Rental_Agreement_${booking.property}_${format(new Date(booking.checkIn), "yyyy-MM-dd")}.pdf`,
-      content: pdfBuffer,
-    });
-    
-    // If dual language, also attach English version of the contract if it's booking_pending
-    if (!booking.guestCountry) {
-      const pdfBufferEN = await PdfGeneratorService.generateContractPDF(booking, "EN");
+    console.log(`[Email] Generating PDF contract for booking #${booking.id} in ${language}`);
+    try {
+      const pdfBuffer = await PdfGeneratorService.generateContractPDF(booking, language);
+      console.log(`[Email] PDF generated successfully, size: ${pdfBuffer.length} bytes`);
       attachments.push({
-        filename: `Rental_Agreement_${booking.property}_${format(new Date(booking.checkIn), "yyyy-MM-dd")}.pdf`,
-        content: pdfBufferEN,
+        filename: language === "PL" 
+          ? `Umowa_Najmu_${booking.property}_${format(new Date(booking.checkIn), "yyyy-MM-dd")}.pdf`
+          : `Rental_Agreement_${booking.property}_${format(new Date(booking.checkIn), "yyyy-MM-dd")}.pdf`,
+        content: pdfBuffer,
       });
+      
+      // If dual language, also attach English version of the contract if it's booking_pending
+      if (!booking.guestCountry) {
+        console.log(`[Email] Attaching additional English contract for dual language mode`);
+        const pdfBufferEN = await PdfGeneratorService.generateContractPDF(booking, "EN");
+        attachments.push({
+          filename: `Rental_Agreement_${booking.property}_${format(new Date(booking.checkIn), "yyyy-MM-dd")}.pdf`,
+          content: pdfBufferEN,
+        });
+      }
+    } catch (pdfErr) {
+      console.error(`[Email] PDF generation failed for booking #${booking.id}:`, pdfErr);
+      // We continue but the email might be missing attachments or we might choose to fail here
+      // For now, let's let it fail the whole email if PDF is critical for pending status
+      throw pdfErr;
     }
   }
 
   try {
+    console.log(`[Email] Attempting to sendMail to ${recipient}...`);
     await transporter.sendMail({
       from: `"${fromName}" <${GMAIL_USER}>`,
       to: recipient,
@@ -100,10 +124,38 @@ export async function sendGuestEmail(type: GuestEmailType, booking: Booking, ext
       html: template.html,
       attachments,
     });
+    
+    // Log success
+    try {
+      await GuestEmailRepository.insertEmailLog({
+        bookingId: booking.id,
+        emailType: type,
+        recipient,
+        success: "true",
+      });
+    } catch (logErr) {
+      console.warn(`[Email] Failed to log email success for booking #${booking.id} to DB (possibly schema mismatch):`, logErr);
+    }
+
     console.log(`[Email] Sent ${type} for booking #${booking.id} to ${recipient} with ${attachments.length} attachments`);
     return { success: true, recipient };
   } catch (err) {
+    const errorMsg = String(err);
     console.error(`[Email] Failed to send ${type} for booking #${booking.id}:`, err);
+    
+    // Log failure
+    try {
+      await GuestEmailRepository.insertEmailLog({
+        bookingId: booking.id,
+        emailType: type,
+        recipient,
+        success: "false",
+        errorMessage: errorMsg,
+      });
+    } catch (logErr) {
+      console.warn(`[Email] Failed to log email failure for booking #${booking.id} to DB:`, logErr);
+    }
+    
     return { success: false, recipient };
   }
 }
@@ -115,7 +167,7 @@ export async function sendAlertEmail(subject: string, text: string): Promise<boo
 
   try {
     await transporter.sendMail({
-      from: `"Rental Manager" <${GMAIL_USER}>`,
+      from: `"ReZENwator" <${GMAIL_USER}>`,
       to: adminEmail,
       subject,
       text,
@@ -165,7 +217,7 @@ export async function forwardUnmatchedEmail(
 
   try {
     await transporter.sendMail({
-      from: `"Rental Manager" <${GMAIL_USER}>`,
+      from: `"ReZENwator" <${GMAIL_USER}>`,
       to: adminEmail,
       subject: `Fwd: [${reason.toUpperCase()}] ${email.subject}`,
       text,

@@ -1,0 +1,1 @@
+ALTER TABLE `guest_emails` MODIFY COLUMN `emailType` enum('booking_pending','booking_confirmed','booking_cancelled_no_payment','arrival_reminder','stay_finished','missing_data_alert') NOT NULL;

@@ -1,10 +1,5 @@
-import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
-import { type Booking } from "@shared/types";
 
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
+import { type Booking } from "../../drizzle/schema";
 
 /**
  * Utility to get a display name for a guest/booking.

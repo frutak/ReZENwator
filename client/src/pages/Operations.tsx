@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { toast } from "sonner";
-import { RefreshCw, Mail, CheckCircle2, XCircle, FileText, Download } from "lucide-react";
+import { RefreshCw, Mail, CheckCircle2, XCircle, FileText, Download, Star } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 
 export default function Operations() {
@@ -46,6 +46,16 @@ export default function Operations() {
       );
     },
     onError: (e) => toast.error(`Email check failed: ${e.message}`),
+  });
+
+  const triggerRatings = trpc.sync.triggerRatings.useMutation({
+    onSuccess: () => {
+      utils.sync.logs.invalidate();
+      utils.sync.lastRun.invalidate();
+      utils.portal.getRatings.invalidate();
+      toast.success("Ratings update complete");
+    },
+    onError: (e) => toast.error(`Ratings update failed: ${e.message}`),
   });
 
   const handleDownloadTaxReport = async () => {
@@ -170,7 +180,7 @@ export default function Operations() {
         </Card>
 
         {/* Last run summary */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
           <Card className="border-0 shadow-sm">
             <CardContent className="p-4">
               <div className="flex items-center justify-between mb-3">
@@ -213,7 +223,7 @@ export default function Operations() {
                   onClick={() => triggerEmail.mutate()}
                   disabled={triggerEmail.isPending}
                 >
-                  <Mail className="h-3.5 w-3.5 mr-1.5" />
+                  <Mail className={`h-3.5 w-3.5 mr-1.5 ${triggerEmail.isPending ? "animate-spin" : ""}`} />
                   {triggerEmail.isPending ? "Checking..." : "Check Now"}
                 </Button>
               </div>
@@ -224,6 +234,34 @@ export default function Operations() {
               </p>
               <p className="text-xs text-muted-foreground mt-0.5">
                 Inbox: {import.meta.env.VITE_GMAIL_USER || "configured-email@example.com"}
+              </p>
+            </CardContent>
+          </Card>
+
+          <Card className="border-0 shadow-sm">
+            <CardContent className="p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <Star className="h-4 w-4 text-primary" />
+                  <span className="font-medium">Ratings Update</span>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => triggerRatings.mutate()}
+                  disabled={triggerRatings.isPending}
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${triggerRatings.isPending ? "animate-spin" : ""}`} />
+                  {triggerRatings.isPending ? "Updating..." : "Update Now"}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {lastRun?.ratings
+                  ? `Last run: ${formatDistanceToNow(new Date(lastRun.ratings), { addSuffix: true })}`
+                  : "Never run"}
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Schedule: every Sunday
               </p>
             </CardContent>
           </Card>
