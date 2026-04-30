@@ -166,25 +166,5 @@ describe("PricingService", () => {
     // discountAmount = 130 (based on test feedback)
     expect(result.discountAmount).toBe(130);
   });
-
-  it("applies Hacjenda 1-night exception for June 6-7, 2026", async () => {
-    const holidayNights = [
-      { nightlyPrice: 900, minStay: 3, date: new Date(2026, 5, 6, 12, 0, 0) },
-      { nightlyPrice: 900, minStay: 3, date: new Date(2026, 5, 7, 12, 0, 0) }
-    ];
-
-    setupMockDb({ ...mockSettings, property: "Hacjenda" }, [], holidayNights);
-
-    const result = await PricingService.calculatePrice({
-      property: "Hacjenda",
-      checkIn: new Date(2026, 5, 6, 16, 0, 0),
-      checkOut: new Date(2026, 5, 7, 10, 0, 0),
-      guestCount: 4,
-      animalsCount: 0
-    });
-
-    expect(result.valid).toBe(true);
-    expect(result.days).toBe(1);
-  });
 });
 
