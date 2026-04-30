@@ -95,6 +95,16 @@ export class PricingService {
       throw new Error(`Pricing data missing for selected dates (requested ${pricingDays}, found ${nights.length})`);
     }
 
+    // Apply special exceptions (e.g. 1-night stay for specific holiday dates)
+    if (property === "Hacjenda") {
+      nights.forEach(n => {
+        const dStr = format(n.date, "yyyy-MM-dd");
+        if (dStr === "2026-06-06" || dStr === "2026-06-07") {
+          n.minStay = 1;
+        }
+      });
+    }
+
     // Check min stay
     const violatedMinStay = nights.find(n => pricingDays < n.minStay);
     if (violatedMinStay) {
