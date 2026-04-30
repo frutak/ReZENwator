@@ -1,9 +1,10 @@
 import { and, desc, eq, gte, lte, ne, inArray, or, sql, isNull, lt, notInArray } from "drizzle-orm";
-import { format } from "date-fns";
+import { format, startOfDay } from "date-fns";
 import { getDb } from "../db";
 import { bookings, bookingActivities } from "../../drizzle/schema";
 import { Logger } from "../_core/logger";
 import { type Property, type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
+import { CleaningService } from "../services/CleaningService";
 
 export type BookingFilters = {
   property?: Property;
@@ -392,6 +393,21 @@ export class BookingRepository {
   static async updateBookingDetails(id: number, details: Partial<typeof bookings.$inferInsert>) {
     const db = await getDb();
     if (!db) return;
+
+    // Check for cleaning conflicts if dates or property change
+    if (details.checkIn || details.checkOut || details.property) {
+      const current = await this.getBookingById(id);
+      if (current) {
+        const prop = (details.property as Property) || current.property;
+        const cin = details.checkIn ? new Date(details.checkIn) : new Date(current.checkIn);
+        const cout = details.checkOut ? new Date(details.checkOut) : new Date(current.checkOut);
+        
+        CleaningService.checkCleaningConflicts(prop, cin, cout, id || (current as any).id).catch(err => 
+          console.error("[CleaningService] Background conflict check failed:", err)
+        );
+      }
+    }
+
     await db.update(bookings).set(details).where(eq(bookings.id, id));
   }
 
@@ -404,6 +420,18 @@ export class BookingRepository {
   static async insertBooking(values: typeof bookings.$inferInsert) {
     const db = await getDb();
     if (!db) throw new Error("Database not available");
+
+    // Check for cleaning conflicts
+    if (values.property && values.checkIn && values.checkOut) {
+      CleaningService.checkCleaningConflicts(
+        values.property as Property, 
+        new Date(values.checkIn), 
+        new Date(values.checkOut)
+      ).catch(err => 
+        console.error("[CleaningService] Background conflict check failed:", err)
+      );
+    }
+
     return db.insert(bookings).values(values);
   }
 
@@ -417,6 +445,21 @@ export class BookingRepository {
   static async updateIcalBooking(icalUid: string, data: Partial<typeof bookings.$inferInsert>) {
     const db = await getDb();
     if (!db) return;
+
+    // Check for cleaning conflicts if dates or property change
+    if (data.checkIn || data.checkOut || data.property) {
+      const current = await this.getBookingByIcalUid(icalUid);
+      if (current) {
+        const prop = (data.property as Property) || current.property;
+        const cin = data.checkIn ? new Date(data.checkIn) : new Date(current.checkIn);
+        const cout = data.checkOut ? new Date(data.checkOut) : new Date(current.checkOut);
+        
+        CleaningService.checkCleaningConflicts(prop, cin, cout, current.id).catch(err => 
+          console.error("[CleaningService] Background conflict check failed:", err)
+        );
+      }
+    }
+
     await db.update(bookings).set(data).where(eq(bookings.icalUid, icalUid));
   }
 

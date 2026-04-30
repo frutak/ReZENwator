@@ -2,8 +2,10 @@ import { trpc } from "@/lib/trpc";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { AlertTriangle } from "lucide-react";
 import { format } from "date-fns";
+import { useLanguage } from "@/contexts/LanguageContext";
 
 export function DoubleBookingBanner() {
+  const { t } = useLanguage();
   const { data: conflicts = [] } = trpc.bookings.doubleBookings.useQuery(undefined, {
     refetchInterval: 60000, // Refresh every minute
   });
@@ -14,10 +16,10 @@ export function DoubleBookingBanner() {
     <Alert variant="destructive" className="mb-6 bg-red-50 dark:bg-red-900/10 border-red-200 dark:border-red-800">
       <AlertTriangle className="h-5 w-5 text-red-600" />
       <AlertTitle className="text-red-800 dark:text-red-400 font-bold">
-        ⚠️ Double-Booking Detected ({conflicts.length})
+        ⚠️ {t("alert.double_booking")} ({conflicts.length})
       </AlertTitle>
       <AlertDescription className="text-red-700 dark:text-red-300 mt-1">
-        There are overlapping bookings on the same property. Please review the following conflicts:
+        {t("alert.double_booking_desc")}
         <ul className="mt-2 list-disc list-inside space-y-1 text-sm">
           {conflicts.map((c, i) => (
             <li key={i}>

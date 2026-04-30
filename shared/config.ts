@@ -14,3 +14,6 @@ export type BookingStatus = typeof STATUSES[number];
 
 export const DEPOSIT_STATUSES = ["pending", "paid", "returned", "not_applicable"] as const;
 export type DepositStatus = typeof DEPOSIT_STATUSES[number];
+
+export const CLEANING_STAFF = ["Ala", "Krysia"] as const;
+export type CleaningStaff = typeof CLEANING_STAFF[number];

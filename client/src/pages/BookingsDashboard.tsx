@@ -33,6 +33,7 @@ import { StatusBadge, DepositBadge, ChannelBadge } from "@/components/ui/badges"
 import { Booking } from "@shared/types";
 import { DoubleBookingBanner } from "@/components/DoubleBookingBanner";
 import { cn, getGuestName } from "@/lib/utils";
+import { useLanguage } from "@/contexts/LanguageContext";
 
 // ─── Sort helpers ─────────────────────────────────────────────────────────────
 
@@ -49,6 +50,7 @@ function SortIcon({ col, sortKey, sortDir }: { col: SortKey; sortKey: SortKey; s
 // ─── Stats Cards ──────────────────────────────────────────────────────────────
 
 function StatsCards({ filters }: { filters: { property?: string; channel?: string; status?: string; timeRange?: string } }) {
+  const { t } = useLanguage();
   const allExceptCancelled: ("pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")[] = ["pending", "confirmed", "portal_paid", "paid", "finished"];
   const activeStatuses: ("pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")[] = ["pending", "confirmed", "portal_paid", "paid"];
   
@@ -68,24 +70,24 @@ function StatsCards({ filters }: { filters: { property?: string; channel?: strin
   if (!stats) return null;
 
   const rangeLabel =
-    filters.timeRange === "month" ? "Month" :
-    filters.timeRange === "next_month" ? "Next Month" :
-    filters.timeRange === "3months" ? "3 Months" :
-    filters.timeRange === "6months" ? "6 Months" :
-    filters.timeRange === "all" ? "All Time" : "2026";
+    filters.timeRange === "month" ? t("dashboard.filter_time") :
+    filters.timeRange === "next_month" ? t("dashboard.filter_time") :
+    filters.timeRange === "3months" ? t("dashboard.filter_time") :
+    filters.timeRange === "6months" ? t("dashboard.filter_time") :
+    filters.timeRange === "all" ? t("dashboard.filter_all") : "2026";
 
   const statusLabel = 
-    filters.status === "active" ? "Active" :
-    filters.status === "all" ? "All" :
-    filters.status ? filters.status.charAt(0).toUpperCase() + filters.status.slice(1).replace("_", " ") : "All";
+    filters.status === "active" ? t("dashboard.filter_status") :
+    filters.status === "all" ? t("dashboard.filter_all") :
+    filters.status ? filters.status.charAt(0).toUpperCase() + filters.status.slice(1).replace("_", " ") : t("dashboard.filter_all");
 
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
       {[
-        { label: `Total (${statusLabel})`, value: stats.total, icon: Calendar, color: "bg-blue-50 text-blue-600 dark:bg-blue-900/20" },
-        { label: "Upcoming", value: stats.upcoming, icon: Clock, color: "bg-amber-50 text-amber-600 dark:bg-amber-900/20" },
-        { label: "Fully Paid", value: stats.paid, icon: CheckCircle2, color: "bg-green-50 text-green-600 dark:bg-green-900/20" },
-        { label: `Revenue (${rangeLabel})`, value: `${stats.totalRevenue.toLocaleString("pl-PL")} PLN`, icon: TrendingUp, color: "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20" },
+        { label: `${t("dashboard.filter_all")} (${statusLabel})`, value: stats.total, icon: Calendar, color: "bg-blue-50 text-blue-600 dark:bg-blue-900/20" },
+        { label: t("dashboard.pending_deposits"), value: stats.upcoming, icon: Clock, color: "bg-amber-50 text-amber-600 dark:bg-amber-900/20" },
+        { label: t("dashboard.confirmed_bookings"), value: stats.paid, icon: CheckCircle2, color: "bg-green-50 text-green-600 dark:bg-green-900/20" },
+        { label: `${t("dashboard.total_revenue")} (${rangeLabel})`, value: `${stats.totalRevenue.toLocaleString("pl-PL")} PLN`, icon: TrendingUp, color: "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20" },
       ].map((stat, i) => (
         <Card key={i} className="overflow-hidden border-0 shadow-sm transition-all hover:shadow-md">
           <CardContent className="p-5 flex items-center gap-4">
@@ -105,6 +107,7 @@ function StatsCards({ filters }: { filters: { property?: string; channel?: strin
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 
 export default function BookingsDashboard() {
+  const { t } = useLanguage();
   const [property, setProperty] = useState<string>("all");
   const [channel, setChannel] = useState<string>("all");
   const [status, setStatus] = useState<string>("active");
@@ -218,9 +221,9 @@ export default function BookingsDashboard() {
       <div className="flex flex-col gap-6 max-w-7xl mx-auto">
         <header className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b pb-6">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight text-foreground">Bookings</h1>
+            <h1 className="text-3xl font-bold tracking-tight text-foreground">{t("dashboard.title")}</h1>
             <p className="text-muted-foreground mt-1">
-              Manage your property reservations across all channels.
+              {t("dashboard.subtitle")}
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -231,7 +234,7 @@ export default function BookingsDashboard() {
               disabled={triggerEmail.isPending}
             >
               <Mail className="h-4 w-4 mr-2" />
-              {triggerEmail.isPending ? "Checking..." : "Check Email"}
+              {triggerEmail.isPending ? t("common.loading") : t("dashboard.check_email")}
             </Button>
             <Button
               className="shadow-sm"
@@ -241,7 +244,7 @@ export default function BookingsDashboard() {
               <RefreshCw
                 className={cn("h-4 w-4 mr-2", triggerIcal.isPending && "animate-spin")}
               />
-              {triggerIcal.isPending ? "Syncing..." : "Sync iCal"}
+              {triggerIcal.isPending ? t("common.loading") : t("dashboard.check_ical")}
             </Button>
           </div>
         </header>
@@ -256,7 +259,7 @@ export default function BookingsDashboard() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <input
                 type="text"
-                placeholder="Search guest, property or channel..."
+                placeholder={t("dashboard.new_booking") + "..."}
                 className="w-full pl-10 h-10 border rounded-lg bg-background focus:ring-2 focus:ring-primary/20 focus:outline-none transition-all"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -265,28 +268,28 @@ export default function BookingsDashboard() {
             
             <div className="flex flex-wrap items-center gap-2">
               <div className="flex items-center gap-2 mr-2 text-sm font-medium text-muted-foreground">
-                <Filter className="h-4 w-4" /> Filters:
+                <Filter className="h-4 w-4" /> {t("dashboard.filter_all")}:
               </div>
               <Select value={timeRange} onValueChange={setTimeRange}>
                 <SelectTrigger className="h-9 w-40 text-sm border-0 bg-secondary/50 hover:bg-secondary transition-colors">
-                  <SelectValue placeholder="Time Range" />
+                  <SelectValue placeholder={t("dashboard.filter_time")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="month">This Month</SelectItem>
-                  <SelectItem value="next_month">Next Month</SelectItem>
-                  <SelectItem value="3months">Next 3 Months</SelectItem>
-                  <SelectItem value="6months">Next 6 Months</SelectItem>
-                  <SelectItem value="year">This Year (2026)</SelectItem>
-                  <SelectItem value="all">All Time</SelectItem>
+                  <SelectItem value="month">{t("dashboard.filter_time")}</SelectItem>
+                  <SelectItem value="next_month">{t("dashboard.filter_time")}</SelectItem>
+                  <SelectItem value="3months">{t("dashboard.filter_time")}</SelectItem>
+                  <SelectItem value="6months">{t("dashboard.filter_time")}</SelectItem>
+                  <SelectItem value="year">{t("dashboard.filter_time")} (2026)</SelectItem>
+                  <SelectItem value="all">{t("dashboard.filter_all")}</SelectItem>
                 </SelectContent>
               </Select>
 
               <Select value={property} onValueChange={setProperty}>
                 <SelectTrigger className="h-9 w-40 text-sm border-0 bg-secondary/50 hover:bg-secondary transition-colors">
-                  <SelectValue placeholder="Property" />
+                  <SelectValue placeholder={t("dashboard.filter_property")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">All Properties</SelectItem>
+                  <SelectItem value="all">{t("dashboard.filter_all")}</SelectItem>
                   <SelectItem value="Sadoles">Sadoleś</SelectItem>
                   <SelectItem value="Hacjenda">Hacjenda</SelectItem>
                 </SelectContent>
@@ -294,10 +297,10 @@ export default function BookingsDashboard() {
 
               <Select value={channel} onValueChange={setChannel}>
                 <SelectTrigger className="h-9 w-40 text-sm border-0 bg-secondary/50 hover:bg-secondary transition-colors">
-                  <SelectValue placeholder="Channel" />
+                  <SelectValue placeholder={t("dashboard.filter_channel")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">All Channels</SelectItem>
+                  <SelectItem value="all">{t("dashboard.filter_all")}</SelectItem>
                   <SelectItem value="slowhop">Slowhop</SelectItem>
                   <SelectItem value="airbnb">Airbnb</SelectItem>
                   <SelectItem value="booking">Booking.com</SelectItem>
@@ -308,11 +311,11 @@ export default function BookingsDashboard() {
 
               <Select value={status} onValueChange={setStatus}>
                 <SelectTrigger className="h-9 w-40 text-sm border-0 bg-secondary/50 hover:bg-secondary transition-colors">
-                  <SelectValue placeholder="Status" />
+                  <SelectValue placeholder={t("dashboard.filter_status")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="active">Active Only</SelectItem>
-                  <SelectItem value="all">All Statuses</SelectItem>
+                  <SelectItem value="active">{t("dashboard.filter_status")}</SelectItem>
+                  <SelectItem value="all">{t("dashboard.filter_all")}</SelectItem>
                   <SelectItem value="pending">Pending</SelectItem>
                   <SelectItem value="confirmed">Confirmed</SelectItem>
                   <SelectItem value="portal_paid">Portal Paid</SelectItem>
@@ -330,22 +333,22 @@ export default function BookingsDashboard() {
                 <thead>
                   <tr className="bg-muted/50 text-muted-foreground border-b uppercase text-[10px] font-bold tracking-wider">
                     <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("property")}>
-                      Property <SortIcon col="property" sortKey={sortKey} sortDir={sortDir} />
+                      {t("cleaning.property")} <SortIcon col="property" sortKey={sortKey} sortDir={sortDir} />
                     </th>
                     <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("guestName")}>
-                      Guest <SortIcon col="guestName" sortKey={sortKey} sortDir={sortDir} />
+                      {t("cleaning.guest")} <SortIcon col="guestName" sortKey={sortKey} sortDir={sortDir} />
                     </th>
                     <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("checkIn")}>
-                      Check-in <SortIcon col="checkIn" sortKey={sortKey} sortDir={sortDir} />
+                      {t("cleaning.arrival")} <SortIcon col="checkIn" sortKey={sortKey} sortDir={sortDir} />
                     </th>
                     <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("checkOut")}>
-                      Check-out <SortIcon col="checkOut" sortKey={sortKey} sortDir={sortDir} />
+                      {t("cleaning.departure")} <SortIcon col="checkOut" sortKey={sortKey} sortDir={sortDir} />
                     </th>
                     <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground" onClick={() => handleSort("status")}>
-                      Status <SortIcon col="status" sortKey={sortKey} sortDir={sortDir} />
+                      {t("dashboard.filter_status")} <SortIcon col="status" sortKey={sortKey} sortDir={sortDir} />
                     </th>
                     <th className="px-6 py-4 cursor-pointer transition-colors hover:text-foreground text-right" onClick={() => handleSort("revenue")}>
-                      Revenue <SortIcon col="revenue" sortKey={sortKey} sortDir={sortDir} />
+                      {t("dashboard.total_revenue")} <SortIcon col="revenue" sortKey={sortKey} sortDir={sortDir} />
                     </th>
                   </tr>
                 </thead>
@@ -355,7 +358,7 @@ export default function BookingsDashboard() {
                       <td colSpan={6} className="px-6 py-20 text-center">
                         <div className="flex flex-col items-center gap-3">
                           <RefreshCw className="h-8 w-8 text-primary/20 animate-spin" />
-                          <span className="text-muted-foreground font-medium">Loading bookings...</span>
+                          <span className="text-muted-foreground font-medium">{t("common.loading")}</span>
                         </div>
                       </td>
                     </tr>
@@ -364,7 +367,7 @@ export default function BookingsDashboard() {
                       <td colSpan={6} className="px-6 py-20 text-center">
                         <div className="flex flex-col items-center gap-2">
                           <Filter className="h-8 w-8 text-muted-foreground/20" />
-                          <span className="text-muted-foreground font-medium">No bookings found matching filters.</span>
+                          <span className="text-muted-foreground font-medium">{t("dashboard.no_bookings")}</span>
                         </div>
                       </td>
                     </tr>
@@ -390,7 +393,7 @@ export default function BookingsDashboard() {
                                 <span>•</span>
                               </>
                             )}
-                            <span>{nightsCount(b)} night{nightsCount(b) !== 1 ? "s" : ""}</span>
+                            <span>{nightsCount(b)} {nightsCount(b) === 1 ? t("common.night") : t("common.nights")}</span>
                           </div>
                         </td>
                         <td className="px-6 py-4 text-muted-foreground whitespace-nowrap">

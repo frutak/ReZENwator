@@ -4,6 +4,7 @@ import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, Home, Calendar as CalendarIcon, Loader2, SoapDispenserDroplet, Clock } from "lucide-react";
 import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, isSameDay, addMonths, subMonths, addDays, startOfDay } from "date-fns";
+import { pl, enUS } from "date-fns/locale";
 import BookingDetailModal from "@/components/BookingDetailModal";
 import { Booking } from "@shared/types";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -11,6 +12,14 @@ import { DoubleBookingBanner } from "@/components/DoubleBookingBanner";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, getGuestName } from "@/lib/utils";
 import { useAuth } from "@/_core/hooks/useAuth";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Calendar } from "@/components/ui/calendar";
+import { toast } from "sonner";
+import { ListIcon } from "lucide-react";
+import { CLEANING_STAFF } from "@shared/config";
 
 // ─── Channel colours ──────────────────────────────────────────────────────────
 
@@ -45,9 +54,220 @@ const BOOKING_INFO_COLORS = [
   { bg: "bg-rose-100", border: "border-rose-300", text: "text-rose-700", bar: "bg-rose-400" },
 ];
 
+function CleaningDateCell({ 
+  booking, 
+  gapStart, 
+  gapEnd, 
+  allBookings,
+  onUpdate 
+}: { 
+  booking: Booking, 
+  gapStart: Date | null, 
+  gapEnd: Date, 
+  allBookings: Booking[],
+  onUpdate: (date: Date) => void 
+}) {
+  const { t } = useLanguage();
+  const [open, setOpen] = useState(false);
+
+  const getDayGapInfo = (date: Date) => {
+    const dStart = startOfDay(date);
+    const dEnd = addDays(dStart, 1);
+    
+    // Find booking that checks out on this day
+    const checkoutBooking = allBookings.find(b => 
+      b.property === booking.property && 
+      b.status !== "cancelled" && 
+      isSameDay(new Date(b.checkOut), date)
+    );
+    
+    // Find booking that checks in on this day
+    const checkinBooking = allBookings.find(b => 
+      b.property === booking.property && 
+      b.status !== "cancelled" && 
+      isSameDay(new Date(b.checkIn), date)
+    );
+
+    // Is there a booking that stays through the WHOLE day?
+    const staysThrough = allBookings.find(b => 
+      b.property === booking.property &&
+      b.status !== "cancelled" &&
+      new Date(b.checkIn) < dStart &&
+      new Date(b.checkOut) > dEnd
+    );
+
+    if (staysThrough) return { hours: "", available: false };
+
+    const start = checkoutBooking ? new Date(checkoutBooking.checkOut) : dStart;
+    const end = checkinBooking ? new Date(checkinBooking.checkIn) : dEnd;
+    
+    const diffMs = end.getTime() - start.getTime();
+    const diffHours = diffMs / (1000 * 60 * 60);
+    
+    if (diffHours < 5) return { hours: "", available: false };
+
+    let hoursText = t("cleaning.all_day");
+    if (checkoutBooking && checkinBooking) {
+      hoursText = `${t("cleaning.from")} ${format(start, "HH:mm")} ${t("cleaning.to")} ${format(end, "HH:mm")}`;
+    } else if (checkoutBooking) {
+      hoursText = `${t("cleaning.from")} ${format(start, "HH:mm")}`;
+    } else if (checkinBooking) {
+      hoursText = `${t("cleaning.to")} ${format(end, "HH:mm")}`;
+    }
+
+    return { hours: hoursText, available: true };
+  };
+
+  const selectedGapInfo = booking.cleaningDate ? getDayGapInfo(new Date(booking.cleaningDate)) : null;
+
+  return (
+    <div className="flex items-center gap-3">
+      <Popover open={open} onOpenChange={setOpen}>
+        <PopoverTrigger asChild>
+          <Button variant="outline" size="sm" className={cn("w-[140px] justify-start text-left font-normal", !booking.cleaningDate && "text-muted-foreground")}>
+            <CalendarIcon className="mr-2 h-3.5 w-3.5" />
+            {booking.cleaningDate ? format(new Date(booking.cleaningDate), "dd.MM.yyyy") : t("cleaning.select_date")}
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-auto p-0" align="start">
+          <Calendar
+            mode="single"
+            defaultMonth={new Date(booking.checkIn)}
+            selected={booking.cleaningDate ? new Date(booking.cleaningDate) : undefined}
+            onSelect={(date) => {
+
+              if (date) {
+                onUpdate(date);
+                setOpen(false);
+              }
+            }}
+            disabled={(date) => {
+              // Rule 1: Must be within the overall cleaning gap
+              if (gapStart && date < startOfDay(gapStart)) return true;
+              if (date > startOfDay(gapEnd)) return true;
+              
+              // Rule 2: Must have at least 5 hours available on that specific day
+              const info = getDayGapInfo(date);
+              return !info.available;
+            }}
+            initialFocus
+          />
+        </PopoverContent>
+      </Popover>
+      {selectedGapInfo?.hours && (
+        <span className="text-[11px] font-medium text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100">
+          {selectedGapInfo.hours}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function CleaningTableView({ bookings, month }: { bookings: Booking[], month: Date }) {
+  const { t } = useLanguage();
+  const utils = trpc.useUtils();
+  const updateDetails = trpc.bookings.updateDetails.useMutation({
+    onSuccess: () => {
+      toast.success(t("common.saved"));
+      utils.bookings.list.invalidate();
+    },
+    onError: (err) => toast.error(t("common.error") + ": " + err.message)
+  });
+
+  const monthBookings = useMemo(() => {
+    return bookings.filter(b => {
+      const checkIn = new Date(b.checkIn);
+      return checkIn.getMonth() === month.getMonth() && 
+             checkIn.getFullYear() === month.getFullYear() &&
+             b.property === "Hacjenda"; // Hard-coded filter for Hacjenda
+    }).sort((a, b) => new Date(a.checkIn).getTime() - new Date(b.checkIn).getTime());
+  }, [bookings, month]);
+
+  const bookingsWithGaps = useMemo(() => {
+    const allSorted = [...bookings].sort((a, b) => new Date(a.checkIn).getTime() - new Date(b.checkIn).getTime());
+    
+    return monthBookings.map(b => {
+      const propBookings = allSorted.filter(ab => ab.property === b.property);
+      const bIdx = propBookings.findIndex(pb => pb.id === b.id);
+      const prevB = bIdx > 0 ? propBookings[bIdx - 1] : null;
+      
+      return {
+        ...b,
+        gapStart: prevB ? new Date(prevB.checkOut) : null,
+        gapEnd: new Date(b.checkIn)
+      };
+    });
+  }, [monthBookings, bookings]);
+
+  return (
+    <div className="bg-card border rounded-xl shadow-sm overflow-hidden mb-10">
+      <Table>
+        <TableHeader>
+          <TableRow className="bg-muted/50">
+            <TableHead className="w-12 text-center">LP</TableHead>
+            <TableHead>{t("cleaning.property")}</TableHead>
+            <TableHead>{t("cleaning.guest")}</TableHead>
+            <TableHead>{t("cleaning.arrival")}</TableHead>
+            <TableHead>{t("cleaning.departure")}</TableHead>
+            <TableHead className="text-center">{t("cleaning.people")}</TableHead>
+            <TableHead>{t("cleaning.date")}</TableHead>
+            <TableHead>{t("cleaning.staff")}</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {bookingsWithGaps.map((b, i) => (
+            <TableRow key={b.id}>
+              <TableCell className="text-center font-medium text-muted-foreground">{i + 1}</TableCell>
+              <TableCell>{b.property}</TableCell>
+              <TableCell className="font-semibold">{getGuestName(b)}</TableCell>
+              <TableCell>{format(new Date(b.checkIn), "dd.MM.yyyy")}</TableCell>
+              <TableCell>{format(new Date(b.checkOut), "dd.MM.yyyy")}</TableCell>
+              <TableCell className="text-center">{b.guestCount || 0}</TableCell>
+              <TableCell>
+                <CleaningDateCell 
+                  booking={b} 
+                  gapStart={b.gapStart} 
+                  gapEnd={b.gapEnd} 
+                  allBookings={bookings}
+                  onUpdate={(date) => updateDetails.mutate({ id: b.id, cleaningDate: date })} 
+                />
+              </TableCell>
+              <TableCell>
+                <Select
+                  value={b.cleaningStaff || ""}
+                  onValueChange={(val) => {
+                    updateDetails.mutate({ id: b.id, cleaningStaff: val as any });
+                  }}
+                >
+                  <SelectTrigger className="w-[120px]">
+                    <SelectValue placeholder="..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CLEANING_STAFF.map(staff => (
+                      <SelectItem key={staff} value={staff}>{staff}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </TableCell>
+            </TableRow>
+          ))}
+          {bookingsWithGaps.length === 0 && (
+            <TableRow>
+              <TableCell colSpan={8} className="text-center py-20 text-muted-foreground">
+                {t("cleaning.no_bookings")}
+              </TableCell>
+            </TableRow>
+          )}
+        </TableBody>
+      </Table>
+    </div>
+  );
+}
+
 // ─── Cleaning Slot Modal ───────────────────────────────────────────────────────
 
 function CleaningSlotModal({ slot, onClose }: { slot: { from: Date; to: Date; property: string } | null, onClose: () => void }) {
+  const { t } = useLanguage();
   if (!slot) return null;
 
   return (
@@ -55,7 +275,7 @@ function CleaningSlotModal({ slot, onClose }: { slot: { from: Date; to: Date; pr
       <DialogHeader>
         <DialogTitle className="flex items-center gap-2">
           <SoapDispenserDroplet className="h-5 w-5 text-emerald-500" />
-          Okno sprzątania
+          {t("nav.cleaning")}
         </DialogTitle>
       </DialogHeader>
       <div className="py-6 space-y-6">
@@ -65,7 +285,7 @@ function CleaningSlotModal({ slot, onClose }: { slot: { from: Date; to: Date; pr
           </div>
           <div>
             <h4 className="font-bold text-lg">{slot.property}</h4>
-            <p className="text-sm text-muted-foreground">Czas na sprzątanie i konserwację</p>
+            <p className="text-sm text-muted-foreground">{t("calendar.cleaning_time")}</p>
           </div>
         </div>
 
@@ -73,28 +293,28 @@ function CleaningSlotModal({ slot, onClose }: { slot: { from: Date; to: Date; pr
           <div className="p-3 rounded-xl bg-muted/50 border">
             <div className="flex items-center gap-2 mb-1 text-muted-foreground">
               <Clock className="h-3.5 w-3.5" />
-              <span className="text-[10px] font-bold uppercase">Od (Wymeldowanie)</span>
+              <span className="text-[10px] font-bold uppercase">{t("cleaning.from")} ({t("cleaning.departure")})</span>
             </div>
             <p className="text-sm font-bold">{format(slot.from, "dd MMM HH:mm")}</p>
           </div>
           <div className="p-3 rounded-xl bg-muted/50 border">
             <div className="flex items-center gap-2 mb-1 text-muted-foreground">
               <Clock className="h-3.5 w-3.5" />
-              <span className="text-[10px] font-bold uppercase">Do (Zameldowanie)</span>
+              <span className="text-[10px] font-bold uppercase">{t("cleaning.to")} ({t("cleaning.arrival")})</span>
             </div>
             <p className="text-sm font-bold">{format(slot.to, "dd MMM HH:mm")}</p>
           </div>
         </div>
 
         <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4 flex flex-col items-center justify-center text-center">
-          <span className="text-[10px] font-bold text-emerald-700 uppercase mb-1">Dostępny czas</span>
+          <span className="text-[10px] font-bold text-emerald-700 uppercase mb-1">{t("nav.cleaning")}</span>
           <span className="text-2xl font-black text-emerald-800">
             {Math.floor((slot.to.getTime() - slot.from.getTime()) / (1000 * 60 * 60))}h {Math.floor(((slot.to.getTime() - slot.from.getTime()) / (1000 * 60)) % 60)}m
           </span>
         </div>
       </div>
       <DialogFooter>
-        <Button onClick={onClose} className="w-full">Zamknij</Button>
+        <Button onClick={onClose} className="w-full">{t("common.save")}</Button>
       </DialogFooter>
     </DialogContent>
   );
@@ -119,6 +339,8 @@ function PropertyCalendar({
   onCreateBooking: (property: string, date: Date) => void;
   onSelectCleaningSlot?: (slot: { from: Date; to: Date; property: string }) => void;
 }) {
+  const { t, language } = useLanguage();
+  const currentLocale = language === "PL" ? pl : enUS;
   const [tooltip, setTooltip] = useState<{ content: React.ReactNode; x: number; y: number } | null>(null);
 
   const monthStart = startOfMonth(month);
@@ -159,17 +381,22 @@ function PropertyCalendar({
         </div>
         {viewMode === "cleaning" && (
           <span className="text-[10px] font-bold text-emerald-600 uppercase bg-emerald-50 px-2 py-0.5 rounded border border-emerald-100 flex items-center gap-1">
-            <SoapDispenserDroplet className="h-3 w-3" /> Widok sprzątania
+            <SoapDispenserDroplet className="h-3 w-3" /> {t("calendar.view_cleaning")}
           </span>
         )}
       </div>
 
       <div className="grid grid-cols-7 text-center border-b bg-muted/10">
-        {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => (
-          <div key={d} className="py-2 text-[10px] uppercase font-bold text-muted-foreground">
-            {d}
-          </div>
-        ))}
+        {[0, 1, 2, 3, 4, 5, 6].map((dayIdx) => {
+          // date-fns day index: 0 is Sunday, 1 is Monday...
+          // Our grid starts with Monday (1), so we map i=0 to Mon, i=1 to Tue...
+          const date = new Date(2024, 0, 1 + dayIdx); // 2024-01-01 is Monday
+          return (
+            <div key={dayIdx} className="py-2 text-[10px] uppercase font-bold text-muted-foreground">
+              {format(date, "EEE", { locale: currentLocale })}
+            </div>
+          );
+        })}
       </div>
 
       <div className="grid grid-cols-7 auto-rows-[minmax(80px,auto)]">
@@ -337,8 +564,8 @@ function PropertyCalendar({
                             color.bg, color.text, color.border
                           )}
                         >
-                          <span className="font-bold">{b.guestCount || 0} os.</span>
-                          <span>{b.animalsCount || 0} zw.</span>
+                          <span className="font-bold">{b.guestCount || 0} {t("calendar.guests_short")}</span>
+                          <span>{b.animalsCount || 0} {t("calendar.animals_short")}</span>
                         </div>
                       );
                     }
@@ -391,15 +618,16 @@ function BookingLegend() {
 }
 
 function CleaningLegend() {
+  const { t } = useLanguage();
   return (
     <div className="flex flex-wrap gap-4 mb-6 px-2">
       <div className="flex items-center gap-1.5">
         <div className="h-3 w-3 rounded-sm border border-emerald-200 bg-emerald-50" />
-        <span className="text-xs font-medium text-muted-foreground">Okno sprzątania</span>
+        <span className="text-xs font-medium text-muted-foreground">{t("nav.cleaning")}</span>
       </div>
       <div className="flex items-center gap-1.5">
         <div className="h-3 w-3 rounded-sm border border-slate-200 bg-slate-50" />
-        <span className="text-xs font-medium text-muted-foreground">Zajęte (Brak dostępu)</span>
+        <span className="text-xs font-medium text-muted-foreground">{t("calendar.occupied")}</span>
       </div>
     </div>
   );
@@ -409,11 +637,15 @@ function CleaningLegend() {
 
 export default function CalendarView() {
   const { user } = useAuth();
+  const { t, language } = useLanguage();
   const [month, setMonth] = useState(() => startOfMonth(new Date()));
-  const [viewMode, setViewMode] = useState<"bookings" | "cleaning">(() => {
+  const [viewMode, setViewMode] = useState<"bookings" | "cleaning" | "cleaning_table">(() => {
     if (user?.viewAccess === "cleaning") return "cleaning";
     return "bookings";
   });
+
+  const currentLocale = language === "PL" ? pl : enUS;
+
   const [selectedBooking, setSelectedBooking] = useState<Partial<Booking> | null>(null);
   const [selectedCleaningSlot, setSelectedCleaningSlot] = useState<{ from: Date; to: Date; property: string } | null>(null);
 
@@ -452,13 +684,13 @@ export default function CalendarView() {
         {/* Header */}
         <div className="flex flex-col md:flex-row md:items-center justify-between mb-6 gap-4">
           <div className="flex items-center gap-4">
-            <h1 className="text-2xl font-bold tracking-tight">Calendar</h1>
+            <h1 className="text-2xl font-bold tracking-tight">{t("nav.calendar")}</h1>
             <div className="flex items-center bg-muted rounded-lg p-1">
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setMonth(subMonths(month, 1))}>
                 <ChevronLeft className="h-4 w-4" />
               </Button>
-              <div className="px-3 text-sm font-semibold min-w-[120px] text-center">
-                {format(month, "MMMM yyyy")}
+              <div className="px-3 text-sm font-semibold min-w-[120px] text-center capitalize">
+                {format(month, "MMMM yyyy", { locale: currentLocale })}
               </div>
               <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setMonth(addMonths(month, 1))}>
                 <ChevronRight className="h-4 w-4" />
@@ -468,23 +700,36 @@ export default function CalendarView() {
 
           <div className="flex items-center gap-2">
             <Tabs defaultValue="bookings" value={viewMode} onValueChange={(v) => setViewMode(v as any)}>
-              <TabsList className={cn("grid", canSeeBookings && canSeeCleaning ? "w-[240px] grid-cols-2" : "w-[120px] grid-cols-1")}>
+              <TabsList 
+                className={cn(
+                  "grid", 
+                  canSeeBookings && canSeeCleaning ? "w-[420px] grid-cols-3" : 
+                  canSeeCleaning ? "w-[280px] grid-cols-2" : 
+                  "w-[140px] grid-cols-1"
+                )}
+              >
                 {canSeeBookings && (
                   <TabsTrigger value="bookings" className="flex items-center gap-2">
                     <CalendarIcon className="h-3.5 w-3.5" />
-                    Bookings
+                    {t("nav.bookings")}
                   </TabsTrigger>
                 )}
                 {canSeeCleaning && (
-                  <TabsTrigger value="cleaning" className="flex items-center gap-2">
-                    <SoapDispenserDroplet className="h-3.5 w-3.5" />
-                    Sprzątanie
-                  </TabsTrigger>
+                  <>
+                    <TabsTrigger value="cleaning" className="flex items-center gap-2">
+                      <SoapDispenserDroplet className="h-3.5 w-3.5" />
+                      {t("nav.cleaning")}
+                    </TabsTrigger>
+                    <TabsTrigger value="cleaning_table" className="flex items-center gap-2">
+                      <ListIcon className="h-3.5 w-3.5" />
+                      {t("nav.table")}
+                    </TabsTrigger>
+                  </>
                 )}
               </TabsList>
             </Tabs>
             <Button variant="outline" size="sm" onClick={() => setMonth(startOfMonth(new Date()))}>
-              Today
+              {t("nav.today")}
             </Button>
           </div>
         </div>
@@ -496,38 +741,44 @@ export default function CalendarView() {
         {isLoadingBookings ? (
           <div className="text-center py-20 text-muted-foreground">Loading calendar data…</div>
         ) : (
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            {showSadoles && (
-              <PropertyCalendar
-                property="Sadoleś"
-                bookings={allBookings}
-                viewMode={viewMode}
-                month={month}
-                onSelectBooking={setSelectedBooking}
-                onSelectCleaningSlot={setSelectedCleaningSlot}
-                onCreateBooking={(p, d) => setSelectedBooking({ 
-                  property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
-                  checkIn: d,
-                  checkOut: addDays(d, 2)
-                })}
-              />
+          <>
+            {viewMode === "cleaning_table" ? (
+              <CleaningTableView bookings={allBookings} month={month} />
+            ) : (
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+                {showSadoles && (
+                  <PropertyCalendar
+                    property="Sadoleś"
+                    bookings={allBookings}
+                    viewMode={viewMode === "bookings" ? "bookings" : "cleaning"}
+                    month={month}
+                    onSelectBooking={setSelectedBooking}
+                    onSelectCleaningSlot={setSelectedCleaningSlot}
+                    onCreateBooking={(p, d) => setSelectedBooking({ 
+                      property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
+                      checkIn: d,
+                      checkOut: addDays(d, 2)
+                    })}
+                  />
+                )}
+                {showHacjenda && (
+                  <PropertyCalendar
+                    property="Hacjenda"
+                    bookings={allBookings}
+                    viewMode={viewMode === "bookings" ? "bookings" : "cleaning"}
+                    month={month}
+                    onSelectBooking={setSelectedBooking}
+                    onSelectCleaningSlot={setSelectedCleaningSlot}
+                    onCreateBooking={(p, d) => setSelectedBooking({ 
+                      property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
+                      checkIn: d,
+                      checkOut: addDays(d, 2)
+                    })}
+                  />
+                )}
+              </div>
             )}
-            {showHacjenda && (
-              <PropertyCalendar
-                property="Hacjenda"
-                bookings={allBookings}
-                viewMode={viewMode}
-                month={month}
-                onSelectBooking={setSelectedBooking}
-                onSelectCleaningSlot={setSelectedCleaningSlot}
-                onCreateBooking={(p, d) => setSelectedBooking({ 
-                  property: p === "Sadoleś" ? "Sadoles" : "Hacjenda" as any, 
-                  checkIn: d,
-                  checkOut: addDays(d, 2)
-                })}
-              />
-            )}
-          </div>
+          </>
         )}
       </div>
 

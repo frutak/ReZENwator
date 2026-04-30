@@ -103,7 +103,7 @@ export class PdfGeneratorService {
       y += 5;
 
       addLine("§ 2 Termin i Cel Najmu", 11, "bold");
-      addLine(`Najem obejmuje okres od dnia ${format(checkInDate, "dd.MM.yyyy")} od godziny 16:00 do dnia ${format(checkOutDate, "dd.MM.yyyy")} do godziny 11:00.`);
+      addLine(`Najem obejmuje okres od dnia ${format(checkInDate, "dd.MM.yyyy")} od godziny 16:00 do dnia ${format(checkOutDate, "dd.MM.yyyy")} do godziny 10:00.`);
       addLine(`Lokal zostaje oddany Najemcy w celu: ${purposeText}.`);
       y += 5;
 
@@ -157,7 +157,7 @@ export class PdfGeneratorService {
       y += 5;
 
       addLine("§ 2 Term and Purpose of Rental", 11, "bold");
-      addLine(`The rental covers the period from ${format(checkInDate, "dd.MM.yyyy")} from 4:00 PM until ${format(checkOutDate, "dd.MM.yyyy")} until 11:00 AM.`);
+      addLine(`The rental covers the period from ${format(checkInDate, "dd.MM.yyyy")} from 4:00 PM until ${format(checkOutDate, "dd.MM.yyyy")} until 10:00 AM.`);
       addLine(`The Premises are handed over to the Lessee for the purpose of: ${purposeText}.`);
       y += 5;
 
