@@ -31,6 +31,31 @@ System wykorzystuje różne metody pozyskiwania pełnych danych rezerwacji (imi�
 2.  **Booking.com**: Ze względu na specyfikę portalu, system wykorzystuje dedykowany skrypt pomocniczy. Skrypt uruchamiany w przeglądarce właściciela (przez rozszerzenie Tampermonkey) pozwala jednym kliknięciem pobrać pełne dane z extranetu Booking.com i przesłać je bezpiecznie do Twojej skrzynki odbiorczej, skąd system je pobierze.
 3.  **Bank**: Integracja z powiadomieniami e-mail o przelewach przychodzących pozwala na automatyczne monitorowanie statusu płatności każdej rezerwacji bez konieczności ręcznego sprawdzania konta.
 
+### Jak zacząć / Getting Started
+
+Aby uruchomić system na czystej instalacji systemu Linux, wykonaj poniższe kroki:
+
+1.  **Wymagania wstępne**:
+    *   Node.js (zalecana wersja 20+)
+    *   pnpm (`npm install -g pnpm`)
+    *   MySQL 8.0 lub nowszy
+    *   Python 3.10+ (do działania scraperów cen i ocen)
+
+2.  **Konfiguracja bazy danych**:
+    *   Utwórz nową bazę danych w MySQL.
+    *   Skopiuj plik `.env.example` do `.env` i uzupełnij dane dostępowe do bazy (`DATABASE_URL`).
+
+3.  **Instalacja i budowanie**:
+    ```bash
+    pnpm install
+    pnpm db:push   # Tworzy tabele w bazie danych
+    pnpm build     # Buduje klienta i serwer
+    ```
+
+4.  **Uruchomienie**:
+    *   W trybie deweloperskim: `pnpm dev`
+    *   W trybie produkcyjnym: `pnpm start`
+
 ---
 
 ### Instalacja Skryptu Pomocniczego (Booking.com)
