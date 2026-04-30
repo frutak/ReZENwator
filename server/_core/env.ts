@@ -33,6 +33,7 @@ export const ENV = {
   get hacjendaAddress() { return process.env.HACJENDA_ADDRESS ?? "Hacjenda Address"; },
   get hacjendaManagerPhone() { return process.env.HACJENDA_MANAGER_PHONE ?? ""; },
   get hacjendaKeylockCode() { return process.env.HACJENDA_KEYLOCK_CODE ?? "0000"; },
+  get sadolesKeylockCode() { return process.env.SADOLES_KEYLOCK_CODE ?? "0809"; },
   get hacjendaManagerName() { return process.env.HACJENDA_MANAGER_NAME ?? "Manager"; },
   get sadolesManagerName() { return process.env.SADOLES_MANAGER_NAME ?? "Manager"; },
   get sadolesManagerPhone() { return process.env.SADOLES_MANAGER_PHONE ?? ""; },

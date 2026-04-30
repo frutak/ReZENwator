@@ -28,6 +28,8 @@ export const users = mysqlTable("users", {
   propertyAccess: varchar("propertyAccess", { length: 64 }),
   /** Optional restriction to a specific view: "cleaning", "bookings", "pricing" or null for all */
   viewAccess: varchar("viewAccess", { length: 64 }),
+  /** User language preference: "PL" or "EN" */
+  language: mysqlEnum("language", ["PL", "EN"]).default("EN").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -137,6 +139,12 @@ export const bookings = mysqlTable(
 
     /** Whether the 2-week arrival reminder has been sent */
     reminderSent: int("reminderSent").default(0).notNull(),
+
+    // Cleaning tracking
+    /** Scheduled cleaning date */
+    cleaningDate: datetime("cleaningDate"),
+    /** Person assigned to cleaning: "Ala" or "Krysia" */
+    cleaningStaff: mysqlEnum("cleaningStaff", ["Ala", "Krysia"]),
 
     // Notes
     notes: text("notes"),

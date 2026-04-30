@@ -20,15 +20,16 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { useIsMobile } from "@/hooks/useMobile";
-import { LayoutDashboard, LogOut, PanelLeft, RefreshCw, Home, CalendarDays, Tag } from "lucide-react";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { LayoutDashboard, LogOut, PanelLeft, RefreshCw, Home, CalendarDays, Tag, Globe } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState, useMemo } from "react";
 import { useLocation } from "wouter";
 
 const menuItems = [
-  { icon: LayoutDashboard, label: "Bookings", path: "/" },
-  { icon: CalendarDays, label: "Calendar", path: "/calendar" },
-  { icon: Tag, label: "Pricing", path: "/pricing" },
-  { icon: RefreshCw, label: "Operations", path: "/sync" },
+  { icon: LayoutDashboard, label: "nav.bookings", path: "/" },
+  { icon: CalendarDays, label: "nav.calendar", path: "/calendar" },
+  { icon: Tag, label: "nav.pricing", path: "/pricing" },
+  { icon: RefreshCw, label: "nav.operations", path: "/sync" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";
@@ -74,6 +75,7 @@ function DashboardLayoutContent({
   setSidebarWidth,
 }: DashboardLayoutContentProps) {
   const { user, logout, loading } = useAuth({ redirectOnUnauthenticated: true });
+  const { t, language, setLanguage } = useLanguage();
   const [location, setLocation] = useLocation();
   const { state, toggleSidebar } = useSidebar();
   const [isResizing, setIsResizing] = useState(false);
@@ -173,13 +175,13 @@ function DashboardLayoutContent({
                     <SidebarMenuButton
                       isActive={isActive}
                       onClick={() => setLocation(item.path)}
-                      tooltip={item.label}
+                      tooltip={t(item.label)}
                       className={`h-10 transition-all font-normal`}
                     >
                       <item.icon
                         className={`h-4 w-4 ${isActive ? "text-primary" : ""}`}
                       />
-                      <span>{item.label}</span>
+                      <span>{t(item.label)}</span>
                     </SidebarMenuButton>
                   </SidebarMenuItem>
                 );
@@ -208,11 +210,18 @@ function DashboardLayoutContent({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end" className="w-48">
                 <DropdownMenuItem
+                  onClick={() => setLanguage(language === "PL" ? "EN" : "PL")}
+                  className="cursor-pointer"
+                >
+                  <Globe className="mr-2 h-4 w-4" />
+                  <span>{t("nav.language")}: {language}</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem
                   onClick={logout}
                   className="cursor-pointer text-destructive focus:text-destructive"
                 >
                   <LogOut className="mr-2 h-4 w-4" />
-                  <span>Sign out</span>
+                  <span>{t("nav.signout")}</span>
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -236,7 +245,7 @@ function DashboardLayoutContent({
               <div className="flex items-center gap-3">
                 <div className="flex flex-col gap-1">
                   <span className="tracking-tight text-foreground">
-                    {activeMenuItem?.label ?? "Menu"}
+                    {activeMenuItem ? t(activeMenuItem.label) : "Menu"}
                   </span>
                 </div>
               </div>

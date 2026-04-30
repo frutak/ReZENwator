@@ -78,31 +78,31 @@ export class EmailTemplateService {
           ${petFeeHtml}
           ${paymentHtml}
           <p><strong>przewodnik:</strong><br>załączam przewodnik po domu i okolicy, który przygotowaliśmy dla naszych gości:<br><a href="${guideLink}">${guideLink}</a></p>
-          <p><strong>przyjazd:</strong><br>czy wiesz już o której mniej więcej planujecie przyjechać? ${dayOfWeek} dom powinien być dla Was dostępny ${arrivalTimePL}, tylko zależnie od godziny Waszego przyjazdu albo ${ENV.sadolesManagerName} będzie czekać na Was w domu albo zostawimy Wam klucz w umówionym miejscu. W tym wypadku jeśli będziecie mieli jakieś pytania po przyjeździe to po prostu możecie zadzwonić do mnie lub do ${ENV.sadolesManagerName}.<br>
+          <p><strong>przyjazd:</strong><br>Czy wiesz już o której mniej więcej planujecie przyjechać? ${dayOfWeek} dom powinien być dla Was dostępny ${arrivalTimePL}. Klucz będzie na Was czekał w keylocku (takim sejfiku na klucz), na płocie pod skrzynką pocztową. Kod do keylocka to ${ENV.sadolesKeylockCode}. W środku jest klucz do bramy i do frontowych drzwi. W razie jakichkolwiek pytań po przyjeździe po prostu możecie zadzwonić do mnie lub do ${ENV.sadolesManagerName}.<br>
           mój numer: ${ENV.blikNumber}<br>
           numer ${ENV.sadolesManagerName}: ${ENV.sadolesManagerPhone}<br>
-          Co do wyjazdu: zwykle ustalamy godzinę wyjazdu na 11, jeśli Wam zależy żeby było później to dajcie znać.</p>
+          Co do wyjazdu: zwykle ustalamy godzinę wyjazdu na 10, jeśli Wam zależy żeby było później to dajcie znać.</p>
           <p>dajcie znać, jeśli macie jakieś pytania!<br>pozdrawiam,<br>${ENV.ownerName.split(" ")[0]}</p>
         ` : `
           <p>Hi ${firstName},<br>Your arrival is approaching, so here are a few organizational details from my side:</p>
           ${petFeeHtml}
           ${paymentHtml}
           <p><strong>guide:</strong><br>I am attaching a guide to the house and the area that we have prepared for our guests:<br><a href="${guideLink}">${guideLink}</a></p>
-          <p><strong>arrival:</strong><br>Do you already know roughly what time you plan to arrive? ${dayOfWeek}, the house should be available for you ${arrivalTimeEN}. Depending on your arrival time, either ${ENV.sadolesManagerName} will be waiting for you at the house or we will leave the key for you in an agreed place. In that case, if you have any questions after arrival, you can simply call me or ${ENV.sadolesManagerName}.<br>
+          <p><strong>arrival:</strong><br>Do you already know roughly what time you plan to arrive? ${dayOfWeek}, the house should be available for you ${arrivalTimeEN}. The key will be waiting for you in the keylock (a small key safe), on the fence under the mailbox. The keylock code is ${ENV.sadolesKeylockCode}. Inside there is a key to the gate and to the front door. If you have any questions after arrival, you can simply call me or ${ENV.sadolesManagerName}.<br>
           My number: ${ENV.blikNumber}<br>
           ${ENV.sadolesManagerName}'s number: ${ENV.sadolesManagerPhone}<br>
-          Regarding departure: we usually set the departure time to 11 am. If you would like it to be later, please let me know.</p>
+          Regarding departure: we usually set the departure time to 10 am. If you would like it to be later, please let me know.</p>
           <p>Let me know if you have any questions!<br>Regards,<br>${ENV.ownerName.split(" ")[0]}</p>
         `,
       };
     }
 
     const arrivalHacjendaPL = isEarlyArrival 
-      ? `Czy wiecie już o której możecie być na miejscu? Zwykle dom jest dostępny od 15, ale jeśli Wam na tym zależy może się uda, żeby był dostępny wcześniej, tylko musicie to potwierdzić z ${ENV.hacjendaManagerName} (numer na dole wiadomości).`
+      ? `Czy wiecie już o której możecie być na miejscu? Zwykle dom jest dostępny od 16, ale jeśli Wam na tym zależy może się uda, żeby był dostępny wcześniej, tylko musicie to potwierdzić z ${ENV.hacjendaManagerName} (numer na dole wiadomości).`
       : `Dom będzie dostępny dla Was od godziny 16.`;
     
     const arrivalHacjendaEN = isEarlyArrival 
-      ? `Do you already know what time you can be there? Usually, the house is available from 3 pm, but if it's important to you, it might be possible to have it available earlier, but you must confirm this with ${ENV.hacjendaManagerName} (number at the bottom of the message).`
+      ? `Do you already know what time you can be there? Usually, the house is available from 4 pm, but if it's important to you, it might be possible to have it available earlier, but you must confirm this with ${ENV.hacjendaManagerName} (number at the bottom of the message).`
       : `The house will be available for you from 4 pm.`;
 
     return {
@@ -112,14 +112,14 @@ export class EmailTemplateService {
         ${petFeeHtml}
         ${paymentHtml}
         <p><strong>przewodnik:</strong><br>załączam przewodnik po domu i okolicy, który przygotowaliśmy dla naszych gości:<br><a href="${guideLink}">${guideLink}</a></p>
-        <p><strong>przyjazd:</strong><br>${arrivalHacjendaPL} Check-in wygląda tak , że mamy przy górnych drzwiach keylocka - mały sejfik na klucz. Kod do sejfu to ${ENV.hacjendaKeylockCode}. Co do wyjazdu to analogicznie zakładamy wyjazd do godziny 11, a jeśli bardzo Wam zależy żeby było inaczej to możecie porozmawiać o możliwościach z ${ENV.hacjendaManagerName}.</p>
+        <p><strong>przyjazd:</strong><br>${arrivalHacjendaPL} Check-in wygląda tak, że mamy przy górnych drzwiach keylocka - mały sejfik na klucz. Kod do sejfu to ${ENV.hacjendaKeylockCode}. Co do wyjazdu to analogicznie zakładamy wyjazd do godziny 10, a jeśli bardzo Wam zależy żeby było inaczej to możecie porozmawiać o możliwościach z ${ENV.hacjendaManagerName}.</p>
         <p>jeśli macie jakieś pytania odnośnie godzin przyjazdu i wyjazdu czy rzeczy znajdujących się w domu możecie się skontaktować z managerem obiektu ${ENV.hacjendaManagerName}, tel ${ENV.hacjendaManagerPhone}.<br>pozdrawiam,<br>${ENV.ownerName.split(" ")[0]}</p>
       ` : `
         <p>Hi ${firstName},<br><br>thanks for your booking. Your arrival is approaching, so I'm sending some practical information:</p>
         ${petFeeHtml}
         ${paymentHtml}
         <p><strong>guide:</strong><br>I am attaching a guide to the house and the area that we have prepared for our guests:<br><a href="${guideLink}">${guideLink}</a></p>
-        <p><strong>arrival:</strong><br>${arrivalHacjendaEN} Check-in looks like this: we have a keylock by the upper door - a small safe for the key. The safe code is ${ENV.hacjendaKeylockCode}. Regarding departure, we similarly assume departure by 11 am, and if it's very important to you to have it otherwise, you can discuss the possibilities with ${ENV.hacjendaManagerName}.</p>
+        <p><strong>arrival:</strong><br>${arrivalHacjendaEN} Check-in looks like this: we have a keylock by the upper door - a small safe for the key. The safe code is ${ENV.hacjendaKeylockCode}. Regarding departure, we similarly assume departure by 10 am, and if it's very important to you to have it otherwise, you can discuss the possibilities with ${ENV.hacjendaManagerName}.</p>
         <p>If you have any questions regarding arrival and departure times or things in the house, you can contact the property manager ${ENV.hacjendaManagerName} at ${ENV.hacjendaManagerPhone}.<br>Regards,<br>${ENV.ownerName.split(" ")[0]}</p>
       `,
     };
@@ -237,7 +237,7 @@ export class EmailTemplateService {
         return {
           subject: isPL ? "Podziękowanie za pobyt" : "Thank you for your stay",
           html: isPL
-            ? `<p>Cześć ${firstName},<br>Mam nadzieję, że Wasz pobyt się udał. Z naszej perspektywy wszystko było ok więc wlasnie zrobiłem przelew zwrotny depozytu.<br>Dziękuję jeszcze raz i mam nadzieję do zobaczenia!<br>${ENV.ownerName.split(" ")[0]}</p>`
+            ? `<p>Cześć ${firstName},<br>Mam nadzieję, że Wasz pobyt się udał. Z naszej perspektywy wszystko było ok, więc właśnie zrobiłem przelew zwrotny depozytu.<br>Dziękuję jeszcze raz i mam nadzieję do zobaczenia!<br>${ENV.ownerName.split(" ")[0]}</p>`
             : `<p>Hi ${firstName},<br>I hope your stay was enjoyable. Everything was fine on our end, so I have just processed the refund of your deposit.<br>Thank you once again and I hope to see you!<br>${ENV.ownerName.split(" ")[0]}</p>`,
         };
       case "missing_data_alert":

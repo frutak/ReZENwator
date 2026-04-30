@@ -25,6 +25,8 @@ import {
   Baby,
   ImageIcon,
   Maximize2,
+  ZoomIn,
+  ZoomOut,
   ChevronLeft,
   Filter,
   Info,
@@ -506,6 +508,8 @@ const T = {
     reviews_title: "Opinie gości",
     rating_from: "ocena z",
     ratings_count: "opinii",
+    total_score: "Wynik łączny",
+    based_on: "na podstawie {count} prawdziwych opinii",
     social_media: "Znajdź nas na",
     view_gallery: "Zobacz galerię zdjęć",
     all_photos: "Wszystkie zdjęcia",
@@ -584,6 +588,8 @@ const T = {
     reviews_title: "Guest Reviews",
     rating_from: "rating from",
     ratings_count: "reviews",
+    total_score: "Total Score",
+    based_on: "based on {count} real reviews",
     social_media: "Follow us",
     view_gallery: "View photo gallery",
     all_photos: "All photos",
@@ -626,6 +632,12 @@ function ImageGallery({
 }) {
   const [filter, setFilter] = useState<string | null>(initialFilter || null);
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  const [isZoomed, setIsZoomed] = useState(false);
+
+  const filteredImages = useMemo(() => {
+    if (!filter) return images;
+    return images.filter(img => img.includes(`/${filter}/`));
+  }, [images, filter]);
 
   const areas = useMemo(() => {
     const set = new Set<string>();
@@ -638,10 +650,20 @@ function ImageGallery({
     return Array.from(set).sort();
   }, [images]);
 
-  const filteredImages = useMemo(() => {
-    if (!filter) return images;
-    return images.filter(img => img.includes(`/${filter}/`));
-  }, [images, filter]);
+  useEffect(() => {
+    setIsZoomed(false);
+  }, [selectedIdx]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (selectedIdx === null) return;
+      if (e.key === "Escape") setSelectedIdx(null);
+      if (e.key === "ArrowLeft" && selectedIdx > 0) setSelectedIdx(selectedIdx - 1);
+      if (e.key === "ArrowRight" && selectedIdx < filteredImages.length - 1) setSelectedIdx(selectedIdx + 1);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [selectedIdx, filteredImages]);
 
   const texts = T[lang];
 
@@ -687,12 +709,28 @@ function ImageGallery({
       {selectedIdx !== null && (
         <div className="fixed inset-0 z-[110] bg-black flex flex-col">
           <div className="absolute top-4 right-4 z-[120] flex gap-2">
+             <Button 
+               variant="outline" 
+               className="bg-black/50 text-white border-white/20 hover:bg-black/80" 
+               size="icon" 
+               onClick={() => setIsZoomed(!isZoomed)}
+             >
+               {isZoomed ? <ZoomOut /> : <ZoomIn />}
+             </Button>
              <Button variant="outline" className="bg-black/50 text-white border-white/20 hover:bg-black/80" size="icon" onClick={() => setSelectedIdx(null)}><X /></Button>
           </div>
-          <div className="flex-1 flex items-center justify-center p-4">
-             <img src={filteredImages[selectedIdx]} alt="" className="max-w-full max-h-full object-contain shadow-2xl" />
+          <div className="flex-1 overflow-auto flex p-4 scrollbar-thin scrollbar-thumb-white/20 scrollbar-track-transparent">
+             <img 
+               src={filteredImages[selectedIdx]} 
+               alt="" 
+               className={cn(
+                 "m-auto shadow-2xl transition-all duration-300",
+                 isZoomed ? "max-w-none cursor-zoom-out" : "max-w-full max-h-full object-contain cursor-zoom-in"
+               )} 
+               onClick={() => setIsZoomed(!isZoomed)}
+             />
           </div>
-          <div className="h-24 bg-black/80 flex items-center justify-between px-8 text-white">
+          <div className="h-24 bg-black/80 flex items-center justify-between px-8 text-white shrink-0">
              <Button 
                variant="ghost" 
                className="text-white hover:bg-white/10"
@@ -1570,7 +1608,7 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
 
           <div className="bg-white/20 backdrop-blur-sm rounded-2xl p-4 border border-white/20 flex items-center justify-center gap-4">
              <div className="text-center">
-               <div className="text-[10px] font-black uppercase text-white/60 tracking-widest mb-1">Total Score</div>
+               <div className="text-[10px] font-black uppercase text-white/60 tracking-widest mb-1">{texts.total_score}</div>
                <div className="text-2xl font-black text-white">
                  {(() => {
                    const totalReviews = ratings.reduce((sum, r) => sum + r.count, 0);
@@ -1582,9 +1620,11 @@ function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", la
                    return (weightedSum / totalReviews).toFixed(1);
                  })()} / 5.0
                </div>
+               <div className="text-[10px] text-white/70 mt-1">
+                 {texts.based_on.replace("{count}", String(ratings.reduce((sum, r) => sum + r.count, 0)))}
+               </div>
              </div>
-          </div>
-        </div>
+          </div>        </div>
       </div>
 
       <div className="shrink-0 pb-1 md:pb-2">

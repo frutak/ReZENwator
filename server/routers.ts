@@ -22,7 +22,7 @@ import { getICalFeeds } from "./workers/icalConfig";
 import { Logger } from "./_core/logger";
 import { PricingService } from "./services/PricingService";
 import { BookingService } from "./services/BookingService";
-import { PROPERTIES, CHANNELS, STATUSES, DEPOSIT_STATUSES } from "@shared/config";
+import { PROPERTIES, CHANNELS, STATUSES, DEPOSIT_STATUSES, CLEANING_STAFF } from "@shared/config";
 import crypto from "crypto";
 import { ONE_YEAR_MS } from "@shared/const";
 import { sdk } from "./_core/sdk";
@@ -142,10 +142,13 @@ const bookingRouter = router({
         purpose: z.string().optional(),
         companyName: z.string().optional(),
         nip: z.string().optional(),
+        cleaningDate: z.coerce.date().optional(),
+        cleaningStaff: z.enum(CLEANING_STAFF).optional(),
       })
     )
     .mutation(async ({ input }) => {
       const { id, ...details } = input;
+      console.log(`[updateDetails] Updating booking #${id}:`, JSON.stringify(details));
 
       // Normalize decimal fields: convert empty strings to null
       const normalizedDetails: any = { ...details };
@@ -648,10 +651,25 @@ const pricingAuditRouter = router({
     }),
 });
 
+// ─── User router ───────────────────────────────────────────────────────────────
+
+const userRouter = router({
+  updateLanguage: publicProcedure
+    .input(z.object({ language: z.enum(["PL", "EN"]) }))
+    .mutation(async ({ input, ctx }) => {
+      if (!ctx.user) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Not logged in" });
+      }
+      await UserRepository.updateUserLanguage(ctx.user.id, input.language);
+      return { success: true };
+    }),
+});
+
 // ─── App router ───────────────────────────────────────────────────────────────
 
 export const appRouter = router({
   system: systemRouter,
+  user: userRouter,
   auth: router({
     me: publicProcedure.query((opts) => opts.ctx.user),
     login: publicProcedure

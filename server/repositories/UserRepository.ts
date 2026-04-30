@@ -14,7 +14,7 @@ export class UserRepository {
     try {
       const values: InsertUser = { ...user };
       const updateSet: Record<string, unknown> = {};
-      const fields = ["name", "email", "loginMethod", "username", "passwordHash", "role", "lastSignedIn"] as const;
+      const fields = ["name", "email", "loginMethod", "username", "passwordHash", "role", "lastSignedIn", "language"] as const;
       
       fields.forEach((field) => {
         const value = (user as any)[field];
@@ -50,5 +50,11 @@ export class UserRepository {
     if (!db) return undefined;
     const result = await db.select().from(users).where(eq(users.username, username)).limit(1);
     return result.length > 0 ? result[0] : undefined;
+  }
+
+  static async updateUserLanguage(id: number, language: "PL" | "EN") {
+    const db = await getDb();
+    if (!db) return;
+    await db.update(users).set({ language }).where(eq(users.id, id));
   }
 }

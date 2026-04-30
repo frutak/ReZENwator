@@ -18,7 +18,7 @@ const RATING_URLS = {
     booking: "https://www.booking.com/hotel/pl/hacienda-kiekrz.html",
     slowhop: "https://slowhop.com/pl/miejsca/4575-hacjenda-kiekrz.html",
     airbnb: "https://www.airbnb.com/rooms/1327633659929514853",
-    google: "https://share.google/Cqok3DdsxiP4O6mit",
+    google: "https://www.google.com/search?q=Hacjenda+Kiekrz+Reviews&tbm=lcl",
   },
 };
 
@@ -42,13 +42,11 @@ async function scrapeWithPlaywright(url: string): Promise<{ rating: number; coun
 }
 
 async function scrapePortal(property: "Sadoles" | "Hacjenda", url: string, portal: "booking" | "airbnb" | "slowhop" | "alohacamp" | "google"): Promise<{ rating: number; count: number } | null> {
-  // 1. Try Playwright first (most robust)
-  if (portal === "booking" || portal === "airbnb" || portal === "google") {
-    const pwResult = await scrapeWithPlaywright(url);
-    if (pwResult) return pwResult;
-  }
+  // 1. Try Playwright first (most robust, handles JS, Stealth, and generic fallbacks)
+  const pwResult = await scrapeWithPlaywright(url);
+  if (pwResult) return pwResult;
 
-  // 2. Fallback to axios if Playwright fails or for simpler portals
+  // 2. Fallback to axios if Playwright fails
   try {
     const { data: html } = await axios.get(url, {
       headers: {
