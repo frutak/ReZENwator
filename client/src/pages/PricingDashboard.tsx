@@ -437,6 +437,13 @@ function AuditorCalendar({
   const latestAudits = useMemo(() => {
     const map = new Map<string, any>();
     audits.forEach(audit => {
+      // Skip audits where our internal pricing says it's occupied (portalPrice is 0)
+      if (!audit.portalPrice || audit.portalPrice === 0) return;
+
+      // Skip audits where no external portal prices were successfully scraped (occupied on portals)
+      const hasValidExternalPrice = Object.values(audit.deviations || {}).length > 0;
+      if (!hasValidExternalPrice) return;
+
       const cin = format(new Date(audit.checkIn), "yyyy-MM-dd");
       const cout = format(new Date(audit.checkOut), "yyyy-MM-dd");
       const key = `${cin}_${cout}`;
@@ -751,9 +758,9 @@ export default function PricingDashboard() {
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
-            <Tabs defaultValue="plans" value={activeTab} onValueChange={setActiveTab}>
-              <TabsList className="w-[300px] grid grid-cols-2">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+            <Tabs defaultValue="plans" value={activeTab} onValueChange={setActiveTab} className="w-full sm:w-auto">
+              <TabsList className="w-full sm:w-[300px] grid grid-cols-2">
                 <TabsTrigger value="plans" className="flex items-center gap-2">
                   <Tag className="h-3.5 w-3.5" />
                   Pricing Plans
@@ -764,7 +771,7 @@ export default function PricingDashboard() {
                 </TabsTrigger>
               </TabsList>
             </Tabs>
-            <Button variant="outline" size="sm" onClick={() => setMonth(startOfMonth(new Date()))}>
+            <Button variant="outline" size="sm" onClick={() => setMonth(startOfMonth(new Date()))} className="w-full sm:w-auto">
               Today
             </Button>
           </div>

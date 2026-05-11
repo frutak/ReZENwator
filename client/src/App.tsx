@@ -12,6 +12,8 @@ const BookingsDashboard = lazy(() => import("./pages/BookingsDashboard"));
 const Operations = lazy(() => import("./pages/Operations"));
 const CalendarView = lazy(() => import("./pages/CalendarView"));
 const PricingDashboard = lazy(() => import("./pages/PricingDashboard"));
+const TransferMatching = lazy(() => import("./pages/TransferMatching"));
+const Analytics = lazy(() => import("./pages/Analytics"));
 const Login = lazy(() => import("./pages/Login"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
@@ -21,19 +23,21 @@ function Router() {
 
   useEffect(() => {
     if (!loading && user?.viewAccess === "cleaning") {
-      if (location === "/" || location === "/sync") {
+      if (location === "/" || location === "/sync" || location === "/analytics") {
         setLocation("/calendar");
       }
     }
   }, [user, loading, location, setLocation]);
 
   return (
-    <Suspense fallback={<div className="flex h-screen w-screen items-center justify-center bg-background"><Spinner size="lg" /></div>}>
+    <Suspense fallback={<div className="flex h-screen w-screen items-center justify-center bg-background"><Spinner /></div>}>
       <Switch>
         <Route path={"/login"} component={Login} />
         <Route path={"/"} component={BookingsDashboard} />
         <Route path={"/calendar"} component={CalendarView} />
         <Route path={"/pricing"} component={PricingDashboard} />
+        <Route path={"/transfers"} component={TransferMatching} />
+        <Route path={"/analytics"} component={Analytics} />
         <Route path={"/sync"} component={Operations} />
         <Route path={"/404"} component={NotFound} />
         <Route component={NotFound} />

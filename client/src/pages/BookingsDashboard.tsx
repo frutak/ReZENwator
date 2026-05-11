@@ -70,14 +70,14 @@ function StatsCards({ filters }: { filters: { property?: string; channel?: strin
   if (!stats) return null;
 
   const rangeLabel =
-    filters.timeRange === "month" ? t("dashboard.filter_time") :
-    filters.timeRange === "next_month" ? t("dashboard.filter_time") :
-    filters.timeRange === "3months" ? t("dashboard.filter_time") :
-    filters.timeRange === "6months" ? t("dashboard.filter_time") :
+    filters.timeRange === "month" ? t("dashboard.filter_this_month") :
+    filters.timeRange === "next_month" ? t("dashboard.filter_next_month") :
+    filters.timeRange === "3months" ? t("dashboard.filter_3months") :
+    filters.timeRange === "6months" ? t("dashboard.filter_6months") :
     filters.timeRange === "all" ? t("dashboard.filter_all") : "2026";
 
   const statusLabel = 
-    filters.status === "active" ? t("dashboard.filter_status") :
+    filters.status === "active" ? t("dashboard.filter_active") :
     filters.status === "all" ? t("dashboard.filter_all") :
     filters.status ? filters.status.charAt(0).toUpperCase() + filters.status.slice(1).replace("_", " ") : t("dashboard.filter_all");
 
@@ -87,7 +87,7 @@ function StatsCards({ filters }: { filters: { property?: string; channel?: strin
         { label: `${t("dashboard.filter_all")} (${statusLabel})`, value: stats.total, icon: Calendar, color: "bg-blue-50 text-blue-600 dark:bg-blue-900/20" },
         { label: t("dashboard.pending_deposits"), value: stats.upcoming, icon: Clock, color: "bg-amber-50 text-amber-600 dark:bg-amber-900/20" },
         { label: t("dashboard.confirmed_bookings"), value: stats.paid, icon: CheckCircle2, color: "bg-green-50 text-green-600 dark:bg-green-900/20" },
-        { label: `${t("dashboard.total_revenue")} (${rangeLabel})`, value: `${stats.totalRevenue.toLocaleString("pl-PL")} PLN`, icon: TrendingUp, color: "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20" },
+        { label: `${t("dashboard.total_revenue")} (${rangeLabel})`, value: `${Math.round(stats.totalRevenue).toLocaleString("pl-PL", { maximumFractionDigits: 0 })} PLN`, icon: TrendingUp, color: "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20" },
       ].map((stat, i) => (
         <Card key={i} className="overflow-hidden border-0 shadow-sm transition-all hover:shadow-md">
           <CardContent className="p-5 flex items-center gap-4">
@@ -275,10 +275,10 @@ export default function BookingsDashboard() {
                   <SelectValue placeholder={t("dashboard.filter_time")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="month">{t("dashboard.filter_time")}</SelectItem>
-                  <SelectItem value="next_month">{t("dashboard.filter_time")}</SelectItem>
-                  <SelectItem value="3months">{t("dashboard.filter_time")}</SelectItem>
-                  <SelectItem value="6months">{t("dashboard.filter_time")}</SelectItem>
+                  <SelectItem value="month">{t("dashboard.filter_this_month")}</SelectItem>
+                  <SelectItem value="next_month">{t("dashboard.filter_next_month")}</SelectItem>
+                  <SelectItem value="3months">{t("dashboard.filter_3months")}</SelectItem>
+                  <SelectItem value="6months">{t("dashboard.filter_6months")}</SelectItem>
                   <SelectItem value="year">{t("dashboard.filter_time")} (2026)</SelectItem>
                   <SelectItem value="all">{t("dashboard.filter_all")}</SelectItem>
                 </SelectContent>
@@ -289,7 +289,7 @@ export default function BookingsDashboard() {
                   <SelectValue placeholder={t("dashboard.filter_property")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">{t("dashboard.filter_all")}</SelectItem>
+                  <SelectItem value="all">{t("dashboard.filter_all_properties")}</SelectItem>
                   <SelectItem value="Sadoles">Sadoleś</SelectItem>
                   <SelectItem value="Hacjenda">Hacjenda</SelectItem>
                 </SelectContent>
@@ -300,7 +300,7 @@ export default function BookingsDashboard() {
                   <SelectValue placeholder={t("dashboard.filter_channel")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="all">{t("dashboard.filter_all")}</SelectItem>
+                  <SelectItem value="all">{t("dashboard.filter_all_channels")}</SelectItem>
                   <SelectItem value="slowhop">Slowhop</SelectItem>
                   <SelectItem value="airbnb">Airbnb</SelectItem>
                   <SelectItem value="booking">Booking.com</SelectItem>
@@ -314,7 +314,7 @@ export default function BookingsDashboard() {
                   <SelectValue placeholder={t("dashboard.filter_status")} />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="active">{t("dashboard.filter_status")}</SelectItem>
+                  <SelectItem value="active">{t("dashboard.filter_active")}</SelectItem>
                   <SelectItem value="all">{t("dashboard.filter_all")}</SelectItem>
                   <SelectItem value="pending">Pending</SelectItem>
                   <SelectItem value="confirmed">Confirmed</SelectItem>
@@ -410,7 +410,7 @@ export default function BookingsDashboard() {
                         </td>
                         <td className="px-6 py-4 text-right">
                           <span className="font-bold text-base">
-                            {(parseFloat(b.hostRevenue ?? b.totalPrice ?? "0")).toLocaleString("pl-PL")}
+                            {Math.round(parseFloat(b.hostRevenue ?? b.totalPrice ?? "0")).toLocaleString("pl-PL", { maximumFractionDigits: 0 })}
                           </span>
                           <span className="text-[10px] font-bold text-muted-foreground ml-1">PLN</span>
                         </td>

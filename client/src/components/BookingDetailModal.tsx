@@ -154,6 +154,7 @@ export default function BookingDetailModal({
     adultsCount: booking.adultsCount ?? 0,
     childrenCount: booking.childrenCount ?? 0,
     animalsCount: booking.animalsCount ?? 0,
+    type: (booking as any).type ?? "normal",
     purpose: booking.purpose ?? "leisure",
     companyName: (booking as any).companyName ?? "",
     nip: (booking as any).nip ?? "",
@@ -184,6 +185,7 @@ export default function BookingDetailModal({
       adultsCount: booking.adultsCount ?? 0,
       childrenCount: booking.childrenCount ?? 0,
       animalsCount: booking.animalsCount ?? 0,
+      type: (booking as any).type ?? "normal",
       purpose: booking.purpose ?? "leisure",
       companyName: (booking as any).companyName ?? "",
       nip: (booking as any).nip ?? "",
@@ -250,6 +252,7 @@ export default function BookingDetailModal({
       createBooking.mutate({
         ...form,
         property: form.property as any,
+        type: form.type as any,
         checkIn: finalCheckIn,
         checkOut: finalCheckOut,
         channel: form.channel as any,
@@ -260,6 +263,7 @@ export default function BookingDetailModal({
       updateDetails.mutate({
         id: booking.id!,
         ...form,
+        type: form.type as any,
         checkIn: finalCheckIn,
         checkOut: finalCheckOut,
         channel: form.channel as any,
@@ -424,6 +428,19 @@ export default function BookingDetailModal({
               </div>
 
               <div className="grid grid-cols-2 gap-3">
+                <div className="col-span-2">
+                  <label className={labelClass}>Booking Type</label>
+                  <Select value={form.type} onValueChange={(v) => handleChange("type", v)}>
+                    <SelectTrigger className="h-9 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="normal">Normal Booking</SelectItem>
+                      <SelectItem value="block">Calendar Block</SelectItem>
+                      <SelectItem value="internal">Internal / Family Stay</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
                 <div>
                   <label className={labelClass}>Purpose</label>
                   <Select value={form.purpose} onValueChange={(v) => handleChange("purpose", v)}>
@@ -610,13 +627,13 @@ export default function BookingDetailModal({
                 <span className="text-base font-black text-emerald-700 dark:text-emerald-400">{toBePaid} PLN</span>
               </div>
 
-              {form.channel === "booking" && parseInt(form.animalsCount) > 0 && (
+              {form.channel === "booking" && (form.animalsCount || 0) > 0 && (
                 <div className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-100 dark:border-amber-800 flex justify-between items-center">
                   <div className="flex flex-col">
                     <span className="text-[10px] font-bold uppercase text-amber-700 dark:text-amber-400">Extra: Pet Fee</span>
                     <span className="text-[9px] text-amber-600/80 dark:text-amber-500/80 font-medium">To be paid directly by guest</span>
                   </div>
-                  <span className="text-base font-black text-amber-700 dark:text-amber-400">{(parseInt(form.animalsCount) * 200).toFixed(2)} PLN</span>
+                  <span className="text-base font-black text-amber-700 dark:text-amber-400">{((form.animalsCount || 0) * 200).toFixed(2)} PLN</span>
                 </div>
               )}
 

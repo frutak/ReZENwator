@@ -2,6 +2,7 @@ import { ENV } from "../_core/env";
 import Imap from "imap";
 import { simpleParser } from "mailparser";
 import { BookingRepository } from "../repositories/BookingRepository";
+import { BankTransferRepository } from "../repositories/BankTransferRepository";
 import { qualifyEmail, QualifiedEmail, ParsedBookingData, ParsedBankData } from "./emailParsers";
 import { findMatchingBookings, applyTransferMatch } from "./bookingMatcher";
 import { sendAlertEmail, forwardUnmatchedEmail } from "../_core/email";
@@ -123,44 +124,61 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
   if (!match) {
     if (testMode) return "created";
     // If not found, create it (iCal hasn't seen it yet)
-    console.log(`[Email] No match for ${subTemplate} confirmation. Creating new booking.`);
-    const [insertResult] = await BookingRepository.insertBooking({
-      icalUid: `email-${data.channel}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      property: data.property ?? "Sadoles",
-      channel: data.channel as any,
-      checkIn: data.checkIn,
-      checkOut: data.checkOut,
-      status: initialStatus(data.channel as any),
-      depositStatus: initialDepositStatus(data.channel as any),
-      guestName: data.guestName,
-      guestEmail: data.guestEmail,
-      guestPhone: data.guestPhone,
-      guestCountry: data.guestCountry,
-      guestCount: data.guestCount ?? (data.adultsCount ?? 0) + (data.childrenCount ?? 0),
-      adultsCount: data.adultsCount,
-      childrenCount: data.childrenCount,
-      animalsCount: data.animalsCount,
-      totalPrice: data.totalPrice ? String(data.totalPrice) : undefined,
-      commission: data.commission ? String(data.commission) : undefined,
-      hostRevenue: data.hostRevenue ? String(data.hostRevenue) : undefined,
-      amountPaid: data.amountPaid ? String(data.amountPaid) : "0.00",
-      reservationFee: data.amountPaid ? String(data.amountPaid) : undefined,
-      currency: data.currency ?? "PLN",
-      emailMessageId: email.messageId,
-    });
+    console.log(`[EmailPoller] No match for ${subTemplate} confirmation (${data.checkIn?.toDateString()}). Creating new booking.`);
     
-    const newId = (insertResult as any).insertId;
-    await Logger.bookingAction(newId, "system", `Created via ${subTemplate} email`, `Guest: ${data.guestName}`);
+    let insertResult: any;
+    try {
+      [insertResult] = await BookingRepository.insertBooking({
+        icalUid: `email-${data.channel}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        property: data.property ?? "Sadoles",
+        channel: data.channel as any,
+        checkIn: data.checkIn,
+        checkOut: data.checkOut,
+        status: initialStatus(data.channel as any),
+        depositStatus: initialDepositStatus(data.channel as any),
+        guestName: data.guestName,
+        guestEmail: data.guestEmail,
+        guestPhone: data.guestPhone,
+        guestCountry: data.guestCountry,
+        guestCount: data.guestCount ?? (data.adultsCount ?? 0) + (data.childrenCount ?? 0),
+        adultsCount: data.adultsCount,
+        childrenCount: data.childrenCount,
+        animalsCount: data.animalsCount,
+        totalPrice: data.totalPrice != null ? String(data.totalPrice) : undefined,
+        commission: data.commission != null ? String(data.commission) : undefined,
+        hostRevenue: data.hostRevenue != null ? String(data.hostRevenue) : undefined,
+        amountPaid: data.amountPaid != null ? String(data.amountPaid) : "0.00",
+        reservationFee: data.amountPaid != null ? String(data.amountPaid) : undefined,
+        currency: data.currency ?? "PLN",
+        emailMessageId: email.messageId,
+      });
+    } catch (err) {
+      console.error("[EmailPoller] Failed to insert booking:", err);
+      throw err;
+    }
+    
+    const newId = insertResult?.insertId;
+    if (newId) {
+      await Logger.bookingAction(newId, "system", `Created via ${subTemplate} email`, `Guest: ${data.guestName}`);
+    }
     return "created";
   }
 
   // 2. Enrich existing booking
+  console.log(`[EmailPoller] Found matching booking #${match.id}. Enriching data.`);
   if (testMode) return "updated";
 
+  // Determine if we should update the status
+  let newStatus = match.status;
+  if (data.channel !== "slowhop") {
+    // For Airbnb/Booking, if it's currently pending or it was auto-cancelled (not finished), we can set it to confirmed
+    if (match.status === "pending" || match.status === "cancelled") {
+      newStatus = "confirmed";
+    }
+  }
+
   await BookingRepository.updateBookingDetails(match.id, {
-    // For Slowhop, S1 only enriches data; it does NOT confirm the booking (that's for S2).
-    // For others (Airbnb/Booking), S1 is the confirmation trigger.
-    status: (data.channel === "slowhop" || data.channel === "direct") ? match.status : "confirmed",
+    status: newStatus,
     guestName: data.guestName ?? match.guestName,
     guestEmail: data.guestEmail ?? match.guestEmail,
     guestPhone: data.guestPhone ?? match.guestPhone,
@@ -169,11 +187,11 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
     adultsCount: data.adultsCount ?? match.adultsCount,
     childrenCount: data.childrenCount ?? match.childrenCount,
     animalsCount: data.animalsCount ?? match.animalsCount,
-    totalPrice: data.totalPrice ? String(data.totalPrice) : match.totalPrice,
-    commission: data.commission ? String(data.commission) : match.commission,
-    hostRevenue: data.hostRevenue ? String(data.hostRevenue) : match.hostRevenue,
-    amountPaid: data.amountPaid ? String(data.amountPaid) : match.amountPaid,
-    reservationFee: data.amountPaid ? String(data.amountPaid) : match.reservationFee,
+    totalPrice: data.totalPrice != null ? String(data.totalPrice) : match.totalPrice,
+    commission: data.commission != null ? String(data.commission) : match.commission,
+    hostRevenue: data.hostRevenue != null ? String(data.hostRevenue) : match.hostRevenue,
+    amountPaid: data.amountPaid != null ? String(data.amountPaid) : match.amountPaid,
+    reservationFee: data.amountPaid != null ? String(data.amountPaid) : match.reservationFee,
     currency: data.currency ?? match.currency,
   });
 
@@ -209,17 +227,70 @@ async function handleSlowhopS2(data: ParsedBookingData, testMode: boolean): Prom
 /**
  * Handle Bank Transfer (Template 1).
  */
-async function handleBankTransfer(data: ParsedBankData, email: any, testMode: boolean): Promise<boolean> {
-  // Use the fuzzy matcher logic
+async function handleBankTransfer(data: ParsedBankData | null, email: any, testMode: boolean): Promise<boolean> {
+  if (!data) {
+    console.error(`[EmailPoller] Failed to parse bank transfer data for email: ${email.subject}`);
+    return false;
+  }
+
+  // 1. Persist the transfer to the database
+  if (!testMode) {
+    try {
+      await BankTransferRepository.insertTransfer({
+        externalId: email.messageId,
+        amount: String(data.amount),
+        senderName: data.senderName,
+        transferTitle: data.transferTitle,
+        transferDate: data.transferDate,
+        accountNumber: data.accountNumber,
+        currency: data.currency,
+        status: "pending",
+      });
+    } catch (dbErr) {
+      console.error(`[EmailPoller] Failed to insert bank transfer to DB: ${String(dbErr)}`);
+      // We continue even if DB insertion fails, to attempt auto-matching
+    }
+  }
+
+  // 2. Use the fuzzy matcher logic
   const results = await findMatchingBookings(data as any, testMode); 
   
   if (results.length > 0) {
     const best = results[0];
     if (best.score >= AUTO_MATCH_THRESHOLD) {
       if (testMode) return true;
+
+      // 3. Apply the match to the booking
       await applyTransferMatch(best.bookingId, data as any, best.score);
+
+      // 4. Update the transfer record as matched
+      try {
+        await BankTransferRepository.updateTransferStatusByExternalId(email.messageId, "matched", best.bookingId);
+      } catch (updateErr) {
+        console.error(`[EmailPoller] Failed to update transfer status to matched: ${String(updateErr)}`);
+      }
+
       return true;
     }
+  }
+
+  // 5. If we reach here, no auto-match was found.
+  // Persist the unmatched email forwarding logic (which already exists in pollEmails caller, 
+  // but let's make it cleaner by calling forwardUnmatchedEmail here if it's not a test)
+  if (!testMode) {
+    const simplifiedCandidates = results.slice(0, 3).map(r => ({
+      bookingId: r.bookingId,
+      score: r.score,
+      guestName: r.booking.guestName,
+      checkIn: r.booking.checkIn,
+      property: r.booking.property,
+    }));
+
+    await forwardUnmatchedEmail(
+      { from: email.from, subject: email.subject, body: email.body },
+      simplifiedCandidates,
+      "unmatched"
+    );
   }
 
   return false;
@@ -251,7 +322,7 @@ export async function pollEmails(testMode = false): Promise<{
   
   const stats = {
     templates: { BANK_TRANSFER: 0, BOOKING_CONFIRMATION: 0, OTHER: 0 } as Record<string, number>,
-    subTemplates: { S1: 0, S2: 0, A1: 0, B1: 0, UNKNOWN: 0 } as Record<string, number>,
+    subTemplates: { S1: 0, S2: 0, A1: 0, B1: 0, AL1: 0, AH1: 0, UNKNOWN: 0 } as Record<string, number>,
     bankMatched: 0,
     bankUnmatched: 0,
   };
@@ -274,7 +345,7 @@ export async function pollEmails(testMode = false): Promise<{
 
         switch (qualified.template) {
           case "BOOKING_CONFIRMATION":
-            if (["S1", "A1", "B1"].includes(qualified.subTemplate)) {
+            if (["S1", "A1", "B1", "AL1", "AH1"].includes(qualified.subTemplate)) {
               const result = await handleBookingConfirmation(qualified.subTemplate, qualified.data, email, testMode);
               if (result === "created") action = "added";
               else if (result === "updated") action = "enriched";
@@ -307,8 +378,10 @@ export async function pollEmails(testMode = false): Promise<{
           else if (action === "matched") matched++;
         } else if (!testMode) {
           // Forward unmatched to admin only in normal mode
-          const candidates = qualified.template === "BANK_TRANSFER" ? await findMatchingBookings(qualified.data as any, testMode) : [];
-          await forwardUnmatchedEmail(email, candidates as any, "unmatched");
+          // (BANK_TRANSFER is already handled inside handleBankTransfer)
+          if (qualified.template !== "BANK_TRANSFER") {
+            await forwardUnmatchedEmail(email, [], "unrecognized");
+          }
         }
 
       } catch (err) {

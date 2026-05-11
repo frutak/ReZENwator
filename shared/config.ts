@@ -17,3 +17,6 @@ export type DepositStatus = typeof DEPOSIT_STATUSES[number];
 
 export const CLEANING_STAFF = ["Ala", "Krysia"] as const;
 export type CleaningStaff = typeof CLEANING_STAFF[number];
+
+export const BOOKING_TYPES = ["normal", "block", "internal"] as const;
+export type BookingType = typeof BOOKING_TYPES[number];

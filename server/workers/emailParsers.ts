@@ -16,6 +16,8 @@ export type BookingSubTemplate =
   | "S2" // Slowhop prepayment/commission
   | "A1" // Airbnb confirmation
   | "B1" // Booking.com confirmation
+  | "AL1" // Alohacamp confirmation
+  | "AH1" // Alohacamp confirmation (alias)
   | "UNKNOWN";
 
 export interface QualifiedEmail {
@@ -36,7 +38,7 @@ export interface ParsedBankData {
 }
 
 export interface ParsedBookingData {
-  channel: "slowhop" | "airbnb" | "booking";
+  channel: "slowhop" | "airbnb" | "booking" | "alohacamp";
   bookingId?: string; // System ID from the channel
   guestName?: string;
   guestEmail?: string;
@@ -90,6 +92,19 @@ export function qualifyEmail(from: string, subject: string, body: string): Quali
 
   // 2. Booking Information Email (Template 2)
   
+  // Alohacamp AL1: Confirmation
+  // Jest! Nowa, opłacona rezerwacja (nr 20251037489)🌳
+  if (
+    subjectLower.includes("nowa, opłacona rezerwacja") && 
+    (isFromOrForwarded("alohacamp.com") || bodyLower.includes("alohacamp"))
+  ) {
+    return {
+      template: "BOOKING_CONFIRMATION",
+      subTemplate: "AL1",
+      data: parseAlohacampAL1(subject, body),
+    };
+  }
+
   // Slowhop S1: Confirmation
   if (
     subjectLower.includes("rezerwacja nr") && 
@@ -151,6 +166,61 @@ export function qualifyEmail(from: string, subject: string, body: string): Quali
 }
 
 // ─── Parsers ──────────────────────────────────────────────────────────────────
+
+function parseAlohacampAL1(subject: string, body: string): ParsedBookingData {
+  const idMatch = body.match(/Numer rezerwacji:\s*(\d+)/i) || subject.match(/\(nr\s*(\d+)\)/i);
+  const checkInMatch = body.match(/Zameldowanie:\s*(\d{2}[-/]\d{2}[-/]\d{4})/i);
+  const checkOutMatch = body.match(/Wymeldowanie:\s*(\d{2}[-/]\d{2}[-/]\d{4})/i);
+  const nameMatch = body.match(/Imię i nazwisko:\s*([^\r\n]+)/i);
+  const phoneMatch = body.match(/Telefon:\s*([^\r\n]+)/i);
+
+  // Liberal amount matching: find number following label until end of line or "zł"
+  const priceMatch = body.match(/Cena:\s*([^-\r\n]+)/i);
+  const hostRevenueMatch = body.match(/Wpłata Gościa:\s*([^\r\n]+)/i);
+  
+  // Variations for partial payments
+  const prepaymentMatch = body.match(/Zapłacono zaliczkę:\s*([^\r\n]+)/i);
+  const remainingMatch = body.match(/Do dopłaty:\s*([^\r\n]+)/i);
+
+  let totalPrice = priceMatch ? parsePrice(priceMatch[1]!)?.amount : undefined;
+  let hostRevenue = hostRevenueMatch ? parsePrice(hostRevenueMatch[1]!)?.amount : undefined;
+  const amountPaid = prepaymentMatch ? parsePrice(prepaymentMatch[1]!)?.amount : undefined;
+  const remaining = remainingMatch ? parsePrice(remainingMatch[1]!)?.amount : undefined;
+
+  // If we have prepayment + remaining, calculate total
+  if (!totalPrice && amountPaid != null && remaining != null) {
+    totalPrice = amountPaid + remaining;
+  }
+
+  // Alohacamp Commission: 15% + 23% VAT = 18.45%
+  let commission: number | undefined;
+  if (totalPrice) {
+    commission = Math.round(totalPrice * 0.1845 * 100) / 100;
+    hostRevenue = Math.round((totalPrice - commission) * 100) / 100;
+  }
+
+  let property: Property | undefined;
+  const bodyLower = body.toLowerCase();
+  if (bodyLower.includes("hacjenda")) property = "Hacjenda";
+  else if (bodyLower.includes("sadoles") || bodyLower.includes("sadoleś")) property = "Sadoles";
+
+  console.log(`[AlohacampParser] ID: ${idMatch?.[1]}, In: ${checkInMatch?.[1]}, Out: ${checkOutMatch?.[1]}, Name: ${nameMatch?.[1]}, Price: ${totalPrice}, Commission: ${commission}, Revenue: ${hostRevenue}`);
+
+  return {
+    channel: "alohacamp",
+    bookingId: idMatch ? idMatch[1] : undefined,
+    guestName: nameMatch ? nameMatch[1].trim() : undefined,
+    guestPhone: phoneMatch && !phoneMatch[1].toLowerCase().includes("widoczny") ? phoneMatch[1].trim() : undefined,
+    checkIn: checkInMatch ? parseDMY(checkInMatch[1]!.replace(/\//g, "-")) : undefined,
+    checkOut: checkOutMatch ? parseDMY(checkOutMatch[1]!.replace(/\//g, "-")) : undefined,
+    totalPrice,
+    hostRevenue,
+    commission,
+    amountPaid,
+    currency: "PLN",
+    property,
+  };
+}
 
 function parseNestBankBody(body: string): ParsedBankData | null {
   // Example: "dnia 09.04.2026 nastąpił wpływ 1003,20 PLN na konto BIZnest Konto 11187010452078106769980001, od BOOKING.COM B.V, tytułem NO.RWDHLYJFKNMSCLDS/13416371."
@@ -278,12 +348,12 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
   // 2. Fallback: Check for vertical layout or distinct labels
   if (!checkIn) {
     // Look for Check-in label, then skip up to 50 chars to find a date
-    const ciMatch = body.match(/Check-in.{0,50}?((\w{3},\s+\d{1,2}\s+\w{3})|(\d{1,2}\s+\w{3}))/is);
+    const ciMatch = body.match(/Check-in[\s\S]{0,50}?((\w{3},\s+\d{1,2}\s+\w{3})|(\d{1,2}\s+\w{3}))/i);
     if (ciMatch) checkIn = parseAirbnbDate(ciMatch[1]!);
   }
   
   if (!checkOut) {
-    const coMatch = body.match(/Checkout[:\s\n\r]+.*?((\w{3},\s+\d{1,2}\s+\w{3})|(\d{1,2}\s+\w{3}))/is);
+    const coMatch = body.match(/Checkout[:\s\n\r]+[\s\S]*?((\w{3},\s+\d{1,2}\s+\w{3})|(\d{1,2}\s+\w{3}))/i);
     if (coMatch) checkOut = parseAirbnbDate(coMatch[1]!);
   }
 
@@ -395,7 +465,7 @@ function parseBookingB1(subject: string, body: string): ParsedBookingData {
 /**
  * Detects the source of an email based on sender and subject.
  */
-export function detectEmailSource(from: string, subject: string, body: string): "slowhop" | "airbnb" | "nestbank" | "booking" | "unknown" {
+export function detectEmailSource(from: string, subject: string, body: string): "slowhop" | "airbnb" | "nestbank" | "booking" | "alohacamp" | "unknown" {
   const fromLower = from.toLowerCase();
   const subjectLower = subject.toLowerCase();
   const bodyLower = body.toLowerCase();
@@ -403,6 +473,7 @@ export function detectEmailSource(from: string, subject: string, body: string): 
   if (subjectLower.includes("slowhop") || fromLower.includes("slowhop.com")) return "slowhop";
   if (subjectLower.includes("reservation confirmed") || fromLower.includes("airbnb.com") || bodyLower.includes("automated@airbnb.com")) return "airbnb";
   if (subjectLower.includes("nowa rezerwacja") || fromLower.includes("booking.com")) return "booking";
+  if (subjectLower.includes("nowa, opłacona rezerwacja") || fromLower.includes("alohacamp.com") || bodyLower.includes("alohacamp")) return "alohacamp";
   if (fromLower.includes("nestbank.pl") || subjectLower.includes("wpływ na konto")) return "nestbank";
 
   return "unknown";
@@ -424,5 +495,6 @@ export {
   parseNestBankBody as parseNestbankEmail,
   parseSlowhopS1 as parseSlowhoEmail,
   parseAirbnbA1 as parseAirbnbEmail,
-  parseBookingB1 as parseBookingComEmail
+  parseBookingB1 as parseBookingComEmail,
+  parseAlohacampAL1 as parseAlohacampEmail
 };

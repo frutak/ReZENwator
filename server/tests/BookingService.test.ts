@@ -80,6 +80,48 @@ describe("BookingService", () => {
     expect(Logger.bookingAction).toHaveBeenCalledWith(100, "system", expect.any(String), expect.any(String));
   });
 
+  it("creates a manual booking without pricing checks", async () => {
+    const mockInsertResult = { insertId: 200 };
+    const mockDb = {
+      insert: vi.fn().mockReturnValue({
+        values: vi.fn().mockResolvedValue([mockInsertResult])
+      })
+    };
+    (dbModule.getDb as any).mockResolvedValue(mockDb);
+
+    const input = {
+      property: "Hacjenda" as const,
+      checkIn: new Date("2026-07-01T00:00:00Z"),
+      checkOut: new Date("2026-07-05T00:00:00Z"),
+      guestName: "Manual Guest",
+      totalPrice: "1000.00"
+    };
+
+    const result = await BookingService.createManualBooking(input);
+
+    expect(result.success).toBe(true);
+    expect(result.bookingId).toBe(200);
+    expect(PricingService.calculatePrice).not.toHaveBeenCalled();
+    expect(Logger.bookingAction).toHaveBeenCalledWith(200, "system", "Booking created manually");
+  });
+
+  it("updates booking details successfully", async () => {
+    const mockDb = {
+      update: vi.fn().mockReturnValue({
+        set: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue({})
+        })
+      })
+    };
+    (dbModule.getDb as any).mockResolvedValue(mockDb);
+
+    const result = await BookingService.updateBookingDetails(100, { guestName: "Updated Name", totalPrice: "" });
+
+    expect(result.success).toBe(true);
+    expect(mockDb.update).toHaveBeenCalled();
+    expect(Logger.bookingAction).toHaveBeenCalledWith(100, "manual_edit", "Updated booking details");
+  });
+
   it("throws error when pricing service returns invalid (already booked)", async () => {
     (PricingService.calculatePrice as any).mockResolvedValue({
       valid: false,

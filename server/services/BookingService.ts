@@ -1,10 +1,10 @@
-import { setHours, setMinutes } from "date-fns";
 import { BookingRepository } from "../repositories/BookingRepository";
 import { PricingService } from "./PricingService";
 import { Logger } from "../_core/logger";
 import { sendGuestEmail, sendAlertEmail } from "../_core/email";
 import { format } from "date-fns";
 import { type Property } from "@shared/config";
+import { normalizeBookingDates, calculateTotalGuests, normalizeDecimalFields } from "@shared/utils";
 
 export interface CreateBookingParams {
   property: Property;
@@ -29,15 +29,7 @@ export class BookingService {
    * Submits a new booking after validating dates and calculating the final price.
    */
   static async createBooking(params: CreateBookingParams) {
-    let { checkIn, checkOut } = params;
-
-    // Standardize times if they are exactly at midnight (common for date-only pickers)
-    if (checkIn.getHours() === 0 && checkIn.getMinutes() === 0) {
-      checkIn = setMinutes(setHours(checkIn, 16), 0);
-    }
-    if (checkOut.getHours() === 0 && checkOut.getMinutes() === 0) {
-      checkOut = setMinutes(setHours(checkOut, 10), 0);
-    }
+    const { checkIn, checkOut } = normalizeBookingDates(params.checkIn, params.checkOut);
 
     // Use PricingService for availability and price calculation
     const pricing = await PricingService.calculatePrice({
@@ -56,9 +48,7 @@ export class BookingService {
     const depositAmount = params.purpose === "company" ? 1000 : 500;
     const reservationFee = Math.round((pricing.totalPrice * 0.3) / 100) * 100;
 
-    const adults = params.adultsCount ?? params.guestCount ?? 0;
-    const children = params.childrenCount ?? 0;
-    const totalGuests = (adults + children) > 0 ? (adults + children) : params.guestCount;
+    const totalGuests = calculateTotalGuests(params.guestCount, params.adultsCount, params.childrenCount);
 
     const [insertResult] = await BookingRepository.insertBooking({
       ...params,
@@ -112,5 +102,45 @@ export class BookingService {
     }
 
     return { success: true, bookingId };
+  }
+
+  /**
+   * Creates a booking manually from the dashboard without enforcing pricing/availability checks.
+   */
+  static async createManualBooking(input: any) {
+    const icalUid = `manual-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+    const { checkIn, checkOut } = normalizeBookingDates(input.checkIn, input.checkOut);
+    const finalGuestCount = calculateTotalGuests(input.guestCount, input.adultsCount, input.childrenCount);
+
+    const values = normalizeDecimalFields({ 
+      ...input, 
+      icalUid, 
+      checkIn, 
+      checkOut, 
+      guestCount: finalGuestCount 
+    });
+
+    const [result] = await BookingRepository.insertBooking(values);
+    const newId = (result as any).insertId;
+    
+    if (newId) {
+      await Logger.bookingAction(newId, "system", "Booking created manually");
+    }
+    
+    return { success: true, bookingId: newId };
+  }
+
+  /**
+   * Updates an existing booking's details.
+   */
+  static async updateBookingDetails(id: number, details: any) {
+    console.log(`[updateDetails] Updating booking #${id}:`, JSON.stringify(details));
+
+    const normalizedDetails = normalizeDecimalFields(details);
+    await BookingRepository.updateBookingDetails(id, normalizedDetails);
+    await Logger.bookingAction(id, "manual_edit", "Updated booking details");
+    
+    return { success: true };
   }
 }
