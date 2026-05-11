@@ -180,7 +180,7 @@ export class MatchingEngine {
           }
         }
 
-        if (nSurname && tTitle.includes(nSurname.toUpperCase()) && res.score < 80) {
+        if (nSurname && nSurname.length > 3 && tTitle.includes(nSurname.toUpperCase()) && res.score < 80) {
           bonus += 40;
           res.reasons.push(`Surname (${nSurname}) found in transfer title`);
         }
