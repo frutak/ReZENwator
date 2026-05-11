@@ -1,9 +1,9 @@
 import { and, desc, eq, gte, lte, ne, inArray, or, sql, isNull, lt, notInArray } from "drizzle-orm";
-import { format, startOfDay } from "date-fns";
+import { format, startOfDay, differenceInCalendarMonths, startOfMonth, addMonths, differenceInCalendarDays, eachWeekendOfInterval, isAfter, startOfYear, endOfYear } from "date-fns";
 import { getDb } from "../db";
-import { bookings, bookingActivities } from "../../drizzle/schema";
+import { bookings, bookingActivities, expenses, monthlyAdjustments } from "../../drizzle/schema";
 import { Logger } from "../_core/logger";
-import { type Property, type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
+import { PROPERTIES, type Property, type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
 import { CleaningService } from "../services/CleaningService";
 
 export type BookingFilters = {
@@ -487,7 +487,9 @@ export class BookingRepository {
       .where(
         and(
           eq(bookings.property, property),
-          ne(bookings.status, "cancelled"),
+          // We include cancelled bookings here so they can be matched and revived by iCal sync
+          // if they were previously auto-cancelled by mistake.
+          // ne(bookings.status, "cancelled"), 
           sql`${bookings.checkIn} < ${checkOut}`,
           sql`${bookings.checkOut} > ${checkIn}`
         )
@@ -505,6 +507,7 @@ export class BookingRepository {
         and(
           eq(bookings.property, property),
           ne(bookings.id, currentBookingId),
+          ne(bookings.status, "cancelled"),
           sql`DATE(${bookings.checkOut}) = ${dateStr}`
         )
       );
@@ -578,6 +581,16 @@ export class BookingRepository {
   static async findMissingBookings(property: Property, channel: Channel, todayStart: Date, seenUids: string[]) {
     const db = await getDb();
     if (!db) return [];
+
+    // Safety: If seenUids is empty, it's very likely a transient iCal feed issue.
+    // We don't want to auto-cancel everything for this channel/property.
+    if (seenUids.length === 0) {
+      console.warn(`[BookingRepository] Skipping findMissingBookings for ${property}/${channel} because seenUids is empty (safety check).`);
+      return [];
+    }
+
+    const oneHourAgo = new Date(Date.now() - 1 * 60 * 60 * 1000);
+
     return db
       .select()
       .from(bookings)
@@ -588,8 +601,11 @@ export class BookingRepository {
           ne(bookings.status, "finished"),
           ne(bookings.status, "cancelled"),
           gte(bookings.checkIn, todayStart),
-          seenUids.length > 0 ? notInArray(bookings.icalUid, seenUids) : undefined,
-          ne(bookings.icalUid, "manual")
+          notInArray(bookings.icalUid, seenUids),
+          ne(bookings.icalUid, "manual"),
+          // Grace period: don't auto-cancel email-created bookings if they are less than 1 hour old
+          // and haven't been matched to a real iCal UID yet.
+          sql`(${bookings.icalUid} NOT LIKE 'email-%' OR ${bookings.createdAt} < ${oneHourAgo})`
         )
       );
   }
@@ -614,14 +630,225 @@ export class BookingRepository {
   static async getBookingsForExport(property: Property) {
     const db = await getDb();
     if (!db) return [];
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
     return db
       .select()
       .from(bookings)
       .where(
         and(
           eq(bookings.property, property),
-          ne(bookings.status, "cancelled")
+          ne(bookings.status, "cancelled"),
+          gte(bookings.checkOut, todayStart)
         )
       );
+  }
+
+  static async getAnalytics(filters: {
+    property?: Property;
+    channel?: Channel;
+    year?: number;
+  } = {}) {
+    const db = await getDb();
+    if (!db) return { monthlyData: [], weekendStats: { pastYear: 0, next3Months: 0, next6Months: 0 } };
+
+    const targetYear = filters.year || new Date().getFullYear();
+    const startDate = new Date(targetYear, 0, 1);
+    const endDate = new Date(targetYear, 11, 31, 23, 59, 59);
+
+    // 1. Fetch relevant bookings for financials
+    const commercialConditions = [
+      inArray(bookings.status, ["confirmed", "portal_paid", "paid", "finished"]),
+      ne(bookings.type, "block"),
+      gte(bookings.checkIn, startDate),
+      lte(bookings.checkIn, endDate),
+    ];
+    if (filters.property) commercialConditions.push(eq(bookings.property, filters.property));
+    if (filters.channel) commercialConditions.push(eq(bookings.channel, filters.channel));
+
+    const periodBookings = await db
+      .select()
+      .from(bookings)
+      .where(and(...commercialConditions))
+      .orderBy(bookings.checkIn);
+
+    // 2. Fetch expenses
+    const expenseConditions = [];
+    if (filters.property) expenseConditions.push(eq(expenses.property, filters.property));
+    const allExpenses = await db.select().from(expenses).where(and(...expenseConditions));
+
+    // 3. Fetch all property timeline for Sadoles rules
+    const propertyConditions = [];
+    if (filters.property) propertyConditions.push(eq(bookings.property, filters.property));
+    const timelineBookings = await db
+      .select({
+        id: bookings.id,
+        property: bookings.property,
+        checkIn: bookings.checkIn,
+        checkOut: bookings.checkOut,
+        animalsCount: bookings.animalsCount,
+        status: bookings.status,
+      })
+      .from(bookings)
+      .where(and(
+        ...propertyConditions,
+        inArray(bookings.status, ["confirmed", "portal_paid", "paid", "finished"])
+      ))
+      .orderBy(bookings.checkIn);
+
+    // 4. Initialize months
+    const resultsByMonth: Record<string, any> = {};
+    for (let m = 1; m <= 12; m++) {
+      const monthKey = `${targetYear}-${String(m).padStart(2, '0')}`;
+      resultsByMonth[monthKey] = {
+        month: monthKey,
+        totalPrice: 0,
+        hostRevenue: 0,
+        commission: 0,
+        cleaningCosts: 0,
+        utilityCosts: 0,
+        purchaseCosts: 0,
+        profit: 0,
+        count: 0,
+        totalNights: 0,
+        extraCleaning: 0,
+      };
+    }
+
+    // 5. Aggregate bookings
+    for (const booking of periodBookings) {
+      const bDate = new Date(booking.checkIn);
+      const monthKey = `${bDate.getFullYear()}-${String(bDate.getMonth() + 1).padStart(2, '0')}`;
+      
+      if (!resultsByMonth[monthKey]) continue;
+
+      let previousBooking = null;
+      if (booking.property === "Sadoles") {
+        const index = timelineBookings.findIndex(b => b.id === booking.id);
+        if (index > 0) previousBooking = timelineBookings[index - 1];
+      }
+
+      const cleaningFee = CleaningService.calculateCleaningFee(booking as any, previousBooking as any);
+      const totalPrice = parseFloat(String(booking.totalPrice || "0"));
+      const commission = parseFloat(String(booking.commission || "0"));
+      const hostRevenue = parseFloat(String(booking.hostRevenue || "0"));
+      const nights = Math.max(1, differenceInCalendarDays(new Date(booking.checkOut), new Date(booking.checkIn)));
+
+      resultsByMonth[monthKey].totalPrice += totalPrice;
+      resultsByMonth[monthKey].hostRevenue += hostRevenue;
+      resultsByMonth[monthKey].commission += commission;
+      resultsByMonth[monthKey].cleaningCosts += cleaningFee;
+      resultsByMonth[monthKey].count += 1;
+      resultsByMonth[monthKey].totalNights += nights;
+    }
+
+    // 6. Aggregate expenses
+    for (const expense of allExpenses) {
+      const amount = parseFloat(String(expense.amount));
+      if (expense.type === "purchase") {
+        const pDate = new Date(expense.paymentDate);
+        const monthKey = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}`;
+        if (resultsByMonth[monthKey]) resultsByMonth[monthKey].purchaseCosts += amount;
+      } else if (expense.type === "utility" && expense.startDate && expense.endDate) {
+        const start = startOfMonth(new Date(expense.startDate));
+        const end = startOfMonth(new Date(expense.endDate));
+        const monthCount = differenceInCalendarMonths(end, start) + 1;
+        const monthlyAmount = amount / monthCount;
+        for (let i = 0; i < monthCount; i++) {
+          const uDate = addMonths(start, i);
+          const monthKey = `${uDate.getFullYear()}-${String(uDate.getMonth() + 1).padStart(2, '0')}`;
+          if (resultsByMonth[monthKey]) resultsByMonth[monthKey].utilityCosts += monthlyAmount;
+        }
+      }
+    }
+
+    // 7. Process Monthly Adjustments
+    const adjustments = await db
+      .select()
+      .from(monthlyAdjustments)
+      .where(and(
+        filters.property ? eq(monthlyAdjustments.property, filters.property) : undefined,
+        sql`${monthlyAdjustments.month} LIKE ${`${targetYear}-%`}`
+      ));
+
+    for (const adj of adjustments) {
+      if (resultsByMonth[adj.month]) {
+        const amount = parseFloat(String(adj.amount || "0"));
+        if (adj.category === "extra_cleaning") {
+          resultsByMonth[adj.month].cleaningCosts += amount;
+          resultsByMonth[adj.month].extraCleaning += amount;
+        }
+      }
+    }
+
+    // 8. Calculate final profit
+    for (const key in resultsByMonth) {
+      const m = resultsByMonth[key];
+      m.profit = m.totalPrice - m.commission - m.cleaningCosts - m.utilityCosts - m.purchaseCosts;
+    }
+
+    // 9. Weekend Stats (Optimized Range)
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const p1S = startOfYear(targetYear === currentYear ? now : new Date(targetYear, 0, 1));
+    const p1E = targetYear === currentYear ? now : endOfYear(new Date(targetYear, 0, 1));
+    const p2S = now, p2E = addMonths(now, 3);
+    const p3S = now, p3E = addMonths(now, 6);
+
+    const globalStart = p1S < p2S ? p1S : p2S;
+    const globalEnd = p1E > p3E ? p1E : p3E;
+
+    const occBookings = await db
+      .select({ property: bookings.property, checkIn: bookings.checkIn, checkOut: bookings.checkOut })
+      .from(bookings)
+      .where(and(
+        ne(bookings.status, "cancelled"),
+        gte(bookings.checkOut, globalStart),
+        lte(bookings.checkIn, globalEnd)
+      ));
+
+    if (filters.property) {
+      const filtered = occBookings.filter(b => b.property === filters.property);
+      occBookings.length = 0;
+      occBookings.push(...filtered);
+    }
+
+    const props = filters.property ? [filters.property] : (PROPERTIES as unknown as Property[]);
+    const weekendStats = {
+      pastYear: this.calculateWeekendOccupancy(occBookings, p1S, p1E, props),
+      next3Months: this.calculateWeekendOccupancy(occBookings, p2S, p2E, props),
+      next6Months: this.calculateWeekendOccupancy(occBookings, p3S, p3E, props),
+    };
+
+    return {
+      monthlyData: Object.values(resultsByMonth).sort((a, b) => a.month.localeCompare(b.month)),
+      weekendStats
+    };
+  }
+
+  private static calculateWeekendOccupancy(bookings: any[], start: Date, end: Date, properties: Property[]) {
+    if (isAfter(start, end)) return 0;
+    const weekends = eachWeekendOfInterval({ start, end });
+    const saturdays = weekends.filter(d => d.getDay() === 6);
+    if (saturdays.length === 0) return 0;
+
+    let totalPossible = saturdays.length * properties.length;
+    let bookedCount = 0;
+
+    const parsed = bookings.map(b => ({
+      prop: b.property,
+      in: new Date(b.checkIn).getTime(),
+      out: new Date(b.checkOut).getTime()
+    }));
+
+    for (const sat of saturdays) {
+      const satTime = sat.getTime() + 43200000;
+      const friTime = satTime - 86400000;
+      for (const prop of properties) {
+        const booked = parsed.some(b => b.prop === prop && (b.in < satTime && b.out > friTime));
+        if (booked) bookedCount++;
+      }
+    }
+    return (bookedCount / totalPossible) * 100;
   }
 }

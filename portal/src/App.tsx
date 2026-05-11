@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect } from "react";
 import { Route, Switch, useLocation } from "wouter";
 import { trpc } from "./lib/trpc";
 import { format, eachDayOfInterval, isWithinInterval, addDays, differenceInDays, startOfDay, setHours, setMinutes } from "date-fns";
-import { pl, enGB } from "date-fns/locale";
+import { pl, enUS } from "date-fns/locale";
 import { cn, getThumbnailUrl } from "./lib/utils";
 import { 
   Home as HomeIcon,
@@ -998,7 +998,7 @@ export default function App() {
 function PropertyPage({ property, lang }: { property: "Hacjenda" | "Sadoles", lang: Lang }) {
   const [, setLocation] = useLocation();
   const texts = T[lang];
-  const locale = lang === "PL" ? pl : enGB;
+  const locale = lang === "PL" ? pl : enUS;
   const isHacjenda = property === "Hacjenda";
   const maxGuests = PROPERTIES_DATA[property].maxGuests;
   

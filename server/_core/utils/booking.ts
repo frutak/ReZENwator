@@ -1,5 +1,5 @@
 
-import { type Booking } from "../../drizzle/schema";
+import { type Booking } from "@shared/types";
 
 /**
  * Utility to get a display name for a guest/booking.

@@ -231,10 +231,18 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
       });
 
       if (duplicate) {
-        // A booking for this property+dates already exists from another feed.
-        // Prefer the channel-specific UID over a cross-sync UID.
+        // A booking for this property+dates already exists from another feed or email.
         const existingIsFromOtherFeed = duplicate.channel !== channel;
-        if (existingIsFromOtherFeed && (channel === "airbnb" || channel === "booking")) {
+        const existingIsFromEmail = duplicate.icalUid.startsWith("email-");
+        const isCancelled = duplicate.status === "cancelled";
+
+        // We match and update if:
+        // 1. It was previously cancelled (revival)
+        // 2. It was created via email (enrichment with real iCal UID)
+        // 3. It's from a different channel but we are now seeing it in a more authoritative channel (upgrade)
+        const shouldMatch = isCancelled || existingIsFromEmail || (existingIsFromOtherFeed && (channel === "airbnb" || channel === "booking"));
+
+        if (shouldMatch) {
           // Preserve existing times if incoming was date-only
           if (isCheckInDateOnly) {
             const bIn = new Date(duplicate.checkIn);
@@ -249,10 +257,21 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
             }
           }
 
-          // Upgrade channel attribution to the more authoritative source
-          await BookingRepository.updateBookingDetails(duplicate.id, { channel, icalUid, icalSummary: summary.substring(0, 500), checkIn, checkOut });
+          // Upgrade channel attribution to the more authoritative source and REVIVE if cancelled
+          const updateData: any = { channel, icalUid, icalSummary: summary.substring(0, 500), checkIn, checkOut };
+          if (isCancelled) {
+            updateData.status = initialStatus(channel);
+            console.log(`[iCal] Reviving previously cancelled booking #${duplicate.id} (${duplicate.guestName})`);
+          }
+
+          await BookingRepository.updateBookingDetails(duplicate.id, updateData);
+          
+          if (isCancelled) {
+             await Logger.bookingAction(duplicate.id, "status_change", "Revived from CANCELLED", `Reason: Found in ${feed.label} iCal feed after being missing`);
+          }
+
           console.log(
-            `[iCal] Merged duplicate: ${feed.label} | ${checkIn.toDateString()} → ${checkOut.toDateString()} (upgraded channel from ${duplicate.channel} to ${channel})`
+            `[iCal] Merged duplicate: ${feed.label} | ${checkIn.toDateString()} → ${checkOut.toDateString()} (upgraded from ${duplicate.channel}/${duplicate.icalUid.substring(0,10)}...)`
           );
         } else {
           console.log(

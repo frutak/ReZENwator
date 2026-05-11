@@ -1,9 +1,60 @@
 import { BookingRepository } from "../repositories/BookingRepository";
 import { sendAlertEmail } from "../_core/email";
 import { format, isSameDay, startOfDay, addDays } from "date-fns";
-import { type Property } from "@shared/config";
+import { type Property, type BookingType } from "@shared/config";
 
 export class CleaningService {
+  /**
+   * Calculates the cleaning fee for a booking based on the rules.
+   */
+  static calculateCleaningFee(booking: {
+    property: Property;
+    type: BookingType;
+    checkIn: Date | string;
+    checkOut: Date | string;
+    animalsCount?: number | null;
+  }, previousBooking?: {
+    checkOut: Date | string;
+    animalsCount?: number | null;
+  } | null): number {
+    if (booking.type === "block") return 0;
+
+    const checkIn = new Date(booking.checkIn);
+    const checkOut = new Date(booking.checkOut);
+
+    if (booking.property === "Hacjenda") {
+      // Rule: type "internal" -> 250 PLN
+      if (booking.type === "internal") return 250;
+
+      // Rule: one day stay (same day check-in/out) -> 250 PLN
+      if (isSameDay(checkIn, checkOut)) return 250;
+
+      // Default: 500 PLN
+      return 500;
+    }
+
+    if (booking.property === "Sadoles") {
+      let fee = 500;
+
+      if (previousBooking) {
+        const prevCheckOut = new Date(previousBooking.checkOut);
+        // Rule: back-to-back (check-in on same day as prev check-out) -> +100 PLN
+        if (isSameDay(checkIn, prevCheckOut)) {
+          fee += 100;
+        }
+
+        // Rule: pet on previous booking -> +100 PLN
+        if ((previousBooking.animalsCount ?? 0) > 0) {
+          fee += 100;
+        }
+      }
+
+      return fee;
+    }
+
+    return 500; // Default fallback
+  }
+
   /**
    * Checks if a booking's dates conflict with any existing scheduled cleaning for the same property.
    * A conflict occurs if the gap on the scheduled cleaning date is less than 5 hours.

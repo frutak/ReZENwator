@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/sidebar";
 import { useIsMobile } from "@/hooks/useMobile";
 import { useLanguage } from "@/contexts/LanguageContext";
-import { LayoutDashboard, LogOut, PanelLeft, RefreshCw, Home, CalendarDays, Tag, Globe } from "lucide-react";
+import { LayoutDashboard, LogOut, PanelLeft, RefreshCw, Home, CalendarDays, Tag, Globe, ArrowLeftRight, BarChart3 } from "lucide-react";
 import { CSSProperties, useEffect, useRef, useState, useMemo } from "react";
 import { useLocation } from "wouter";
 
@@ -29,7 +29,9 @@ const menuItems = [
   { icon: LayoutDashboard, label: "nav.bookings", path: "/" },
   { icon: CalendarDays, label: "nav.calendar", path: "/calendar" },
   { icon: Tag, label: "nav.pricing", path: "/pricing" },
+  { icon: ArrowLeftRight, label: "nav.transfers", path: "/transfers" },
   { icon: RefreshCw, label: "nav.operations", path: "/sync" },
+  { icon: BarChart3, label: "nav.analytics", path: "/analytics" },
 ];
 
 const SIDEBAR_WIDTH_KEY = "sidebar-width";

@@ -13,13 +13,13 @@ export async function getDb() {
       });
       
       // Force all database connections to use UTC time zone for NOW() and ON UPDATE NOW()
-      pool.on("connection", (connection) => {
-        connection.query("SET time_zone='+00:00'", (err) => {
+      pool.on("connection", (connection: any) => {
+        connection.query("SET time_zone='+00:00'", (err: any) => {
           if (err) console.error("[Database] Failed to set time_zone:", err);
         });
       });
 
-      _db = drizzle(pool);
+      _db = drizzle(pool) as any;
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;

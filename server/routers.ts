@@ -9,6 +9,7 @@ import { UserRepository } from "./repositories/UserRepository";
 import { PropertyRepository } from "./repositories/PropertyRepository";
 import { SyncRepository } from "./repositories/SyncRepository";
 import { PortalRepository } from "./repositories/PortalRepository";
+import { ExpenseRepository } from "./repositories/ExpenseRepository";
 import { TRPCError } from "@trpc/server";
 import { pollAllICalFeeds, pollICalFeed } from "./workers/icalPoller";
 import { pollEmails } from "./workers/emailPoller";
@@ -22,7 +23,18 @@ import { getICalFeeds } from "./workers/icalConfig";
 import { Logger } from "./_core/logger";
 import { PricingService } from "./services/PricingService";
 import { BookingService } from "./services/BookingService";
+import { BankTransferRepository } from "./repositories/BankTransferRepository";
+import { MatchingEngine } from "./services/MatchingEngine";
+import { MonthlyAdjustmentRepository } from "./repositories/MonthlyAdjustmentRepository";
+import { type ParsedBankData } from "./workers/emailParsers";
 import { PROPERTIES, CHANNELS, STATUSES, DEPOSIT_STATUSES, CLEANING_STAFF } from "@shared/config";
+import { 
+  bookingFilterSchema, 
+  updateBookingDetailsSchema, 
+  createBookingSchema, 
+  submitBookingSchema, 
+  calculatePriceSchema 
+} from "@shared/schema";
 import crypto from "crypto";
 import { ONE_YEAR_MS } from "@shared/const";
 import { sdk } from "./_core/sdk";
@@ -42,19 +54,7 @@ function verifyPassword(password: string, storedHash: string): boolean {
 
 const bookingRouter = router({
   list: publicProcedure
-    .input(
-      z.object({
-        property: z.enum(PROPERTIES).optional(),
-        channel: z.enum(CHANNELS).optional(),
-        status: z.enum(STATUSES).optional(),
-        depositStatus: z.enum(DEPOSIT_STATUSES).optional(),
-        checkInFrom: z.coerce.date().optional(),
-        checkInTo: z.coerce.date().optional(),
-        timeRange: z.enum(["month", "next_month", "3months", "6months", "year", "all"]).optional(),
-        limit: z.number().min(1).max(500).default(200),
-        offset: z.number().min(0).default(0),
-      }).optional()
-    )
+    .input(bookingFilterSchema.optional())
     .query(async ({ input }) => {
       return BookingRepository.getBookings(input ?? {});
     }),
@@ -115,120 +115,16 @@ const bookingRouter = router({
     }),
 
   updateDetails: publicProcedure
-    .input(
-      z.object({
-        id: z.number(),
-        property: z.enum(PROPERTIES).optional(),
-        checkIn: z.coerce.date().optional(),
-        checkOut: z.coerce.date().optional(),
-        guestName: z.string().optional(),
-        guestCountry: z.string().optional(),
-        guestEmail: z.string().optional(),
-        guestPhone: z.string().optional(),
-        guestCount: z.number().optional(),
-        adultsCount: z.number().optional(),
-        childrenCount: z.number().optional(),
-        animalsCount: z.number().optional(),
-        totalPrice: z.string().optional(),
-        commission: z.string().optional(),
-        hostRevenue: z.string().optional(),
-        currency: z.string().optional(),
-        amountPaid: z.string().optional(),
-        depositAmount: z.string().optional(),
-        depositStatus: z.enum(DEPOSIT_STATUSES).optional(),
-        channel: z.enum(CHANNELS).optional(),
-        status: z.enum(STATUSES).optional(),
-        notes: z.string().optional(),
-        purpose: z.string().optional(),
-        companyName: z.string().optional(),
-        nip: z.string().optional(),
-        cleaningDate: z.coerce.date().optional(),
-        cleaningStaff: z.enum(CLEANING_STAFF).optional(),
-      })
-    )
+    .input(updateBookingDetailsSchema)
     .mutation(async ({ input }) => {
       const { id, ...details } = input;
-      console.log(`[updateDetails] Updating booking #${id}:`, JSON.stringify(details));
-
-      // Normalize decimal fields: convert empty strings to null
-      const normalizedDetails: any = { ...details };
-      if (normalizedDetails.totalPrice === "") normalizedDetails.totalPrice = null;
-      if (normalizedDetails.commission === "") normalizedDetails.commission = null;
-      if (normalizedDetails.hostRevenue === "") normalizedDetails.hostRevenue = null;
-      if (normalizedDetails.amountPaid === "") normalizedDetails.amountPaid = null;
-      if (normalizedDetails.depositAmount === "") normalizedDetails.depositAmount = null;
-
-      await BookingRepository.updateBookingDetails(id, normalizedDetails);
-      
-      await Logger.bookingAction(id, "manual_edit", "Updated booking details");
-      
-      return { success: true };
+      return BookingService.updateBookingDetails(id, details);
     }),
 
   create: publicProcedure
-    .input(
-      z.object({
-        property: z.enum(PROPERTIES),
-        checkIn: z.coerce.date(),
-        checkOut: z.coerce.date(),
-        guestName: z.string().optional(),
-        guestCountry: z.string().optional(),
-        guestEmail: z.string().optional(),
-        guestPhone: z.string().optional(),
-        guestCount: z.number().optional(),
-        adultsCount: z.number().optional(),
-        childrenCount: z.number().optional(),
-        animalsCount: z.number().optional(),
-        totalPrice: z.string().optional(),
-        commission: z.string().optional(),
-        hostRevenue: z.string().optional(),
-        currency: z.string().optional(),
-        amountPaid: z.string().optional(),
-        depositAmount: z.string().optional(),
-        depositStatus: z.enum(DEPOSIT_STATUSES).default("pending"),
-        channel: z.enum(CHANNELS).default("direct"),
-        status: z.enum(STATUSES).default("confirmed"),
-        notes: z.string().optional(),
-        purpose: z.string().optional(),
-        companyName: z.string().optional(),
-        nip: z.string().optional(),
-      })
-    )
+    .input(createBookingSchema)
     .mutation(async ({ input }) => {
-      // Generate a unique icalUid for manual bookings
-      const icalUid = `manual-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-
-      let checkIn = input.checkIn;
-      let checkOut = input.checkOut;
-
-      if (checkIn.getHours() === 0 && checkIn.getMinutes() === 0) {
-        checkIn = setMinutes(setHours(checkIn, 16), 0);
-      }
-      if (checkOut.getHours() === 0 && checkOut.getMinutes() === 0) {
-        checkOut = setMinutes(setHours(checkOut, 10), 0);
-      }
-
-      // Normalize decimal fields: convert empty strings to null
-      const adults = input.adultsCount ?? 0;
-      const children = input.childrenCount ?? 0;
-      const calculatedTotal = adults + children;
-      const finalGuestCount = calculatedTotal > 0 ? calculatedTotal : (input.guestCount ?? 0);
-
-      const values: any = { ...input, icalUid, checkIn, checkOut, guestCount: finalGuestCount };
-      if (values.totalPrice === "") values.totalPrice = null;
-      if (values.commission === "") values.commission = null;
-      if (values.hostRevenue === "") values.hostRevenue = null;
-      if (values.amountPaid === "") values.amountPaid = null;
-      if (values.depositAmount === "") values.depositAmount = null;
-
-      const [result] = await BookingRepository.insertBooking(values);
-      const newId = (result as any).insertId;
-      
-      if (newId) {
-        await Logger.bookingAction(newId, "system", "Booking created manually");
-      }
-      
-      return { success: true };
+      return BookingService.createManualBooking(input);
     }),
 
   delete: publicProcedure
@@ -242,6 +138,39 @@ const bookingRouter = router({
     .input(z.object({ bookingId: z.number() }))
     .query(async ({ input }) => {
       return BookingRepository.getBookingActivities(input.bookingId);
+    }),
+
+  analytics: publicProcedure
+    .input(
+      z.object({
+        property: z.enum(PROPERTIES).optional(),
+        channel: z.enum(CHANNELS).optional(),
+        year: z.number().optional(),
+      }).optional()
+    )
+    .query(async ({ input }) => {
+      return BookingRepository.getAnalytics(input ?? {});
+    }),
+
+  getMonthlyAdjustments: publicProcedure
+    .input(z.object({
+      property: z.enum(PROPERTIES),
+      year: z.number(),
+    }))
+    .query(async ({ input }) => {
+      return MonthlyAdjustmentRepository.getAdjustments(input);
+    }),
+
+  updateMonthlyAdjustment: publicProcedure
+    .input(z.object({
+      property: z.enum(PROPERTIES),
+      month: z.string(), // "YYYY-MM"
+      amount: z.string(),
+      category: z.string(),
+      notes: z.string().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      return MonthlyAdjustmentRepository.upsertAdjustment(input);
     }),
 
   /** Pricing procedures */
@@ -321,13 +250,12 @@ const bookingRouter = router({
       await applyTransferMatch(
         input.bookingId,
         {
-          type: "bank",
-          bank: "nestbank",
-          amount: input.transferAmount,
-          senderName: input.transferSender,
-          transferTitle: input.transferTitle,
-          transferDate: input.transferDate,
-          rawText: "",
+          amount: input.transferAmount ?? 0,
+          currency: "PLN",
+          senderName: input.transferSender ?? "",
+          transferTitle: input.transferTitle ?? "",
+          transferDate: input.transferDate ?? new Date(),
+          accountNumber: "",
         },
         input.score
       );
@@ -463,13 +391,7 @@ const publicPortalRouter = router({
     }),
 
   calculatePrice: publicProcedure
-    .input(z.object({
-      property: z.enum(PROPERTIES),
-      checkIn: z.coerce.date(),
-      checkOut: z.coerce.date(),
-      guestCount: z.number().optional(),
-      animalsCount: z.number().optional(),
-    }))
+    .input(calculatePriceSchema)
     .query(async ({ input }) => {
       return PricingService.calculatePrice({
         property: input.property,
@@ -481,23 +403,9 @@ const publicPortalRouter = router({
     }),
 
   submitBooking: publicProcedure
-    .input(z.object({
-      property: z.enum(PROPERTIES),
-      checkIn: z.coerce.date(),
-      checkOut: z.coerce.date(),
-      guestName: z.string(),
-      guestEmail: z.string().email(),
-      guestPhone: z.string(),
-      guestCount: z.number(),
-      animalsCount: z.number().default(0),
-      notes: z.string().optional(),
-      guestCountry: z.string().optional(),
-      purpose: z.string().optional(),
-      companyName: z.string().optional(),
-      nip: z.string().optional(),
-    }))
+    .input(submitBookingSchema)
     .mutation(async ({ input }) => {
-      return BookingService.createBooking(input);
+      return BookingService.createBooking(input as any); // using 'any' safely since Zod schema is strictly matching
     }),
 });
 
@@ -667,7 +575,126 @@ const userRouter = router({
 
 // ─── App router ───────────────────────────────────────────────────────────────
 
+
+// ─── Transfer router ──────────────────────────────────────────────────────────
+
+const transferRouter = router({
+  listPending: publicProcedure
+    .query(async () => {
+      return BankTransferRepository.getTransfersByStatus('pending');
+    }),
+
+  listMatched: publicProcedure
+    .query(async () => {
+      return BankTransferRepository.getMatchedTransfers();
+    }),
+
+  getMatches: publicProcedure
+    .input(z.object({ transferId: z.number() }))
+    .query(async ({ input }) => {
+      const transfer = await BankTransferRepository.getTransferById(input.transferId);
+      if (!transfer) throw new Error('Transfer not found');
+      
+      const parsed: ParsedBankData = {
+        amount: parseFloat(transfer.amount),
+        currency: transfer.currency,
+        senderName: transfer.senderName,
+        transferTitle: transfer.transferTitle,
+        transferDate: transfer.transferDate,
+        accountNumber: transfer.accountNumber ?? '',
+      };
+
+      const windowStart = new Date(transfer.transferDate);
+      windowStart.setFullYear(windowStart.getFullYear() - 1);
+      const windowEnd = new Date(transfer.transferDate);
+      windowEnd.setFullYear(windowEnd.getFullYear() + 1);
+      
+      const tTitle = transfer.transferTitle.toUpperCase();
+      const tSender = transfer.senderName.toUpperCase();
+      
+      const isAirbnbPayout = tTitle.includes('AIRBNB') || tSender.includes('PAYONEER') || tSender.includes('AIRBNB');
+      const isBookingPayout = tTitle.includes('BOOKING.COM') || tSender.includes('BOOKING.COM') || tTitle.includes('BOOKING') || tSender.includes('BOOKING');
+      const isPortalPayout = isAirbnbPayout || isBookingPayout;
+
+      let candidates: any[] = [];
+      if (isPortalPayout) {
+         candidates = await BookingRepository.findPortalPayoutCandidates(isAirbnbPayout ? 'airbnb' : 'booking', windowStart, windowEnd);
+      } else {
+         candidates = await BookingRepository.findDirectTransferCandidates(windowStart, windowEnd);
+      }
+
+      return MatchingEngine.scoreCandidates(parsed, candidates as any, !!isPortalPayout);
+    }),
+
+  manualMatch: publicProcedure
+    .input(z.object({ transferId: z.number(), bookingId: z.number() }))
+    .mutation(async ({ input }) => {
+      const transfer = await BankTransferRepository.getTransferById(input.transferId);
+      if (!transfer) throw new Error('Transfer not found');
+
+      const parsed: ParsedBankData = {
+        amount: parseFloat(transfer.amount),
+        currency: transfer.currency,
+        senderName: transfer.senderName,
+        transferTitle: transfer.transferTitle,
+        transferDate: transfer.transferDate,
+        accountNumber: transfer.accountNumber ?? '',
+      };
+
+      await applyTransferMatch(input.bookingId, parsed, 100);
+      await BankTransferRepository.updateTransferStatus(input.transferId, 'matched', input.bookingId);
+      
+      return { success: true };
+    }),
+
+  markIrrelevant: publicProcedure
+    .input(z.object({ transferId: z.number() }))
+    .mutation(async ({ input }) => {
+      await BankTransferRepository.updateTransferStatus(input.transferId, 'ignored');
+      return { success: true };
+    }),
+});
+
+const expenseRouter = router({
+  list: publicProcedure
+    .input(z.object({ 
+      property: z.enum(PROPERTIES).optional(),
+      type: z.enum(["utility", "purchase"]).optional(),
+      year: z.number().optional()
+    }).optional())
+    .query(async ({ input }) => {
+      return ExpenseRepository.getExpenses(input ?? {});
+    }),
+
+  add: publicProcedure
+    .input(z.object({
+      property: z.enum(PROPERTIES),
+      type: z.enum(["utility", "purchase"]),
+      category: z.string(),
+      amount: z.string(),
+      paymentDate: z.coerce.date(),
+      startDate: z.coerce.date().optional(),
+      endDate: z.coerce.date().optional(),
+      notes: z.string().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      return ExpenseRepository.insertExpense({
+        ...input,
+        amount: input.amount,
+      });
+    }),
+
+  delete: publicProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      await ExpenseRepository.deleteExpense(input.id);
+      return { success: true };
+    }),
+});
+
 export const appRouter = router({
+  expenses: expenseRouter,
+  transfers: transferRouter,
   system: systemRouter,
   user: userRouter,
   auth: router({

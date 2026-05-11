@@ -7,8 +7,37 @@ const t = initTRPC.context<TrpcContext>().create({
   transformer: superjson,
 });
 
+const auditMiddleware = t.middleware(async ({ type, path, ctx, next, getRawInput }) => {
+  const start = Date.now();
+  const result = await next();
+  const durationMs = Date.now() - start;
+
+  if (type === "mutation") {
+    const user = ctx.user ? ctx.user.username : "System/Public";
+    const status = result.ok ? "OK" : "ERROR";
+    console.log(`[Audit] [${status}] ${user} executed ${path} in ${durationMs}ms`);
+  }
+  
+  return result;
+});
+
+const propertyAccessMiddleware = t.middleware(async ({ ctx, next, getRawInput }) => {
+  const input = await getRawInput() as any;
+  
+  if (ctx.user?.propertyAccess && input && input.property) {
+    if (input.property !== ctx.user.propertyAccess) {
+      throw new TRPCError({ 
+        code: "FORBIDDEN", 
+        message: `You are restricted to ${ctx.user.propertyAccess} only.` 
+      });
+    }
+  }
+  
+  return next();
+});
+
 export const router = t.router;
-export const publicProcedure = t.procedure;
+export const publicProcedure = t.procedure.use(auditMiddleware).use(propertyAccessMiddleware);
 
 const requireUser = t.middleware(async opts => {
   const { ctx, next } = opts;
@@ -25,9 +54,9 @@ const requireUser = t.middleware(async opts => {
   });
 });
 
-export const protectedProcedure = t.procedure.use(requireUser);
+export const protectedProcedure = t.procedure.use(auditMiddleware).use(propertyAccessMiddleware).use(requireUser);
 
-export const adminProcedure = t.procedure.use(
+export const adminProcedure = t.procedure.use(auditMiddleware).use(propertyAccessMiddleware).use(
   t.middleware(async opts => {
     const { ctx, next } = opts;
 

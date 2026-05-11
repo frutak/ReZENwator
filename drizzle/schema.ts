@@ -59,6 +59,8 @@ export const bookings = mysqlTable(
       "alohacamp",
       "direct",
     ]).notNull(),
+    /** Booking type: "normal", "block", "internal" */
+    type: mysqlEnum("type", ["normal", "block", "internal"]).default("normal").notNull(),
 
     // Dates
     checkIn: datetime("checkIn").notNull(),
@@ -384,3 +386,74 @@ export const priceAudits = mysqlTable("price_audits", {
 
 export type PriceAudit = typeof priceAudits.$inferSelect;
 export type InsertPriceAudit = typeof priceAudits.$inferInsert;
+
+/**
+ * Expenses table — tracks utilities and purchases.
+ */
+export const expenses = mysqlTable("expenses", {
+  id: int("id").autoincrement().primaryKey(),
+  property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).notNull(),
+  type: mysqlEnum("type", ["utility", "purchase"]).notNull(),
+  /** For utilities: electricity, gas, water, other. For purchases: custom string. */
+  category: varchar("category", { length: 128 }).notNull(),
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+  paymentDate: datetime("paymentDate").notNull(),
+  /** For utility spreading: start of the covered period */
+  startDate: datetime("startDate"),
+  /** For utility spreading: end of the covered period */
+  endDate: datetime("endDate"),
+  notes: text("notes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_expense_property").on(table.property),
+  index("idx_expense_type").on(table.type),
+  index("idx_expense_payment_date").on(table.paymentDate),
+]);
+
+export type Expense = typeof expenses.$inferSelect;
+export type InsertExpense = typeof expenses.$inferInsert;
+
+/**
+ * Bank transfers — stores incoming bank notifications from email for manual or automatic matching.
+ */
+export const bankTransfers = mysqlTable("bank_transfers", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Unique ID from email (Message-ID) to prevent duplicate processing */
+  externalId: varchar("externalId", { length: 512 }).notNull().unique(),
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+  senderName: varchar("senderName", { length: 256 }).notNull(),
+  transferTitle: varchar("transferTitle", { length: 512 }).notNull(),
+  transferDate: datetime("transferDate").notNull(),
+  accountNumber: varchar("accountNumber", { length: 64 }),
+  currency: varchar("currency", { length: 8 }).default("PLN").notNull(),
+  status: mysqlEnum("status", ["pending", "matched", "ignored"]).default("pending").notNull(),
+  matchedBookingId: int("matchedBookingId"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_transfer_status").on(table.status),
+  index("idx_transfer_date").on(table.transferDate),
+]);
+
+export type BankTransfer = typeof bankTransfers.$inferSelect;
+export type InsertBankTransfer = typeof bankTransfers.$inferInsert;
+
+/**
+ * Monthly adjustments for property costs (e.g. extra cleaning, lawn moving).
+ */
+export const monthlyAdjustments = mysqlTable("monthly_adjustments", {
+  id: int("id").autoincrement().primaryKey(),
+  property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).notNull(),
+  month: varchar("month", { length: 7 }).notNull(), // "YYYY-MM"
+  amount: decimal("amount", { precision: 10, scale: 2 }).default("0.00").notNull(),
+  category: varchar("category", { length: 128 }).default("extra_cleaning").notNull(),
+  notes: text("notes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("idx_prop_month_cat").on(table.property, table.month, table.category),
+]);
+
+export type MonthlyAdjustment = typeof monthlyAdjustments.$inferSelect;
+export type InsertMonthlyAdjustment = typeof monthlyAdjustments.$inferInsert;

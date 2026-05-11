@@ -10,11 +10,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { RefreshCw, Mail, CheckCircle2, XCircle, FileText, Download, Star } from "lucide-react";
+import { RefreshCw, Mail, CheckCircle2, XCircle, FileText, Download, Star, Receipt } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
+import { useLanguage } from "@/contexts/LanguageContext";
+import { ExpensesManager } from "@/components/ExpensesManager";
 
 export default function Operations() {
+  const { t } = useLanguage();
   const { data: lastRun } = trpc.sync.lastRun.useQuery();
   const { data: logs = [] } = trpc.sync.logs.useQuery({ limit: 30 });
   const { data: feeds = [] } = trpc.sync.feeds.useQuery();
@@ -118,14 +122,27 @@ export default function Operations() {
     <DashboardLayout>
       <div className="max-w-5xl mx-auto">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold tracking-tight">Operations</h1>
+          <h1 className="text-2xl font-bold tracking-tight">{t("nav.operations")}</h1>
           <p className="text-sm text-muted-foreground mt-0.5">
             System maintenance, data synchronization and reports
           </p>
         </div>
 
-        {/* Reports Section */}
-        <Card className="border-0 shadow-sm mb-6">
+        <Tabs defaultValue="sync" className="space-y-6">
+          <TabsList className="grid w-full grid-cols-2 lg:w-[400px]">
+            <TabsTrigger value="sync" className="flex items-center gap-2">
+              <RefreshCw className="h-4 w-4" />
+              Sync & Reports
+            </TabsTrigger>
+            <TabsTrigger value="expenses" className="flex items-center gap-2">
+              <Receipt className="h-4 w-4" />
+              {t("operations.expenses")}
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="sync" className="space-y-6">
+            {/* Reports Section */}
+            <Card className="border-0 shadow-sm">
           <CardHeader className="pb-3">
             <div className="flex items-center gap-2">
               <FileText className="h-5 w-5 text-primary" />
@@ -306,7 +323,7 @@ export default function Operations() {
                         ) : (
                           <span className="text-xs text-muted-foreground italic">Never</span>
                         )}
-                        {status?.consecutiveFailures > 0 && (
+                        {status && status.consecutiveFailures > 0 && (
                           <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded bg-red-50 text-[10px] font-medium text-red-600 border border-red-100" title={status.lastError || "Unknown error"}>
                             {status.consecutiveFailures} errors
                           </span>
@@ -405,6 +422,12 @@ export default function Operations() {
             </table>
           </CardContent>
         </Card>
+          </TabsContent>
+
+          <TabsContent value="expenses">
+            <ExpensesManager />
+          </TabsContent>
+        </Tabs>
       </div>
     </DashboardLayout>
   );
