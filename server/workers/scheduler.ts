@@ -13,6 +13,7 @@ import { pollEmails } from "./emailPoller";
 import { runDailyMaintenance } from "./dailyAlerts";
 import { updateAllPropertyRatings } from "./ratingScraper";
 import { PricingAuditor } from "./pricingAuditor";
+import { checkPortalHealth } from "./portalWatchdog";
 
 let schedulerStarted = false;
 
@@ -22,6 +23,18 @@ export function startScheduler(): void {
     return;
   }
   schedulerStarted = true;
+
+  // ── Portal watchdog: every hour ───────────────────────────────────────────
+  cron.schedule("0 0 * * * *", async () => {
+    console.log("[Scheduler] Running portal watchdog check...");
+    try {
+      await checkPortalHealth();
+    } catch (err) {
+      console.error("[Scheduler] Portal watchdog failed:", err);
+    }
+  }, {
+    timezone: "Europe/Warsaw"
+  });
 
   // ── iCal polling: every 30 minutes ────────────────────────────────────────
   cron.schedule("0 */30 * * * *", async () => {
@@ -105,11 +118,11 @@ export function startScheduler(): void {
   }, 65_000);
 
   setTimeout(async () => {
-    console.log("[Scheduler] Running initial pricing audit on startup...");
+    console.log("[Scheduler] Running initial portal health check on startup...");
     try {
-      await PricingAuditor.runDailyAudit();
+      await checkPortalHealth();
     } catch (err) {
-      console.error("[Scheduler] Initial pricing audit failed:", err);
+      console.error("[Scheduler] Initial portal health check failed:", err);
     }
-  }, 70_000);
+  }, 75_000);
 }
