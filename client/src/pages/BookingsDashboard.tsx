@@ -56,7 +56,14 @@ function StatsCards({ filters }: { filters: { property?: string; channel?: strin
   
   const statusFilter = useMemo(() => {
     if (filters.status === "all") return allExceptCancelled;
-    if (filters.status === "active") return activeStatuses;
+    if (filters.status === "active") {
+      // We pass the base active statuses, but the backend stats will need to be smart 
+      // or we handle it here if we want consistency.
+      // Since backend getBookingStats uses status as an array of allowed statuses,
+      // we can include 'finished' and then the backend might need to filter by deposit too.
+      // For now let's just add 'finished' to the array if we want it in stats.
+      return [...activeStatuses, "finished" as const];
+    }
     return [filters.status as any];
   }, [filters.status]);
 
@@ -183,7 +190,10 @@ export default function BookingsDashboard() {
   const bookingList = useMemo(() => {
     let list = [...rawBookingList];
     if (status === "active") {
-      list = list.filter(b => b.status !== "finished" && b.status !== "cancelled");
+      list = list.filter(b => 
+        (b.status !== "finished" && b.status !== "cancelled") || 
+        (b.status === "finished" && b.depositStatus === "paid")
+      );
     }
     
     // Search filter
