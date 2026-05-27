@@ -11,7 +11,7 @@ export function generateIcalString(property: string, bookings: Booking[]): strin
     "PRODID:-//ReZENwator//NONSGML iCal Export//EN",
     "CALSCALE:GREGORIAN",
     "METHOD:PUBLISH",
-    `X-WR-CALNAME:${property} Bookings`,
+    `X-WR-CALNAME:${property} Bookings (v${format(new Date(), "yyyyMMddHHmm")})`,
   ];
 
   for (const b of bookings) {
@@ -76,6 +76,16 @@ export function generateIcalString(property: string, bookings: Booking[]): strin
       lines.push(`UID:${uid}-turn-dep`);
       lines.push(`SUMMARY:Turnover Protection (Late Departure): ${summary}`);
       lines.push("STATUS:CONFIRMED");
+      lines.push("TRANSP:OPAQUE");
+      lines.push("END:VEVENT");
+    }
+  }
+
+  lines.push("END:VCALENDAR");
+
+  return lines.join("\r\n");
+}
+ lines.push("STATUS:CONFIRMED");
       lines.push("TRANSP:OPAQUE");
       lines.push("END:VEVENT");
     }

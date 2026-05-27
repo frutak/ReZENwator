@@ -165,10 +165,11 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
       const durationMs = checkOut.getTime() - checkIn.getTime();
       const durationDays = durationMs / (1000 * 60 * 60 * 24);
       
-      // Filter: short block (<= 1 night) AND either "not available" summary OR starts very soon
+      // Filter: short block (<= 1 night) AND "not available" summary AND starts very soon
+      // This specifically catches Airbnb's "Preparation Time" automatic blocks while sparing real 1-night bookings.
       const startsWithin2Days = (checkIn.getTime() - Date.now()) < 2 * 24 * 60 * 60 * 1000;
       
-      if (durationDays <= 1.1 && (isNotAvailable || startsWithin2Days)) {
+      if (durationDays <= 1.1 && isNotAvailable && startsWithin2Days) {
         console.log(`[iCal] Skipped Airbnb system block: ${summary} | ${checkIn.toDateString()} → ${checkOut.toDateString()}`);
         continue;
       }
@@ -232,15 +233,13 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
 
       if (duplicate) {
         // A booking for this property+dates already exists from another feed or email.
-        const existingIsFromOtherFeed = duplicate.channel !== channel;
+        const existingIsFromSameChannel = duplicate.channel === channel;
         const existingIsFromEmail = duplicate.icalUid.startsWith("email-");
-        const isCancelled = duplicate.status === "cancelled";
 
         // We match and update if:
-        // 1. It was previously cancelled (revival)
-        // 2. It was created via email (enrichment with real iCal UID)
-        // 3. It's from a different channel but we are now seeing it in a more authoritative channel (upgrade)
-        const shouldMatch = isCancelled || existingIsFromEmail || (existingIsFromOtherFeed && (channel === "airbnb" || channel === "booking"));
+        // 1. It was created via email (enrichment with real iCal UID)
+        // 2. It's from the SAME channel (re-sync/update)
+        const shouldMatch = existingIsFromEmail || existingIsFromSameChannel;
 
         if (shouldMatch) {
           // Preserve existing times if incoming was date-only
@@ -257,18 +256,10 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
             }
           }
 
-          // Upgrade channel attribution to the more authoritative source and REVIVE if cancelled
+          // Upgrade channel attribution to the more authoritative source
           const updateData: any = { channel, icalUid, icalSummary: summary.substring(0, 500), checkIn, checkOut };
-          if (isCancelled) {
-            updateData.status = initialStatus(channel);
-            console.log(`[iCal] Reviving previously cancelled booking #${duplicate.id} (${duplicate.guestName})`);
-          }
 
           await BookingRepository.updateBookingDetails(duplicate.id, updateData);
-          
-          if (isCancelled) {
-             await Logger.bookingAction(duplicate.id, "status_change", "Revived from CANCELLED", `Reason: Found in ${feed.label} iCal feed after being missing`);
-          }
 
           console.log(
             `[iCal] Merged duplicate: ${feed.label} | ${checkIn.toDateString()} → ${checkOut.toDateString()} (upgraded from ${duplicate.channel}/${duplicate.icalUid.substring(0,10)}...)`
