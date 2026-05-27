@@ -85,13 +85,3 @@ export function generateIcalString(property: string, bookings: Booking[]): strin
 
   return lines.join("\r\n");
 }
- lines.push("STATUS:CONFIRMED");
-      lines.push("TRANSP:OPAQUE");
-      lines.push("END:VEVENT");
-    }
-  }
-
-  lines.push("END:VCALENDAR");
-
-  return lines.join("\r\n");
-}
