@@ -153,12 +153,27 @@ export class BookingRepository {
       guestCountry: bookings.guestCountry,
       totalPrice: bookings.totalPrice,
       hostRevenue: bookings.hostRevenue,
+      depositStatus: bookings.depositStatus,
     }).from(bookings).where(
       and(
         ...conditions,
         !filters.status || filters.status.length === 0 ? ne(bookings.status, "cancelled") : undefined
       )
-    );
+    ).then(rows => {
+      // If status filter is provided and contains 'finished', 
+      // we might want to apply special logic for 'active' view consistency.
+      // However, usually filters.status being [pending, confirmed, portal_paid, paid, finished] 
+      // comes from "active" or "all" in dashboard.
+      // To match the UI list: when in "active" mode, finished bookings only count if deposit is paid.
+      
+      // Let's see if we can detect 'active' mode. In dashboard, active = [pending, confirmed, portal_paid, paid, finished] (after my change)
+      const isActiveMode = filters.status?.includes("pending") && filters.status?.includes("finished");
+      
+      if (isActiveMode) {
+        return rows.filter(b => b.status !== "finished" || b.depositStatus === "paid");
+      }
+      return rows;
+    });
 
     const upcoming = filtered.filter((b) => new Date(b.checkIn) > now && b.status !== "finished");
     const active = filtered.filter((b) => {
@@ -225,6 +240,7 @@ export class BookingRepository {
       .from(bookings)
       .where(
         and(
+          ne(bookings.type, "internal"),
           or(
             // Leisure: must have guestName
             and(
@@ -487,9 +503,7 @@ export class BookingRepository {
       .where(
         and(
           eq(bookings.property, property),
-          // We include cancelled bookings here so they can be matched and revived by iCal sync
-          // if they were previously auto-cancelled by mistake.
-          // ne(bookings.status, "cancelled"), 
+          ne(bookings.status, "cancelled"), 
           sql`${bookings.checkIn} < ${checkOut}`,
           sql`${bookings.checkOut} > ${checkIn}`
         )

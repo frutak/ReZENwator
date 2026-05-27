@@ -24,6 +24,12 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
 
   for (const booking of activeBookings) {
     try {
+      // Skip internal bookings - communication is handled manually
+      if (booking.type === "internal") {
+        console.log(`[GuestEmailWorker] Skipping booking #${booking.id} because it is an internal booking.`);
+        continue;
+      }
+
       // Skip bookings with missing essential data (name or email)
       // Exception: Airbnb bookings don't have guest email, so we allow them
       const isMissingEssential = !booking.guestName || (!booking.guestEmail && booking.channel !== "airbnb");
