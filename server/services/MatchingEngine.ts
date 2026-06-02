@@ -33,29 +33,38 @@ export class MatchingEngine {
 
     // Specialized matching for Portal Payouts (Airbnb/Booking.com)
     if (isPortalPayout) {
-      let bestPortalMatch: CandidateBooking | null = null;
-      let minDiff = Infinity;
+      const matches = candidates
+        .filter(c => {
+          const cRevenue = parseFloat(String(c.hostRevenue || "0"));
+          const cPaid = parseFloat(String(c.amountPaid || "0"));
+          
+          // Skip if already fully paid (within 1 PLN margin) for portal payouts.
+          // This prevents duplicate matching when a booking was already marked paid (e.g. via email parser).
+          if (cRevenue > 0 && cPaid >= cRevenue - 1.0) return false;
 
-      for (const candidate of candidates) {
-        const cRevenue = parseFloat(String(candidate.hostRevenue || "0"));
-        if (cRevenue <= 0) continue;
+          return cRevenue > 0 && Math.abs(transfer.amount - cRevenue) / cRevenue < 0.01;
+        })
+        .sort((a, b) => {
+          const revA = parseFloat(String(a.hostRevenue || "0"));
+          const revB = parseFloat(String(b.hostRevenue || "0"));
+          const diffA = Math.abs(transfer.amount - revA);
+          const diffB = Math.abs(transfer.amount - revB);
+          
+          // If the difference in amount is negligible (less than 0.01 PLN), 
+          // use the earliest check-in date as a tie-breaker.
+          if (Math.abs(diffA - diffB) < 0.01) {
+            return a.checkIn.getTime() - b.checkIn.getTime();
+          }
+          return diffA - diffB;
+        });
 
-        const diff = Math.abs(transfer.amount - cRevenue);
-        const diffPercent = diff / cRevenue;
-
-        if (diffPercent < 0.01 && diff < minDiff) {
-          minDiff = diff;
-          bestPortalMatch = candidate;
-        }
-      }
-
-      if (bestPortalMatch) {
-        return [{
-          bookingId: bestPortalMatch.id,
+      if (matches.length > 0) {
+        return matches.map(m => ({
+          bookingId: m.id,
           score: 100,
-          booking: bestPortalMatch,
-          reasons: ["Portal payout: Exact or near match to host revenue (within 1%)"],
-        }];
+          booking: m,
+          reasons: ["Portal payout: Exact or near match to host revenue"],
+        }));
       }
     }
 
@@ -293,7 +302,7 @@ export class MatchingEngine {
         amountScore = 100;
         reasons.push("Matches host revenue (portal payout)");
       } else if (candidate.channel === "slowhop") {
-        const hostPrepayment = cResFee - (cComm * 1.23);
+        const hostPrepayment = cResFee - cComm;
         const guestBalance = (cTotal - cResFee) + cDeposit;
         const guestJustBalance = (cTotal - cResFee);
         if (cResFee > 0 && Math.abs(transfer.amount - hostPrepayment) < 1.0) {

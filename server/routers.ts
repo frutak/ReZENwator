@@ -13,7 +13,7 @@ import { ExpenseRepository } from "./repositories/ExpenseRepository";
 import { TRPCError } from "@trpc/server";
 import { pollAllICalFeeds, pollICalFeed } from "./workers/icalPoller";
 import { pollEmails } from "./workers/emailPoller";
-import { findMatchingBookings, applyTransferMatch } from "./workers/bookingMatcher";
+import { findMatchingBookings, applyTransferMatch, revertTransferMatch } from "./workers/bookingMatcher";
 import { updateAllPropertyRatings } from "./workers/ratingScraper";
 import { PricingAuditor } from "./workers/pricingAuditor";
 import { PricingAuditRepository } from "./repositories/PricingAuditRepository";
@@ -632,6 +632,11 @@ const transferRouter = router({
       const transfer = await BankTransferRepository.getTransferById(input.transferId);
       if (!transfer) throw new Error('Transfer not found');
 
+      // If already matched, revert the previous booking's payment
+      if (transfer.status === 'matched' && transfer.matchedBookingId) {
+        await revertTransferMatch(transfer.matchedBookingId, parseFloat(transfer.amount));
+      }
+
       const parsed: ParsedBankData = {
         amount: parseFloat(transfer.amount),
         currency: transfer.currency,
@@ -643,10 +648,9 @@ const transferRouter = router({
 
       await applyTransferMatch(input.bookingId, parsed, 100);
       await BankTransferRepository.updateTransferStatus(input.transferId, 'matched', input.bookingId);
-      
+
       return { success: true };
     }),
-
   markIrrelevant: publicProcedure
     .input(z.object({ transferId: z.number() }))
     .mutation(async ({ input }) => {
@@ -682,6 +686,23 @@ const expenseRouter = router({
         ...input,
         amount: input.amount,
       });
+    }),
+
+  update: publicProcedure
+    .input(z.object({
+      id: z.number(),
+      property: z.enum(PROPERTIES),
+      type: z.enum(["utility", "purchase"]),
+      category: z.string(),
+      amount: z.string(),
+      paymentDate: z.coerce.date(),
+      startDate: z.coerce.date().optional(),
+      endDate: z.coerce.date().optional(),
+      notes: z.string().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const { id, ...values } = input;
+      return ExpenseRepository.updateExpense(id, values);
     }),
 
   delete: publicProcedure

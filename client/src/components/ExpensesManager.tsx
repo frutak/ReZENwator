@@ -30,6 +30,7 @@ import { toast } from "sonner";
 import { 
   Plus, 
   Trash2, 
+  Pencil,
   Zap, 
   Flame, 
   Droplets, 
@@ -83,8 +84,23 @@ export function ExpensesManager() {
     }
   });
 
+  const updateMutation = trpc.expenses.update.useMutation({
+    onSuccess: () => {
+      utils.expenses.list.invalidate();
+      utils.bookings.analytics.invalidate();
+      toast.success(t("operations.expense_updated") || "Expense updated");
+      setIsEditOpen(false);
+      setEditingExpense(null);
+    },
+    onError: (err) => {
+      toast.error(`Failed to update: ${err.message}`);
+    }
+  });
+
   const [isAddUtilityOpen, setIsAddUtilityOpen] = useState(false);
   const [isAddPurchaseOpen, setIsAddPurchaseOpen] = useState(false);
+  const [isEditOpen, setIsEditOpen] = useState(false);
+  const [editingExpense, setEditingExpense] = useState<any>(null);
 
   const [form, setForm] = useState({
     property: "Sadoles",
@@ -119,6 +135,33 @@ export function ExpensesManager() {
       endDate: undefined,
     }, {
       onSuccess: () => setIsAddPurchaseOpen(false),
+    });
+  };
+
+  const handleEdit = (expense: any) => {
+    setEditingExpense(expense);
+    setForm({
+      property: expense.property,
+      category: expense.category,
+      amount: String(expense.amount),
+      paymentDate: format(new Date(expense.paymentDate), "yyyy-MM-dd"),
+      startDate: expense.startDate ? format(new Date(expense.startDate), "yyyy-MM-dd") : format(new Date(), "yyyy-MM-dd"),
+      endDate: expense.endDate ? format(new Date(expense.endDate), "yyyy-MM-dd") : format(new Date(), "yyyy-MM-dd"),
+      notes: expense.notes || "",
+    });
+    setIsEditOpen(true);
+  };
+
+  const handleUpdate = () => {
+    if (!editingExpense) return;
+    updateMutation.mutate({
+      id: editingExpense.id,
+      ...form,
+      property: form.property as any,
+      type: editingExpense.type,
+      paymentDate: new Date(form.paymentDate),
+      startDate: editingExpense.type === "utility" ? new Date(form.startDate) : undefined,
+      endDate: editingExpense.type === "utility" ? new Date(form.endDate) : undefined,
     });
   };
 
@@ -326,6 +369,107 @@ export function ExpensesManager() {
         </div>
       </div>
 
+      <Dialog open={isEditOpen} onOpenChange={setIsEditOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{editingExpense?.type === "utility" ? t("operations.edit_utility") || "Edit Utility" : t("operations.edit_purchase") || "Edit Purchase"}</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-xs font-bold uppercase text-muted-foreground">{t("cleaning.property")}</label>
+                <Select value={form.property} onValueChange={v => setForm({...form, property: v})}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {PROPERTIES.map(p => (
+                      <SelectItem key={p} value={p}>{p}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {editingExpense?.type === "utility" ? (
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase text-muted-foreground">{t("operations.utility_type")}</label>
+                  <Select value={form.category} onValueChange={v => setForm({...form, category: v})}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="power">{t("operations.power")}</SelectItem>
+                      <SelectItem value="gas">{t("operations.gas")}</SelectItem>
+                      <SelectItem value="water">{t("operations.water")}</SelectItem>
+                      <SelectItem value="other">{t("operations.other")}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase text-muted-foreground">{t("operations.purchase_item")}</label>
+                  <Input 
+                    value={form.category} 
+                    onChange={e => setForm({...form, category: e.target.value})} 
+                    placeholder="e.g. Coffee beans"
+                  />
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase text-muted-foreground">{t("operations.amount")} (PLN)</label>
+              <Input 
+                type="number" 
+                value={form.amount} 
+                onChange={e => setForm({...form, amount: e.target.value})} 
+                placeholder="0.00"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase text-muted-foreground">{t("operations.payment_date")}</label>
+              <Input 
+                type="date" 
+                value={form.paymentDate} 
+                onChange={e => setForm({...form, paymentDate: e.target.value})} 
+              />
+            </div>
+
+            {editingExpense?.type === "utility" && (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase text-muted-foreground">{t("operations.bill_period")} (From)</label>
+                  <Input 
+                    type="date" 
+                    value={form.startDate} 
+                    onChange={e => setForm({...form, startDate: e.target.value})} 
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-xs font-bold uppercase text-muted-foreground">{t("operations.bill_period")} (To)</label>
+                  <Input 
+                    type="date" 
+                    value={form.endDate} 
+                    onChange={e => setForm({...form, endDate: e.target.value})} 
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <label className="text-xs font-bold uppercase text-muted-foreground">Notes</label>
+              <Textarea 
+                value={form.notes} 
+                onChange={e => setForm({...form, notes: e.target.value})} 
+                placeholder="Additional information..."
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button onClick={handleUpdate} disabled={updateMutation.isPending}>
+              {updateMutation.isPending && <RefreshCw className="h-4 w-4 mr-2 animate-spin" />}
+              {t("common.save")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Card>
         <CardContent className="p-0">
           <table className="w-full text-sm">
@@ -382,15 +526,25 @@ export function ExpensesManager() {
                     {Math.round(Number(expense.amount)).toLocaleString(undefined, { maximumFractionDigits: 0 })} PLN
                   </td>
                   <td className="px-4 py-2.5 text-right">
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
-                      className="text-muted-foreground hover:text-destructive h-8 w-8"
-                      onClick={() => deleteMutation.mutate({ id: expense.id })}
-                      disabled={deleteMutation.isPending}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
+                    <div className="flex justify-end gap-1">
+                      <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="text-muted-foreground hover:text-primary h-8 w-8"
+                        onClick={() => handleEdit(expense)}
+                      >
+                        <Pencil className="h-4 w-4" />
+                      </Button>
+                      <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="text-muted-foreground hover:text-destructive h-8 w-8"
+                        onClick={() => deleteMutation.mutate({ id: expense.id })}
+                        disabled={deleteMutation.isPending}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -401,3 +555,4 @@ export function ExpensesManager() {
     </div>
   );
 }
+

@@ -37,6 +37,12 @@ export class ExpenseRepository {
     return db.insert(expenses).values(values);
   }
 
+  static async updateExpense(id: number, values: Partial<typeof expenses.$inferInsert>) {
+    const db = await getDb();
+    if (!db) throw new Error("Database not available");
+    return db.update(expenses).set(values).where(eq(expenses.id, id));
+  }
+
   static async deleteExpense(id: number) {
     const db = await getDb();
     if (!db) return;

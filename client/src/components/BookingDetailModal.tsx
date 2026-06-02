@@ -47,6 +47,7 @@ import { format, addDays, setHours, setMinutes } from "date-fns";
 import { Booking } from "@shared/types";
 import { StatusBadge, DepositBadge } from "@/components/ui/badges";
 import { cn } from "@/lib/utils";
+import { calculateBalanceDue } from "@shared/utils";
 
 // ─── Activity Item Component ───────────────────────────────────────────────────
 
@@ -214,6 +215,16 @@ export default function BookingDetailModal({
         const total = parseFloat(next.totalPrice) || 0;
         const rev = parseFloat(next.hostRevenue) || 0;
         next.commission = (total - rev).toFixed(2);
+      } else if (field === "depositStatus") {
+        // Triggering "return" should also substract deposit amount from amount paid.
+        const deposit = parseFloat(next.depositAmount) || 0;
+        const currentPaid = parseFloat(next.amountPaid) || 0;
+        
+        if (value === "returned" && prev.depositStatus === "paid") {
+          next.amountPaid = (currentPaid - deposit).toFixed(2);
+        } else if (value === "paid" && prev.depositStatus === "returned") {
+          next.amountPaid = (currentPaid + deposit).toFixed(2);
+        }
       }
       
       return next;
@@ -226,17 +237,15 @@ export default function BookingDetailModal({
   );
 
   const toBePaid = useMemo(() => {
-    const total = parseFloat(form.totalPrice) || 0;
-    const revenue = parseFloat(form.hostRevenue) || total;
-    const paid = parseFloat(form.amountPaid) || 0;
-
-    // For Airbnb and Booking.com, "Balance Due" is what the host expects from the portal (Host Revenue)
-    // For Slowhop and others, it's what the guest still owes (Total Price - Prepayment)
-    if (form.channel === "airbnb" || form.channel === "booking") {
-      return Math.max(0, revenue - paid).toFixed(2);
-    }
-    return Math.max(0, total - paid).toFixed(2);
-  }, [form.hostRevenue, form.totalPrice, form.amountPaid, form.channel]);
+    return calculateBalanceDue({
+      channel: form.channel,
+      totalPrice: form.totalPrice,
+      hostRevenue: form.hostRevenue,
+      amountPaid: form.amountPaid,
+      depositAmount: form.depositAmount,
+      depositStatus: form.depositStatus,
+    }, true).toFixed(2);
+  }, [form.hostRevenue, form.totalPrice, form.amountPaid, form.depositAmount, form.depositStatus, form.channel]);
 
   const handleSave = () => {
     const parseDateTime = (dateStr: string, timeStr: string) => {

@@ -208,10 +208,19 @@ export default function TransferMatching() {
                             )}
                           </TableCell>
                           <TableCell className="px-6 text-right">
-                             <Badge variant="outline" className="bg-green-50 text-green-700 border-green-200 gap-1.5 py-1 px-3">
-                               <CheckCircle2 className="h-3 w-3" />
-                               Matched
-                             </Badge>
+                             <Button 
+                               variant="outline" 
+                               size="sm"
+                               className="bg-green-50 text-green-700 border-green-200 hover:bg-green-100 gap-1.5 h-8"
+                               onClick={() => {
+                                 setSelectedTransfer(transfer);
+                                 setMatchingOpen(true);
+                                 setSearchQuery("");
+                               }}
+                             >
+                               <CheckCircle2 className="h-3.5 w-3.5" />
+                               {t("transfers.matched_status")}
+                             </Button>
                           </TableCell>
                         </TableRow>
                       ))}

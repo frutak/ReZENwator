@@ -45,6 +45,7 @@ export class EmailTemplateService {
     const amountPaid = parseFloat(String(booking.amountPaid || "0"));
     const remaining = totalPrice - amountPaid;
     const deposit = parseFloat(String(booking.depositAmount || "500"));
+    const includeDepositInRemaining = booking.depositStatus !== "paid" && booking.depositStatus !== "returned";
 
     let petFeeHtml = "";
     if (booking.channel === "booking") {
@@ -59,12 +60,12 @@ export class EmailTemplateService {
     if (needsPaymentInfo) {
       paymentHtml = isPL ? `
         <p><strong>reszta opłaty za pobyt:</strong><br>
-        prosiłbym o przelew reszty - ${remaining} zł + ${deposit} zł zwrotnego depozytu, na moje konto, ${isSadoles ? "najlepiej tak na 5 dni przed Waszym przyjazdem" : "tak najpóźniej tydzień przed Waszym przyjazdem"}:<br>
+        prosiłbym o przelew reszty - ${remaining} zł ${includeDepositInRemaining ? `+ ${deposit} zł zwrotnego depozytu` : ""} , na moje konto, ${isSadoles ? "najlepiej tak na 5 dni przed Waszym przyjazdem" : "tak najpóźniej tydzień przed Waszym przyjazdem"}:<br>
         ${ENV.bankAccountNumber}<br>
         Nazwisko do przelewu: ${ENV.ownerName}</p>
       ` : `
         <p><strong>Balance of the stay fee:</strong><br>
-        I would like to ask for a transfer of the balance - ${remaining} PLN + ${deposit} PLN refundable deposit, to my account, ${isSadoles ? "preferably 5 days before your arrival" : "at the latest one week before your arrival"}:<br>
+        I would like to ask for a transfer of the balance - ${remaining} PLN ${includeDepositInRemaining ? `+ ${deposit} PLN refundable deposit` : ""} , to my account, ${isSadoles ? "preferably 5 days before your arrival" : "at the latest one week before your arrival"}:<br>
         ${ENV.bankAccountNumber}<br>
         Account name: ${ENV.ownerName}</p>
       `;
