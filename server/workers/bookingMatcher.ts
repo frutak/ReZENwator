@@ -16,6 +16,7 @@ import { Logger } from "../_core/logger";
 import { ENV } from "../_core/env";
 import { type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
 import { MatchingEngine, type MatchResult } from "../services/MatchingEngine";
+import { calculateBalanceDue } from "@shared/utils";
 
 /**
  * Scores how well a bank transfer matches a candidate booking.
@@ -86,7 +87,9 @@ export async function applyTransferMatch(
   const currentPaid = parseFloat(String(b.amountPaid || "0"));
   const totalPrice = parseFloat(String(b.totalPrice || "0"));
   const depositReq = parseFloat(String(b.depositAmount || "500.00"));
-  const toBePaid = Math.max(0, totalPrice - currentPaid);
+  
+  // Calculate remaining balance using the standard utility (ignoring portal commissions)
+  const toBePaid = calculateBalanceDue(b as any, false);
 
   const isDepositMatch = Math.abs(transferAmount - depositReq) < 1.0;
   const isToBePaidMatch = Math.abs(transferAmount - toBePaid) < 1.0;
@@ -185,11 +188,6 @@ export async function applyTransferMatch(
   }
 
   let newPaid = currentPaid + transferAmount;
-  if (isPortalForward && b.channel === "slowhop") {
-    // For Slowhop, the guest has paid the full reservation fee to the portal,
-    // so we set amountPaid to the full fee even though the host gets less (minus commission).
-    newPaid = Math.max(currentPaid, cResFee);
-  }
 
   await BookingRepository.updateBookingPayment(bookingId, {
     status: newStatus as BookingStatus,
@@ -205,6 +203,58 @@ export async function applyTransferMatch(
   await Logger.bookingAction(bookingId, "status_change", `Auto-matched bank transfer (Score: ${score})`, `Sender: ${transfer.senderName}, Amount: ${transferAmount} PLN, New Status: ${newStatus}`);
 
   console.log(`[Matcher] Booking #${bookingId} updated: status=${newStatus}, deposit=${newDepositStatus}`);
+}
+
+/**
+ * Reverts a bank transfer match from a booking.
+ * Decreases paid amount and potentially reverts status.
+ */
+export async function revertTransferMatch(
+  bookingId: number,
+  transferAmount: number
+): Promise<void> {
+  const b = await BookingRepository.getBookingById(bookingId);
+  if (!b) return;
+
+  const currentPaid = parseFloat(String(b.amountPaid || "0"));
+  const newPaid = Math.max(0, currentPaid - transferAmount);
+  
+  let newStatus = b.status;
+  let newDepositStatus = b.depositStatus;
+
+  const totalPrice = parseFloat(String(b.totalPrice || "0"));
+  const depositReq = parseFloat(String(b.depositAmount || "500.00"));
+
+  if (b.channel === "airbnb" || b.channel === "booking") {
+    // If it was paid but now we removed the transfer, it goes back to portal_paid
+    if (b.status === "paid") {
+      newStatus = "portal_paid";
+    }
+  } else if (b.channel === "slowhop") {
+    if (newPaid < 10) { // Practically zero
+      newStatus = "confirmed";
+    }
+  } else if (b.channel === "direct") {
+    if (newPaid < 10) {
+      newStatus = "confirmed";
+    }
+  }
+
+  // Revert deposit status if the removed amount matches deposit
+  if (Math.abs(transferAmount - depositReq) < 1.0) {
+    newDepositStatus = "pending";
+  }
+
+  await BookingRepository.updateBookingPayment(bookingId, {
+    status: newStatus as BookingStatus,
+    depositStatus: newDepositStatus as DepositStatus,
+    amountPaid: String(newPaid.toFixed(2)),
+    // We don't clear transfer fields here as they might be overwritten by a new match soon,
+    // but for clarity we can set them to null/undefined if this was the last match.
+    // However, updateBookingPayment usually sets them to what's provided.
+  });
+
+  await Logger.bookingAction(bookingId, "status_change", `Manual match reversal`, `Removed ${transferAmount} PLN. Status: ${newStatus}`);
 }
 
 async function sendPaymentMismatchEmail(booking: any, amount: number, expected: { toBePaid: number; depositReq: number; resFee?: number }) {

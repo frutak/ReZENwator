@@ -12,6 +12,7 @@ import fs from "fs";
 
 async function startPortalServer() {
   const app = express();
+  app.set("trust proxy", true);
   const server = createServer(app);
 
   app.use(express.json({ limit: "50mb" }));

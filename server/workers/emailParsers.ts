@@ -52,6 +52,7 @@ export interface ParsedBookingData {
   animalsCount?: number;
   totalPrice?: number;
   amountPaid?: number; // Prepayment / Reservation fee
+  reservationFee?: number;
   commission?: number;
   hostRevenue?: number;
   currency?: string;
@@ -173,6 +174,7 @@ function parseAlohacampAL1(subject: string, body: string): ParsedBookingData {
   const checkOutMatch = body.match(/Wymeldowanie:\s*(\d{2}[-/]\d{2}[-/]\d{4})/i);
   const nameMatch = body.match(/Imię i nazwisko:\s*([^\r\n]+)/i);
   const phoneMatch = body.match(/Telefon:\s*([^\r\n]+)/i);
+  const guestMatch = body.match(/Goście:\s*(\d+)\s+dorosłych(?:,\s*(\d+)\s+dzieci)?/i);
 
   // Liberal amount matching: find number following label until end of line or "zł"
   const priceMatch = body.match(/Cena:\s*([^-\r\n]+)/i);
@@ -204,7 +206,11 @@ function parseAlohacampAL1(subject: string, body: string): ParsedBookingData {
   if (bodyLower.includes("hacjenda")) property = "Hacjenda";
   else if (bodyLower.includes("sadoles") || bodyLower.includes("sadoleś")) property = "Sadoles";
 
-  console.log(`[AlohacampParser] ID: ${idMatch?.[1]}, In: ${checkInMatch?.[1]}, Out: ${checkOutMatch?.[1]}, Name: ${nameMatch?.[1]}, Price: ${totalPrice}, Commission: ${commission}, Revenue: ${hostRevenue}`);
+  const adultsCount = guestMatch ? parseInt(guestMatch[1]) : undefined;
+  const childrenCount = guestMatch && guestMatch[2] ? parseInt(guestMatch[2]) : 0;
+  const guestCount = adultsCount !== undefined ? adultsCount + childrenCount : undefined;
+
+  console.log(`[AlohacampParser] ID: ${idMatch?.[1]}, In: ${checkInMatch?.[1]}, Out: ${checkOutMatch?.[1]}, Name: ${nameMatch?.[1]}, Guests: ${guestCount}, Price: ${totalPrice}, Commission: ${commission}, Revenue: ${hostRevenue}`);
 
   return {
     channel: "alohacamp",
@@ -213,6 +219,9 @@ function parseAlohacampAL1(subject: string, body: string): ParsedBookingData {
     guestPhone: phoneMatch && !phoneMatch[1].toLowerCase().includes("widoczny") ? phoneMatch[1].trim() : undefined,
     checkIn: checkInMatch ? parseDMY(checkInMatch[1]!.replace(/\//g, "-")) : undefined,
     checkOut: checkOutMatch ? parseDMY(checkOutMatch[1]!.replace(/\//g, "-")) : undefined,
+    guestCount,
+    adultsCount,
+    childrenCount,
     totalPrice,
     hostRevenue,
     commission,
@@ -261,9 +270,24 @@ function parseSlowhopS1(subject: string, body: string): ParsedBookingData {
   const priceData = priceMatch ? parsePrice(priceMatch[1]!) : null;
   const paidData = paidMatch ? parsePrice(paidMatch[1]!) : null;
 
+  let commission: number | undefined;
+  let hostRevenue: number | undefined;
+  if (priceData?.amount) {
+    // Standard Slowhop commission is 15% + 23% VAT
+    commission = Math.round(priceData.amount * 0.15 * 1.23 * 100) / 100;
+    hostRevenue = Math.round((priceData.amount - commission) * 100) / 100;
+  }
+
   let property: Property | undefined;
   if (body.toLowerCase().includes("hacjenda")) property = "Hacjenda";
   else if (body.toLowerCase().includes("sadoles") || body.toLowerCase().includes("sadoleś")) property = "Sadoles";
+
+  const adultsCount = guestMatch ? parseInt(guestMatch[1]) : undefined;
+  const childrenCount = guestMatch ? parseInt(guestMatch[2]) : undefined;
+  const animalsCount = guestMatch ? parseInt(guestMatch[3]) : undefined;
+  const guestCount = (adultsCount !== undefined || childrenCount !== undefined) 
+    ? (adultsCount || 0) + (childrenCount || 0) 
+    : undefined;
 
   return {
     channel: "slowhop",
@@ -273,11 +297,15 @@ function parseSlowhopS1(subject: string, body: string): ParsedBookingData {
     checkOut: datesMatch ? parseDMY(datesMatch[2]!) : undefined,
     guestPhone: phoneMatch ? phoneMatch[1].trim() : undefined,
     guestEmail: emailMatch ? emailMatch[1].trim() : undefined,
-    adultsCount: guestMatch ? parseInt(guestMatch[1]) : undefined,
-    childrenCount: guestMatch ? parseInt(guestMatch[2]) : undefined,
-    animalsCount: guestMatch ? parseInt(guestMatch[3]) : undefined,
+    guestCount,
+    adultsCount,
+    childrenCount,
+    animalsCount,
     totalPrice: priceData?.amount,
-    amountPaid: paidData?.amount,
+    amountPaid: undefined, // Skip reservation fee for Slowhop
+    reservationFee: paidData?.amount,
+    commission,
+    hostRevenue,
     currency: priceData?.currency ?? "PLN",
     property,
   };
@@ -312,7 +340,8 @@ function parseSlowhopS2(subject: string, body: string): ParsedBookingData {
     checkIn: detailMatch ? parseDMY(detailMatch[2]!) : undefined,
     checkOut: detailMatch ? parseDMY(detailMatch[3]!) : undefined,
     totalPrice,
-    amountPaid,
+    amountPaid: undefined, // Skip reservation fee for Slowhop
+    reservationFee: amountPaid,
     commission,
     hostRevenue,
     currency: "PLN",
@@ -379,6 +408,10 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
   }
 
   const guestCountMatch = body.match(/(\d+)\s+adults?(?:,\s*(\d+)\s+(?:children|child))?/i);
+  const adultsCount = guestCountMatch ? parseInt(guestCountMatch[1]) : undefined;
+  const childrenCount = guestCountMatch && guestCountMatch[2] ? parseInt(guestCountMatch[2]) : 0;
+  const guestCount = adultsCount !== undefined ? adultsCount + childrenCount : undefined;
+
   const totalMatch = body.match(/Total\s*\(PLN\)\s*\n?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
   const revenueMatch = body.match(/You earn\s*\n?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
 
@@ -394,8 +427,9 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
     guestName: nameMatch ? nameMatch[1].trim() : undefined,
     checkIn,
     checkOut,
-    adultsCount: guestCountMatch ? parseInt(guestCountMatch[1]) : undefined,
-    childrenCount: guestCountMatch && guestCountMatch[2] ? parseInt(guestCountMatch[2]) : undefined,
+    guestCount,
+    adultsCount,
+    childrenCount,
     totalPrice: totalData?.amount,
     hostRevenue: revenueData?.amount,
     currency: "PLN",

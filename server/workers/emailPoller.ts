@@ -148,7 +148,7 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
         commission: data.commission != null ? String(data.commission) : undefined,
         hostRevenue: data.hostRevenue != null ? String(data.hostRevenue) : undefined,
         amountPaid: data.amountPaid != null ? String(data.amountPaid) : "0.00",
-        reservationFee: data.amountPaid != null ? String(data.amountPaid) : undefined,
+        reservationFee: (data.reservationFee ?? data.amountPaid) != null ? String(data.reservationFee ?? data.amountPaid) : undefined,
         currency: data.currency ?? "PLN",
         emailMessageId: email.messageId,
       });
@@ -191,7 +191,7 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
     commission: data.commission != null ? String(data.commission) : match.commission,
     hostRevenue: data.hostRevenue != null ? String(data.hostRevenue) : match.hostRevenue,
     amountPaid: data.amountPaid != null ? String(data.amountPaid) : match.amountPaid,
-    reservationFee: data.amountPaid != null ? String(data.amountPaid) : match.reservationFee,
+    reservationFee: (data.reservationFee ?? data.amountPaid) != null ? String(data.reservationFee ?? data.amountPaid) : match.reservationFee,
     currency: data.currency ?? match.currency,
   });
 
@@ -214,8 +214,8 @@ async function handleSlowhopS2(data: ParsedBookingData, testMode: boolean): Prom
       status: "confirmed",
       commission: data.commission ? String(data.commission) : match.commission,
       hostRevenue: data.hostRevenue ? String(data.hostRevenue) : match.hostRevenue,
-      amountPaid: data.amountPaid ? String(data.amountPaid) : match.amountPaid,
-      reservationFee: data.amountPaid ? String(data.amountPaid) : match.reservationFee,
+      amountPaid: data.amountPaid != null ? String(data.amountPaid) : match.amountPaid,
+      reservationFee: (data.reservationFee ?? data.amountPaid) != null ? String(data.reservationFee ?? data.amountPaid) : match.reservationFee,
     });
     
     await Logger.bookingAction(match.id, "enrichment", "Enriched via S2 (Accounting) email", "Filled: Commission, Host Revenue, Reservation Fee");
