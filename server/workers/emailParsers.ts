@@ -350,7 +350,7 @@ function parseSlowhopS2(subject: string, body: string): ParsedBookingData {
 }
 
 function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
-  const nameMatch = subject.match(/confirmed\s*[-–]\s*(.+?)\s+arrives/i);
+  const nameMatch = subject.match(/confirmed[!\s-–]+\s*(.+?)\s+arrives/i);
   
   let checkIn: Date | undefined;
   let checkOut: Date | undefined;
@@ -412,11 +412,14 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
   const childrenCount = guestCountMatch && guestCountMatch[2] ? parseInt(guestCountMatch[2]) : 0;
   const guestCount = adultsCount !== undefined ? adultsCount + childrenCount : undefined;
 
-  const totalMatch = body.match(/Total\s*\(PLN\)\s*\n?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
-  const revenueMatch = body.match(/You earn\s*\n?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
+  const totalMatch = body.match(/Total\s*\(PLN\)\s*[\s\S]{0,100}?(?:zł|zl|pln)?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
+  const revenueMatch = body.match(/You earn\s*[\s\S]{0,100}?(?:zł|zl|pln)?\s*([\d,.\s]+(?:zł|zl|pln)?)/i);
 
   const totalData = totalMatch ? parsePrice(totalMatch[1]!) : null;
   const revenueData = revenueMatch ? parsePrice(revenueMatch[1]!) : null;
+
+  const idMatch = body.match(/Confirmation code\s*[\n\r\t\s]+([A-Z0-9]+)/i);
+  const bodyNameMatch = body.match(/^[\n\r\s]*([^\n\r]+)[\n\r\s]+Identity verified/im);
 
   let property: Property | undefined;
   if (body.toLowerCase().includes("hacjenda")) property = "Hacjenda";
@@ -424,7 +427,8 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
 
   return {
     channel: "airbnb",
-    guestName: nameMatch ? nameMatch[1].trim() : undefined,
+    bookingId: idMatch ? idMatch[1] : undefined,
+    guestName: bodyNameMatch ? bodyNameMatch[1].trim() : (nameMatch ? nameMatch[1].trim() : undefined),
     checkIn,
     checkOut,
     guestCount,
@@ -432,6 +436,7 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
     childrenCount,
     totalPrice: totalData?.amount,
     hostRevenue: revenueData?.amount,
+    commission: (totalData && revenueData) ? Math.round((totalData.amount - revenueData.amount) * 100) / 100 : undefined,
     currency: "PLN",
     property,
   };
