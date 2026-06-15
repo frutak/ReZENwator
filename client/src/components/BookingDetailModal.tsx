@@ -168,6 +168,8 @@ export default function BookingDetailModal({
     status: booking.status ?? "confirmed",
     depositStatus: booking.depositStatus ?? "pending",
     notes: booking.notes ?? "",
+    invoiceIssued: (booking as any).invoiceIssued ?? 0,
+    invoiceMonth: (booking as any).invoiceMonth ?? format(new Date(booking.checkIn || new Date()), "yyyy-MM"),
   });
 
   // Sync form if booking changes
@@ -199,6 +201,8 @@ export default function BookingDetailModal({
       status: booking.status ?? "confirmed",
       depositStatus: booking.depositStatus ?? "pending",
       notes: booking.notes ?? "",
+      invoiceIssued: (booking as any).invoiceIssued ?? 0,
+      invoiceMonth: (booking as any).invoiceMonth ?? format(new Date(booking.checkIn || new Date()), "yyyy-MM"),
     });
   }, [booking]);
 
@@ -267,6 +271,8 @@ export default function BookingDetailModal({
         channel: form.channel as any,
         status: form.status as any,
         depositStatus: form.depositStatus as any,
+        invoiceIssued: form.invoiceIssued,
+        invoiceMonth: form.invoiceMonth,
       });
     } else {
       updateDetails.mutate({
@@ -278,6 +284,8 @@ export default function BookingDetailModal({
         channel: form.channel as any,
         status: form.status as any,
         depositStatus: form.depositStatus as any,
+        invoiceIssued: form.invoiceIssued,
+        invoiceMonth: form.invoiceMonth,
       });
     }
   };
@@ -645,6 +653,33 @@ export default function BookingDetailModal({
                   <span className="text-base font-black text-amber-700 dark:text-amber-400">{((form.animalsCount || 0) * 200).toFixed(2)} PLN</span>
                 </div>
               )}
+
+              <div className="space-y-3 p-3 rounded-lg border bg-muted/20">
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="invoiceIssued"
+                    className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+                    checked={form.invoiceIssued === 1}
+                    onChange={(e) => handleChange("invoiceIssued", e.target.checked ? 1 : 0)}
+                  />
+                  <label htmlFor="invoiceIssued" className="text-xs font-bold uppercase cursor-pointer">
+                    Invoice Issued / Wystawiona faktura
+                  </label>
+                </div>
+                
+                {form.invoiceIssued === 1 && (
+                  <div className="pt-1 animate-in fade-in slide-in-from-top-1 duration-200">
+                    <label className={labelClass}>Invoice Month / Miesiąc wystawienia</label>
+                    <input
+                      type="month"
+                      className={cn(inputClass, "h-9")}
+                      value={form.invoiceMonth}
+                      onChange={(e) => handleChange("invoiceMonth", e.target.value)}
+                    />
+                  </div>
+                )}
+              </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>

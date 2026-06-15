@@ -122,6 +122,30 @@ describe("BookingService", () => {
     expect(Logger.bookingAction).toHaveBeenCalledWith(100, "manual_edit", "Updated booking details");
   });
 
+  it("updates booking details including invoiceIssued successfully", async () => {
+    const mockDb = {
+      update: vi.fn().mockReturnValue({
+        set: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue({})
+        })
+      }),
+      select: vi.fn().mockReturnValue({
+        from: vi.fn().mockReturnValue({
+          where: vi.fn().mockResolvedValue([{ id: 100, property: "Sadoles", checkIn: new Date(), checkOut: new Date() }])
+        })
+      })
+    };
+    (dbModule.getDb as any).mockResolvedValue(mockDb);
+
+    const result = await BookingService.updateBookingDetails(100, { guestName: "Updated Name", invoiceIssued: 1 });
+
+    expect(result.success).toBe(true);
+    expect(mockDb.update).toHaveBeenCalled();
+    const setCall = mockDb.update(100).set;
+    expect(setCall).toHaveBeenCalledWith(expect.objectContaining({ invoiceIssued: 1 }));
+    expect(Logger.bookingAction).toHaveBeenCalledWith(100, "manual_edit", "Updated booking details");
+  });
+
   it("throws error when pricing service returns invalid (already booked)", async () => {
     (PricingService.calculatePrice as any).mockResolvedValue({
       valid: false,

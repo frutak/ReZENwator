@@ -1,0 +1,1 @@
+ALTER TABLE `bookings` ADD `invoiceIssued` int DEFAULT 0 NOT NULL;

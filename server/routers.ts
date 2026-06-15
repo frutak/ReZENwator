@@ -71,7 +71,7 @@ const bookingRouter = router({
         property: z.enum(PROPERTIES).optional(),
         channel: z.enum(CHANNELS).optional(),
         status: z.array(z.enum(STATUSES)).optional(),
-        timeRange: z.enum(["month", "next_month", "3months", "6months", "year", "all"]).optional(),
+        timeRange: z.enum(["month", "next_month", "3months", "6months", "year", "all", "previous_month"]).optional(),
       }).optional()
     )
     .query(async ({ input }) => {
@@ -272,20 +272,57 @@ const bookingRouter = router({
       const endDate = new Date(Date.UTC(input.year, input.month, 0, 23, 59, 59));
       console.log(`[TaxReport] Date range: ${startDate.toISOString()} - ${endDate.toISOString()}`);
 
-      const results = await BookingRepository.getTaxReportData(startDate, endDate);
-      console.log(`[TaxReport] Found ${results.length} results`);
+      const [taxBookings, airbnbCreated] = await Promise.all([
+        BookingRepository.getTaxReportData(startDate, endDate),
+        BookingRepository.getAirbnbBookingsCreatedInRange(startDate, endDate)
+      ]);
 
-      return results.map(b => ({
+      console.log(`[TaxReport] Found ${taxBookings.length} raw tax bookings and ${airbnbCreated.length} airbnb created bookings`);
+
+      const currentMonthStr = format(startDate, "yyyy-MM");
+
+      // Filter and map bookings based on the "earliest month" rule
+      const mappedTaxBookings = taxBookings
+        .filter(b => {
+          const checkInMonth = format(new Date(b.checkIn), "yyyy-MM");
+          const effectiveMonth = (b.invoiceIssued === 1 && b.invoiceMonth)
+            ? (b.invoiceMonth < checkInMonth ? b.invoiceMonth : checkInMonth)
+            : checkInMonth;
+          
+          return effectiveMonth === currentMonthStr;
+        })
+        .map(b => {
+          const isNewAirbnbRule = b.channel === "airbnb" && new Date(b.createdAt) >= AIRBNB_CUTOFF;
+          
+          return {
+            guestName: b.guestName || "Unknown",
+            channel: b.channel,
+            property: b.property,
+            checkIn: b.checkIn,
+            totalPrice: parseFloat(String(b.totalPrice || "0")),
+            hostRevenue: parseFloat(String(b.hostRevenue || "0")),
+            invoiceIssued: b.invoiceIssued === 1,
+            invoiceMonth: b.invoiceMonth,
+            taxableValue: (b.channel === "airbnb" && !isNewAirbnbRule)
+              ? parseFloat(String(b.hostRevenue || "0"))
+              : parseFloat(String(b.totalPrice || "0"))
+          };
+        });
+
+      const mappedAirbnbCreated = airbnbCreated.map(b => ({
         guestName: b.guestName || "Unknown",
-        channel: b.channel,
         property: b.property,
+        createdAt: b.createdAt,
         checkIn: b.checkIn,
         totalPrice: parseFloat(String(b.totalPrice || "0")),
-        hostRevenue: parseFloat(String(b.hostRevenue || "0")),
-        taxableValue: b.channel === "airbnb" 
-          ? parseFloat(String(b.hostRevenue || "0"))
-          : parseFloat(String(b.totalPrice || "0"))
+        commission: parseFloat(String(b.commission || "0")),
+        hostRevenue: parseFloat(String(b.hostRevenue || "0"))
       }));
+
+      return {
+        taxBookings: mappedTaxBookings,
+        airbnbCreatedInMonth: mappedAirbnbCreated
+      };
     }),
 });
 

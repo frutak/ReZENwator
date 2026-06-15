@@ -142,6 +142,11 @@ export const bookings = mysqlTable(
     /** Whether the 2-week arrival reminder has been sent */
     reminderSent: int("reminderSent").default(0).notNull(),
 
+    /** Whether an invoice has been issued for this booking */
+    invoiceIssued: int("invoiceIssued").default(0).notNull(),
+    /** The month the invoice belongs to: "YYYY-MM" */
+    invoiceMonth: varchar("invoiceMonth", { length: 7 }),
+
     // Cleaning tracking
     /** Scheduled cleaning date */
     cleaningDate: datetime("cleaningDate"),
