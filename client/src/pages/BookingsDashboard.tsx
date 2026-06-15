@@ -49,35 +49,35 @@ function SortIcon({ col, sortKey, sortDir }: { col: SortKey; sortKey: SortKey; s
 
 // ─── Stats Cards ──────────────────────────────────────────────────────────────
 
-function StatsCards({ filters }: { filters: { property?: string; channel?: string; status?: string; timeRange?: string } }) {
+function StatsCards({ bookings, filters }: { bookings: Booking[]; filters: { property?: string; channel?: string; status?: string; timeRange?: string } }) {
   const { t } = useLanguage();
-  const allExceptCancelled: ("pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")[] = ["pending", "confirmed", "portal_paid", "paid", "finished"];
-  const activeStatuses: ("pending" | "confirmed" | "portal_paid" | "paid" | "finished" | "cancelled")[] = ["pending", "confirmed", "portal_paid", "paid"];
-  
-  const statusFilter = useMemo(() => {
-    if (filters.status === "all") return allExceptCancelled;
-    if (filters.status === "active") {
-      // We pass the base active statuses, but the backend stats will need to be smart 
-      // or we handle it here if we want consistency.
-      // Since backend getBookingStats uses status as an array of allowed statuses,
-      // we can include 'finished' and then the backend might need to filter by deposit too.
-      // For now let's just add 'finished' to the array if we want it in stats.
-      return [...activeStatuses, "finished" as const];
-    }
-    return [filters.status as any];
-  }, [filters.status]);
+  const now = new Date();
 
-  const { data: stats } = trpc.bookings.stats.useQuery({
-    property: filters.property as any,
-    channel: filters.channel as any,
-    status: statusFilter,
-    timeRange: filters.timeRange as any,
-  });
+  const stats = useMemo(() => {
+    const totalNights = bookings.reduce((sum, b) => {
+      const nights = Math.round((new Date(b.checkOut).getTime() - new Date(b.checkIn).getTime()) / (1000 * 60 * 60 * 24));
+      return sum + Math.max(0, nights);
+    }, 0);
 
-  if (!stats) return null;
+    const totalRevenue = bookings
+      .filter((b) => ["confirmed", "portal_paid", "paid", "finished"].includes(b.status as string))
+      .reduce((sum, b) => sum + (parseFloat(String(b.hostRevenue ?? b.totalPrice ?? "0")) || 0), 0);
+
+    const totalCommission = bookings
+      .filter((b) => ["confirmed", "portal_paid", "paid", "finished"].includes(b.status as string))
+      .reduce((sum, b) => sum + (parseFloat(String(b.commission ?? "0")) || 0), 0);
+
+    return {
+      total: bookings.length,
+      avgStay: bookings.length > 0 ? (totalNights / bookings.length).toFixed(1) : "0",
+      totalCommission: Math.round(totalCommission),
+      totalRevenue: Math.round(totalRevenue),
+    };
+  }, [bookings]);
 
   const rangeLabel =
     filters.timeRange === "month" ? t("dashboard.filter_this_month") :
+    filters.timeRange === "previous_month" ? "Previous Month" :
     filters.timeRange === "next_month" ? t("dashboard.filter_next_month") :
     filters.timeRange === "3months" ? t("dashboard.filter_3months") :
     filters.timeRange === "6months" ? t("dashboard.filter_6months") :
@@ -89,25 +89,28 @@ function StatsCards({ filters }: { filters: { property?: string; channel?: strin
     filters.status ? filters.status.charAt(0).toUpperCase() + filters.status.slice(1).replace("_", " ") : t("dashboard.filter_all");
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
-      {[
-        { label: `${t("dashboard.filter_all")} (${statusLabel})`, value: stats.total, icon: Calendar, color: "bg-blue-50 text-blue-600 dark:bg-blue-900/20" },
-        { label: t("dashboard.pending_deposits"), value: stats.upcoming, icon: Clock, color: "bg-amber-50 text-amber-600 dark:bg-amber-900/20" },
-        { label: t("dashboard.confirmed_bookings"), value: stats.paid, icon: CheckCircle2, color: "bg-green-50 text-green-600 dark:bg-green-900/20" },
-        { label: `${t("dashboard.total_revenue")} (${rangeLabel})`, value: `${Math.round(stats.totalRevenue).toLocaleString("pl-PL", { maximumFractionDigits: 0 })} PLN`, icon: TrendingUp, color: "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20" },
-      ].map((stat, i) => (
-        <Card key={i} className="overflow-hidden border-0 shadow-sm transition-all hover:shadow-md">
-          <CardContent className="p-5 flex items-center gap-4">
-            <div className={cn("p-3 rounded-xl", stat.color)}>
-              <stat.icon className="h-5 w-5" />
-            </div>
-            <div>
-              <p className="text-sm font-medium text-muted-foreground">{stat.label}</p>
-              <h3 className="text-2xl font-bold tracking-tight">{stat.value}</h3>
-            </div>
-          </CardContent>
-        </Card>
-      ))}
+    <div className="mb-6">
+      <h2 className="text-xl font-semibold mb-4 text-foreground/80">Statistics for upcoming bookings</h2>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {[
+          { label: `Number of bookings (${statusLabel})`, value: stats.total, icon: Calendar, color: "bg-blue-50 text-blue-600 dark:bg-blue-900/20" },
+          { label: "Average stay", value: `${stats.avgStay} nights`, icon: Clock, color: "bg-amber-50 text-amber-600 dark:bg-amber-900/20" },
+          { label: "Total commission", value: `${stats.totalCommission.toLocaleString("pl-PL")} PLN`, icon: CheckCircle2, color: "bg-green-50 text-green-600 dark:bg-green-900/20" },
+          { label: `${t("dashboard.total_revenue")} (${rangeLabel})`, value: `${stats.totalRevenue.toLocaleString("pl-PL", { maximumFractionDigits: 0 })} PLN`, icon: TrendingUp, color: "bg-emerald-50 text-emerald-600 dark:bg-emerald-900/20" },
+        ].map((stat, i) => (
+          <Card key={i} className="overflow-hidden border-0 shadow-sm transition-all hover:shadow-md">
+            <CardContent className="p-5 flex items-center gap-4">
+              <div className={cn("p-3 rounded-xl", stat.color)}>
+                <stat.icon className="h-5 w-5" />
+              </div>
+              <div>
+                <p className="text-sm font-medium text-muted-foreground">{stat.label}</p>
+                <h3 className="text-2xl font-bold tracking-tight">{stat.value}</h3>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
     </div>
   );
 }
@@ -261,7 +264,7 @@ export default function BookingsDashboard() {
 
         <DoubleBookingBanner />
 
-        <StatsCards filters={statsFilters} />
+        <StatsCards bookings={bookingList} filters={statsFilters} />
 
         <div className="space-y-4">
           <div className="flex flex-col lg:flex-row gap-4 justify-between items-start lg:items-center">
@@ -285,6 +288,7 @@ export default function BookingsDashboard() {
                   <SelectValue placeholder={t("dashboard.filter_time")} />
                 </SelectTrigger>
                 <SelectContent>
+                  <SelectItem value="previous_month">Previous Month</SelectItem>
                   <SelectItem value="month">{t("dashboard.filter_this_month")}</SelectItem>
                   <SelectItem value="next_month">{t("dashboard.filter_next_month")}</SelectItem>
                   <SelectItem value="3months">{t("dashboard.filter_3months")}</SelectItem>

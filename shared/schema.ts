@@ -9,7 +9,7 @@ export const bookingFilterSchema = z.object({
   depositStatus: z.enum(DEPOSIT_STATUSES).optional(),
   checkInFrom: z.coerce.date().optional(),
   checkInTo: z.coerce.date().optional(),
-  timeRange: z.enum(["month", "next_month", "3months", "6months", "year", "all"]).optional(),
+  timeRange: z.enum(["month", "next_month", "3months", "6months", "year", "all", "previous_month"]).optional(),
   limit: z.number().min(1).max(500).default(200),
   offset: z.number().min(0).default(0),
 });
@@ -43,6 +43,8 @@ export const updateBookingDetailsSchema = z.object({
   nip: z.string().optional(),
   cleaningDate: z.coerce.date().optional(),
   cleaningStaff: z.enum(CLEANING_STAFF).optional(),
+  invoiceIssued: z.number().optional(),
+  invoiceMonth: z.string().optional(),
 });
 
 export const createBookingSchema = z.object({
@@ -71,6 +73,8 @@ export const createBookingSchema = z.object({
   purpose: z.string().optional(),
   companyName: z.string().optional(),
   nip: z.string().optional(),
+  invoiceIssued: z.number().optional(),
+  invoiceMonth: z.string().optional(),
 });
 
 export const submitBookingSchema = z.object({

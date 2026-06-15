@@ -71,26 +71,49 @@ export default function Operations() {
         year: parseInt(reportYear)
       });
 
-      if (!data || data.length === 0) {
+      const { taxBookings, airbnbCreatedInMonth } = data;
+
+      if ((!taxBookings || taxBookings.length === 0) && (!airbnbCreatedInMonth || airbnbCreatedInMonth.length === 0)) {
         toast.error("No bookings found for the selected month");
         return;
       }
 
       // Generate CSV
-      const headers = ["Guest Name", "Channel", "Property", "Arrival Date", "Total Price", "Host Revenue", "Taxable Value"];
-      const rows = data.map(b => [
+      const headers = ["Guest Name", "Channel", "Property", "Arrival Date", "Total Price", "Host Revenue", "Taxable Value", "Invoice Issued", "Invoice Month"];
+      const rows = taxBookings.map(b => [
         b.guestName,
         b.channel,
         b.property,
         format(new Date(b.checkIn), "yyyy-MM-dd"),
         b.totalPrice.toFixed(2),
         b.hostRevenue.toFixed(2),
-        b.taxableValue.toFixed(2)
+        b.taxableValue.toFixed(2),
+        b.invoiceIssued ? "Yes" : "No",
+        b.invoiceMonth || ""
       ]);
 
-      const totalTaxable = data.reduce((sum, b) => sum + b.taxableValue, 0);
+      const totalTaxable = taxBookings.reduce((sum, b) => sum + b.taxableValue, 0);
       rows.push([]);
       rows.push(["", "", "", "", "", "TOTAL TAXABLE:", totalTaxable.toFixed(2)]);
+
+      // Add Airbnb bookings created in this month
+      if (airbnbCreatedInMonth && airbnbCreatedInMonth.length > 0) {
+        rows.push([]);
+        rows.push([]);
+        rows.push(["AIRBNB BOOKINGS CREATED IN THIS MONTH (FOR COMMISSION INVOICES)"]);
+        rows.push(["Guest Name", "Property", "Created At", "Arrival Date", "Total Price", "Commission", "Host Revenue"]);
+        airbnbCreatedInMonth.forEach(b => {
+          rows.push([
+            b.guestName,
+            b.property,
+            format(new Date(b.createdAt), "yyyy-MM-dd"),
+            format(new Date(b.checkIn), "yyyy-MM-dd"),
+            b.totalPrice.toFixed(2),
+            b.commission.toFixed(2),
+            b.hostRevenue.toFixed(2)
+          ]);
+        });
+      }
 
       const csvContent = [headers, ...rows]
         .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","))
@@ -191,7 +214,7 @@ export default function Operations() {
               </Button>
             </div>
             <p className="text-[11px] text-muted-foreground mt-3 italic">
-              Note: Taxable value uses Total Price for all channels except Airbnb, where it uses Host Revenue (Payout).
+              Note: Taxable value uses Total Price for all channels. For Airbnb, bookings created before April 1st, 2024 use Host Revenue (Payout), while newer bookings use Total Price.
             </p>
           </CardContent>
         </Card>

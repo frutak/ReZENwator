@@ -13,7 +13,7 @@ export type BookingFilters = {
   depositStatus?: DepositStatus;
   checkInFrom?: Date;
   checkInTo?: Date;
-  timeRange?: "month" | "next_month" | "3months" | "6months" | "year" | "all";
+  timeRange?: "month" | "next_month" | "3months" | "6months" | "year" | "all" | "previous_month";
   limit?: number;
   offset?: number;
 };
@@ -30,6 +30,9 @@ export class BookingRepository {
     if (filters.timeRange === "month") {
       startDate = new Date(now.getFullYear(), now.getMonth(), 1);
       endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    } else if (filters.timeRange === "previous_month") {
+      startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      endDate = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
     } else if (filters.timeRange === "next_month") {
       startDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
       endDate = new Date(now.getFullYear(), now.getMonth() + 2, 0, 23, 59, 59);
@@ -108,7 +111,7 @@ export class BookingRepository {
     property?: Property;
     channel?: Channel;
     status?: BookingStatus[];
-    timeRange?: "month" | "next_month" | "3months" | "6months" | "year" | "all";
+    timeRange?: "month" | "next_month" | "3months" | "6months" | "year" | "all" | "previous_month";
   } = {}) {
     const db = await getDb();
     if (!db) return null;
@@ -120,6 +123,9 @@ export class BookingRepository {
     if (filters.timeRange === "month") {
       startDate = new Date(now.getFullYear(), now.getMonth(), 1);
       endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+    } else if (filters.timeRange === "previous_month") {
+      startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      endDate = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
     } else if (filters.timeRange === "next_month") {
       startDate = new Date(now.getFullYear(), now.getMonth() + 1, 1);
       endDate = new Date(now.getFullYear(), now.getMonth() + 2, 0, 23, 59, 59);
@@ -584,10 +590,46 @@ export class BookingRepository {
   static async getTaxReportData(startDate: Date, endDate: Date) {
     const db = await getDb();
     if (!db) return [];
+    
+    const startMonthStr = format(startDate, "yyyy-MM");
+    const endMonthStr = format(endDate, "yyyy-MM");
+
+    // We fetch bookings where:
+    // 1. invoiceMonth matches the target month
+    // 2. invoiceMonth is NULL and checkIn matches the target month
+    // 3. invoiceMonth is NOT NULL, but checkIn is EARLIER than invoiceMonth and checkIn matches the target month
+    
+    // Simplest approach: fetch anything that COULD potentially be in this month's report.
+    // That means checkIn <= endDate OR invoiceMonth <= endMonthStr.
+    // Then we filter strictly in the service/router.
+    
     return db.select().from(bookings).where(
       and(
-        gte(bookings.checkIn, startDate),
-        lte(bookings.checkIn, endDate)
+        ne(bookings.status, "cancelled"),
+        or(
+          and(
+            gte(bookings.checkIn, startDate),
+            lte(bookings.checkIn, endDate)
+          ),
+          and(
+            isNotNull(bookings.invoiceMonth),
+            gte(bookings.invoiceMonth, startMonthStr),
+            lte(bookings.invoiceMonth, endMonthStr)
+          )
+        )
+      )
+    );
+  }
+
+  static async getAirbnbBookingsCreatedInRange(startDate: Date, endDate: Date) {
+    const db = await getDb();
+    if (!db) return [];
+    return db.select().from(bookings).where(
+      and(
+        eq(bookings.channel, "airbnb"),
+        gte(bookings.createdAt, startDate),
+        lte(bookings.createdAt, endDate),
+        ne(bookings.status, "cancelled")
       )
     );
   }
