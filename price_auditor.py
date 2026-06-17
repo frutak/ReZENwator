@@ -134,8 +134,13 @@ async def run_property_audit(pw, p_key, dates, db, alerts):
     user_data_dir = f"/tmp/pw_v88_{p_key}_{random.randint(100, 999)}"
     print(f"\nAUDYT V88: {p_key.upper()} (Nowy Context)")
     
+    context = None
     try:
-        context = await pw.firefox.launch_persistent_context(user_data_dir, headless=True)
+        context = await pw.chromium.launch_persistent_context(
+            user_data_dir, 
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
         page = context.pages[0]
         await Stealth().apply_stealth_async(page)
         
@@ -168,13 +173,12 @@ async def run_property_audit(pw, p_key, dates, db, alerts):
                 diff = (max(active.values()) - min(active.values())) / min(active.values())
                 if diff > 0.12: alerts.append(f"[{p_key.upper()}] {start} {end}: Różnica {round(diff*100)}% {res_map}")
 
-        # BEZPIECZNE ZAMYKANIE (Fix dla TypeError: childFrames)
-        try:
-            await context.close()
-        except:
-            print("  [DEBUG] Context już zamknięty przez błąd silnika.")
-            
     finally:
+        if context:
+            try:
+                await context.close()
+            except:
+                print("  [DEBUG] Error closing context")
         if os.path.exists(user_data_dir):
             shutil.rmtree(user_data_dir, ignore_errors=True)
 
