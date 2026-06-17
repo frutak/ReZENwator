@@ -1,0 +1,1 @@
+ALTER TABLE `bookings` ADD `invoiceMonth` varchar(7);

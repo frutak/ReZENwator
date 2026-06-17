@@ -14,8 +14,11 @@ async def scrape_ratings(url):
     elif "slowhop.com" in url: portal = "slowhop"
     elif "alohacamp" in url: portal = "alohacamp"
 
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+    pw = None
+    browser = None
+    try:
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
         
         ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         if portal == "airbnb":
@@ -143,7 +146,11 @@ async def scrape_ratings(url):
         except Exception as e:
             return {"error": str(e), "status": "ERROR"}
         finally:
-            await browser.close()
+            if browser: await browser.close()
+    except Exception as e:
+        return {"error": f"Playwright init failed: {str(e)}", "status": "ERROR"}
+    finally:
+        if pw: await pw.stop()
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

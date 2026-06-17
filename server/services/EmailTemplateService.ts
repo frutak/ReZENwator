@@ -58,17 +58,47 @@ export class EmailTemplateService {
 
     let paymentHtml = "";
     if (needsPaymentInfo) {
-      paymentHtml = isPL ? `
-        <p><strong>reszta opłaty za pobyt:</strong><br>
-        prosiłbym o przelew reszty - ${remaining} zł ${includeDepositInRemaining ? `+ ${deposit} zł zwrotnego depozytu` : ""} , na moje konto, ${isSadoles ? "najlepiej tak na 5 dni przed Waszym przyjazdem" : "tak najpóźniej tydzień przed Waszym przyjazdem"}:<br>
-        ${ENV.bankAccountNumber}<br>
-        Nazwisko do przelewu: ${ENV.ownerName}</p>
-      ` : `
-        <p><strong>Balance of the stay fee:</strong><br>
-        I would like to ask for a transfer of the balance - ${remaining} PLN ${includeDepositInRemaining ? `+ ${deposit} PLN refundable deposit` : ""} , to my account, ${isSadoles ? "preferably 5 days before your arrival" : "at the latest one week before your arrival"}:<br>
-        ${ENV.bankAccountNumber}<br>
-        Account name: ${ENV.ownerName}</p>
-      `;
+      const isBalanceMissing = remaining > 0;
+      const isDepositMissing = includeDepositInRemaining;
+      const deadline = isSadoles 
+        ? (isPL ? "najlepiej tak na 5 dni przed Waszym przyjazdem" : "preferably 5 days before your arrival")
+        : (isPL ? "tak najpóźniej tydzień przed Waszym przyjazdem" : "at the latest one week before your arrival");
+
+      if (isBalanceMissing || isDepositMissing) {
+        if (isPL) {
+          let paymentText = "";
+          if (isBalanceMissing && isDepositMissing) {
+            paymentText = `prosiłbym o przelew reszty kwoty - ${remaining} zł oraz ${deposit} zł depozytu`;
+          } else if (isBalanceMissing) {
+            paymentText = `prosiłbym o przelew reszty kwoty - ${remaining} zł`;
+          } else if (isDepositMissing) {
+            paymentText = `prosiłbym o przelew depozytu ${deposit} zł`;
+          }
+
+          paymentHtml = `
+            <p><strong>reszta opłaty za pobyt:</strong><br>
+            ${paymentText}, na moje konto, ${deadline}:<br>
+            ${ENV.bankAccountNumber}<br>
+            Nazwisko do przelewu: ${ENV.ownerName}</p>
+          `;
+        } else {
+          let paymentText = "";
+          if (isBalanceMissing && isDepositMissing) {
+            paymentText = `I would like to ask for a transfer of the balance - ${remaining} PLN and ${deposit} PLN deposit`;
+          } else if (isBalanceMissing) {
+            paymentText = `I would like to ask for a transfer of the balance - ${remaining} PLN`;
+          } else if (isDepositMissing) {
+            paymentText = `I would like to ask for a transfer of the deposit - ${deposit} PLN`;
+          }
+
+          paymentHtml = `
+            <p><strong>Balance of the stay fee:</strong><br>
+            ${paymentText}, to my account, ${deadline}:<br>
+            ${ENV.bankAccountNumber}<br>
+            Account name: ${ENV.ownerName}</p>
+          `;
+        }
+      }
     }
 
     if (isSadoles) {

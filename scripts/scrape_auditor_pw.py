@@ -33,8 +33,11 @@ def extract_best_price(text, min_p):
     return valid_values[-1] if valid_values else None
 
 async def scrape_audit(platform, url, min_price, benchmark=None, nights=1):
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+    pw = None
+    browser = None
+    try:
+        pw = await async_playwright().start()
+        browser = await pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"])
         
         # User Agent switching for Airbnb to potentially bypass bot detection
         ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
@@ -155,7 +158,11 @@ async def scrape_audit(platform, url, min_price, benchmark=None, nights=1):
         except Exception as e:
             return {"price": None, "status": "ERROR", "error": str(e)}
         finally:
-            await browser.close()
+            if browser: await browser.close()
+    except Exception as e:
+        return {"price": None, "status": "ERROR", "error": f"Playwright init failed: {str(e)}"}
+    finally:
+        if pw: await pw.stop()
 
 if __name__ == "__main__":
     if len(sys.argv) < 4:
