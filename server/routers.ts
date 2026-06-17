@@ -39,6 +39,8 @@ import crypto from "crypto";
 import { ONE_YEAR_MS } from "@shared/const";
 import { sdk } from "./_core/sdk";
 
+const AIRBNB_CUTOFF = new Date("2024-04-01");
+
 function verifyPassword(password: string, storedHash: string): boolean {
   try {
     const [salt, hash] = storedHash.split(":");

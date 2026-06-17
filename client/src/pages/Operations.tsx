@@ -93,7 +93,14 @@ export default function Operations() {
       ]);
 
       const totalTaxable = taxBookings.reduce((sum, b) => sum + b.taxableValue, 0);
+      const totalOverallPrice = taxBookings.reduce((sum, b) => sum + b.totalPrice, 0);
+      const invoicedTotalPrice = taxBookings.filter(b => b.invoiceIssued).reduce((sum, b) => sum + b.totalPrice, 0);
+      const nonInvoicedTotalPrice = totalOverallPrice - invoicedTotalPrice;
+
       rows.push([]);
+      rows.push(["", "", "", "", "", "TOTAL REVENUE (TOTAL PRICE):", totalOverallPrice.toFixed(2)]);
+      rows.push(["", "", "", "", "", "TOTAL INVOICED (TOTAL PRICE):", invoicedTotalPrice.toFixed(2)]);
+      rows.push(["", "", "", "", "", "TOTAL NON-INVOICED (TOTAL PRICE):", nonInvoicedTotalPrice.toFixed(2)]);
       rows.push(["", "", "", "", "", "TOTAL TAXABLE:", totalTaxable.toFixed(2)]);
 
       // Add Airbnb bookings created in this month
@@ -114,6 +121,17 @@ export default function Operations() {
           ]);
         });
       }
+
+      // Polish summary at the end
+      const polishMonths = [
+        "styczeń", "luty", "marzec", "kwiecień", "maj", "czerwiec",
+        "lipiec", "sierpień", "wrzesień", "październik", "listopad", "grudzień"
+      ];
+      const monthPl = polishMonths[parseInt(reportMonth) - 1];
+      const polishSummary = `W miesiącu ${monthPl} ${reportYear} Furtka wygenerowała ${totalOverallPrice.toFixed(2)} przychodu, z tego ${invoicedTotalPrice.toFixed(2)} na fakturach, a ${nonInvoicedTotalPrice.toFixed(2)} bez faktur sprzedażowych.`;
+      
+      rows.push([]);
+      rows.push([polishSummary]);
 
       const csvContent = [headers, ...rows]
         .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","))
