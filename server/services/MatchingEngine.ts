@@ -63,7 +63,7 @@ export class MatchingEngine {
           bookingId: m.id,
           score: 100,
           booking: m,
-          reasons: ["Portal payout: Exact or near match to host revenue"],
+          reasons: ["Portal payout: Exact or near match to host revenue (within 1%)"],
         }));
       }
     }

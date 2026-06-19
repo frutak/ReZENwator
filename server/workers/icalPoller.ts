@@ -63,7 +63,7 @@ function detectChannel(
 ): ICalFeed["channel"] {
   const text = `${summary} ${description}`.toLowerCase();
   if (text.includes("airbnb")) return "airbnb";
-  if (text.includes("booking.com") || text.includes("booking ")) return "booking";
+  if (text.includes("booking.com")) return "booking";
   if (text.includes("slowhop")) return "slowhop";
   if (text.includes("alohacamp")) return "alohacamp";
   return feedChannel;
@@ -188,6 +188,15 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
       const b = await BookingRepository.getBookingByIcalUid(icalUid);
 
       if (b) {
+        // AUTO-RECOVERY: If a booking was previously cancelled but reappears in the feed,
+        // restore it to 'confirmed' status.
+        if (b.status === "cancelled") {
+          await BookingRepository.updateBookingStatus(b.id, "confirmed");
+          await Logger.bookingAction(b.id, "status_change", "Marked as CONFIRMED (auto-recovered)", `Reason: Reappeared in ${feed.label} iCal feed`);
+          console.log(`[iCal] Booking #${b.id} auto-restored to CONFIRMED.`);
+          updatedBookings++;
+        }
+        
         const normalizedSummary = summary.substring(0, 500);
 
         // If the incoming iCal event was date-only (00:00), and the date part (YYYY-MM-DD)
@@ -320,38 +329,63 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
     const missingBookings = await BookingRepository.findMissingBookings(feed.property as any, feed.channel as any, todayStart, seenUids);
+    const missingCount = missingBookings.length;
 
-    for (const b of missingBookings) {
-      // REFINEMENT: Only auto-cancel if the booking starts AFTER today.
-      // If it starts today or in the past, it disappearing from iCal is normal cleanup/housekeeping.
-      const checkInDate = new Date(b.checkIn);
-      const isFutureBooking = checkInDate > now;
+    if (missingCount > 0) {
+      const totalActive = await BookingRepository.countActiveBookings(feed.property as any, feed.channel as any, todayStart);
       
-      if (isFutureBooking) {
-        await BookingRepository.updateBookingStatus(b.id, "cancelled");
+      // SAFETY CHECK: Block mass cancellations if the feed is unexpectedly empty or truncated.
+      // We allow a single cancellation to proceed unquestioned.
+      // If more than one is missing, we only proceed if the number of missing bookings
+      // is 30% or less of the total known active bookings for this feed.
+      const isSafeToCancel = missingCount === 1 || (missingCount > 1 && (totalActive > 0 && (missingCount / totalActive) <= 0.3));
+
+      if (!isSafeToCancel) {
+        const msg = `Mass cancellation DETECTED and BLOCKED for ${feed.label}. Missing: ${missingCount}, Total Active: ${totalActive}. The iCal feed may be truncated.`;
+        console.warn(`[iCal] ${msg}`);
+        await sendAlertEmail(`⚠️ Mass Cancellation Prevented: ${feed.label}`, msg);
         
-        await Logger.bookingAction(b.id, "status_change", "Marked as CANCELLED", `Reason: Removed from ${feed.label} iCal feed`);
-        
-        console.log(`[iCal] Booking #${b.id} marked as CANCELLED (removed from future calendar: ${feed.label})`);
-        
-        // Notify host
-        const checkInStr = new Date(b.checkIn).toLocaleDateString();
-        const checkOutStr = new Date(b.checkOut).toLocaleDateString();
-        const subject = `❌ Booking CANCELLED: ${b.guestName || "Unknown"} (${b.property})`;
-        const text = `
-          The following booking has been removed from the ${feed.channel} iCal feed and marked as CANCELLED.
-          
-          Guest: ${b.guestName || "Unknown"}
-          Property: ${b.property}
-          Channel: ${b.channel}
-          Dates: ${checkInStr} - ${checkOutStr}
-          
-          The dates are now available for new bookings.
-        `.trim();
-        
-        await sendAlertEmail(subject, text);
+        await Logger.system("ical", {
+          source: feed.label,
+          success: false,
+          errorMessage: `Mass cancellation prevented. Missing: ${missingCount}, Total: ${totalActive}.`,
+          durationMs: Date.now() - start,
+        });
+
       } else {
-        console.log(`[iCal] Booking #${b.id} (${b.guestName}) removed from feed but not cancelled (already started/historical)`);
+        for (const b of missingBookings) {
+          // REFINEMENT: Only auto-cancel if the booking starts AFTER today.
+          // If it starts today or in the past, it disappearing from iCal is normal cleanup/housekeeping.
+          const checkInDate = new Date(b.checkIn);
+          const isFutureBooking = checkInDate > now;
+          
+          if (isFutureBooking) {
+            await BookingRepository.updateBookingStatus(b.id, "cancelled");
+            
+            await Logger.bookingAction(b.id, "status_change", "Marked as CANCELLED", `Reason: Removed from ${feed.label} iCal feed`);
+            
+            console.log(`[iCal] Booking #${b.id} marked as CANCELLED (removed from future calendar: ${feed.label})`);
+            
+            // Notify host
+            const checkInStr = new Date(b.checkIn).toLocaleDateString();
+            const checkOutStr = new Date(b.checkOut).toLocaleDateString();
+            const subject = `❌ Booking CANCELLED: ${b.guestName || "Unknown"} (${b.property})`;
+            const text = `
+              The following booking has been removed from the ${feed.channel} iCal feed and marked as CANCELLED.
+              
+              Guest: ${b.guestName || "Unknown"}
+              Property: ${b.property}
+              Channel: ${b.channel}
+              Dates: ${checkInStr} - ${checkOutStr}
+              
+              The dates are now available for new bookings.
+            `.trim();
+            
+            await sendAlertEmail(subject, text);
+          } else {
+            console.log(`[iCal] Booking #${b.id} (${b.guestName}) removed from feed but not cancelled (already started/historical)`);
+          }
+        }
       }
     }
   } catch (err) {
