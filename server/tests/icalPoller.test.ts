@@ -20,6 +20,8 @@ vi.mock("../repositories/BookingRepository", () => ({
     findOverlapCandidates: vi.fn().mockResolvedValue([]),
     insertBooking: vi.fn(),
     findMissingBookings: vi.fn().mockResolvedValue([]),
+    updateBookingStatus: vi.fn(),
+    countActiveBookings: vi.fn().mockResolvedValue(0),
   },
 }));
 
@@ -101,5 +103,65 @@ describe("iCalPoller", () => {
     
     expect(result.updatedBookings).toBe(1);
     expect(BookingRepository.updateIcalBooking).toHaveBeenCalled();
+  });
+
+  it("auto-recovers a cancelled booking when it reappears in the feed", async () => {
+    const mockFeed: any = { label: "Test Feed", url: "http://example.com/ical", property: "Sadoles", channel: "booking" };
+    (axios.get as any).mockResolvedValue({ data: "dummy-ics" });
+    (ical.async.parseICS as any).mockResolvedValue({
+      "uid1": { type: "VEVENT", start: new Date("2026-07-01T16:00:00Z"), end: new Date("2026-07-05T10:00:00Z"), summary: "Booking" }
+    });
+
+    const existingCancelledBooking = {
+      id: 1,
+      icalUid: "uid1",
+      status: "cancelled",
+      checkIn: new Date("2026-07-01T16:00:00Z"),
+      checkOut: new Date("2026-07-05T10:00:00Z"),
+      icalSummary: "Booking"
+    };
+    (BookingRepository.getBookingByIcalUid as any).mockResolvedValue(existingCancelledBooking);
+
+    await pollICalFeed(mockFeed);
+    
+    expect(BookingRepository.updateBookingStatus).toHaveBeenCalledWith(1, "confirmed");
+  });
+
+  it("blocks mass cancellation if more than 1 and >30% of bookings are missing", async () => {
+    const mockFeed: any = { label: "Test Feed", url: "http://example.com/ical", property: "Sadoles", channel: "booking" };
+    (axios.get as any).mockResolvedValue({ data: "dummy-ics" });
+    // iCal feed only returns 1 of the 3 active bookings
+    (ical.async.parseICS as any).mockResolvedValue({
+      "uid1": { type: "VEVENT", start: new Date("2026-07-01T16:00:00Z"), end: new Date("2026-07-05T10:00:00Z"), summary: "Booking 1" }
+    });
+    
+    (BookingRepository.getBookingByIcalUid as any).mockResolvedValue(null); // Return null for the one booking in the feed
+    (BookingRepository.countActiveBookings as any).mockResolvedValue(3); // 3 bookings exist in DB
+    (BookingRepository.findMissingBookings as any).mockResolvedValue([ // 2 are missing
+      { id: 2, icalUid: "uid2", checkIn: new Date("2026-08-01") },
+      { id: 3, icalUid: "uid3", checkIn: new Date("2026-09-01") },
+    ]);
+
+    await pollICalFeed(mockFeed);
+    
+    // 2/3 is > 30%, so cancellation should be blocked
+    expect(BookingRepository.updateBookingStatus).not.toHaveBeenCalled();
+  });
+
+  it("correctly identifies channel as 'slowhop' even with 'booking' in summary", async () => {
+    const mockFeed: any = { label: "Slowhop Feed", url: "http://example.com/ical", property: "Sadoles", channel: "slowhop" };
+    (axios.get as any).mockResolvedValue({ data: "dummy-ics" });
+    (ical.async.parseICS as any).mockResolvedValue({
+      "slowhop-uid1": { type: "VEVENT", start: new Date("2026-08-01"), end: new Date("2026-08-05"), summary: "booking - 12345 finalized" }
+    });
+
+    (BookingRepository.getBookingByIcalUid as any).mockResolvedValue(null);
+    (BookingRepository.insertBooking as any).mockResolvedValue([ { insertId: 99 } ]);
+
+    await pollICalFeed(mockFeed);
+
+    expect(BookingRepository.insertBooking).toHaveBeenCalledWith(expect.objectContaining({
+      channel: "slowhop"
+    }));
   });
 });

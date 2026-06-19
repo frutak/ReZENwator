@@ -666,6 +666,26 @@ export class BookingRepository {
       );
   }
 
+  static async countActiveBookings(property: Property, channel: Channel, todayStart: Date) {
+    const db = await getDb();
+    if (!db) return 0;
+
+    const result = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(bookings)
+      .where(
+        and(
+          eq(bookings.property, property),
+          eq(bookings.channel, channel),
+          ne(bookings.status, "finished"),
+          ne(bookings.status, "cancelled"),
+          gte(bookings.checkIn, todayStart)
+        )
+      );
+
+    return result[0]?.count || 0;
+  }
+
   static async getAvailability(property: Property) {
     const db = await getDb();
     if (!db) return [];

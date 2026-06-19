@@ -302,7 +302,7 @@ function parseSlowhopS1(subject: string, body: string): ParsedBookingData {
     childrenCount,
     animalsCount,
     totalPrice: priceData?.amount,
-    amountPaid: undefined, // Skip reservation fee for Slowhop
+    amountPaid: paidData?.amount,
     reservationFee: paidData?.amount,
     commission,
     hostRevenue,
@@ -340,7 +340,7 @@ function parseSlowhopS2(subject: string, body: string): ParsedBookingData {
     checkIn: detailMatch ? parseDMY(detailMatch[2]!) : undefined,
     checkOut: detailMatch ? parseDMY(detailMatch[3]!) : undefined,
     totalPrice,
-    amountPaid: undefined, // Skip reservation fee for Slowhop
+    amountPaid: amountPaid,
     reservationFee: amountPaid,
     commission,
     hostRevenue,
