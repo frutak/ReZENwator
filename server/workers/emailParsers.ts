@@ -65,6 +65,7 @@ export interface ParsedBookingData {
  * Qualifies the email into a template and sub-template.
  */
 export function qualifyEmail(from: string, subject: string, body: string): QualifiedEmail {
+  console.log("Qualifying Email - From:", from, "Subject:", subject);
   const fromLower = from.toLowerCase();
   const subjectLower = subject.toLowerCase();
   const bodyLower = body.toLowerCase();
@@ -133,7 +134,7 @@ export function qualifyEmail(from: string, subject: string, body: string): Quali
 
   // Airbnb A1: Confirmation
   if (
-    subjectLower.includes("reservation confirmed") && 
+    (subjectLower.includes("reservation confirmed") || subjectLower.includes("booking confirmed")) && 
     subjectLower.includes("arrives") &&
     (isFromOrForwarded("automated@airbnb.com") || 
      fromLower.includes("katarzynafurtak") || 
@@ -349,8 +350,12 @@ function parseSlowhopS2(subject: string, body: string): ParsedBookingData {
   };
 }
 
-function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
-  const nameMatch = subject.match(/confirmed[!\s-–]+\s*(.+?)\s+arrives/i);
+export function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
+  console.log("Parsing Airbnb A1 - Subject:", subject);
+  // Exclude URLs from the subject match
+  const subjectWithoutUrl = subject.replace(/https?:\/\/\S+/g, "");
+  const nameMatch = subjectWithoutUrl.match(/confirmed[!\s-–]+\s*(.+?)\s+arrives/i);
+  console.log("Name Match:", nameMatch ? nameMatch[1] : "null");
   
   let checkIn: Date | undefined;
   let checkOut: Date | undefined;
@@ -359,6 +364,7 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
   // "Check-in    Checkout\n Fri 1 May   Sun 3 May"
   const sideBySideMatch = body.match(/Check-in\s+Checkout[\s\n\r]+([^\n\r]+)/i);
   if (sideBySideMatch) {
+    console.log("SideBySide Match Found");
     const datesLine = sideBySideMatch[1]!;
     const parts = datesLine.split(/\s{2,}/).filter(p => p.trim().length > 0);
     if (parts.length >= 2) {
@@ -366,7 +372,7 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
       checkOut = parseAirbnbDate(parts[1]!);
     } else {
       // Maybe they are separated by just one space but are date-like
-      const dateParts = datesLine.match(/(\w{3},\s+\d{1,2}\s+\w{3}|\d{1,2}\s+\w{3})/gi);
+      const dateParts = datesLine.match(/(\w{3},\s+\d{1,2}\s+\w{3}(?:\s+\d{4})?|\d{1,2}\s+\w{3}(?:\s+\d{4})?)/gi);
       if (dateParts && dateParts.length >= 2) {
         checkIn = parseAirbnbDate(dateParts[0]!);
         checkOut = parseAirbnbDate(dateParts[1]!);
@@ -376,36 +382,26 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
 
   // 2. Fallback: Check for vertical layout or distinct labels
   if (!checkIn) {
+    console.log("Attempting vertical fallback for checkIn");
     // Look for Check-in label, then skip up to 50 chars to find a date
-    const ciMatch = body.match(/Check-in[\s\S]{0,50}?((\w{3},\s+\d{1,2}\s+\w{3})|(\d{1,2}\s+\w{3}))/i);
-    if (ciMatch) checkIn = parseAirbnbDate(ciMatch[1]!);
-  }
-  
-  if (!checkOut) {
-    const coMatch = body.match(/Checkout[:\s\n\r]+[\s\S]*?((\w{3},\s+\d{1,2}\s+\w{3})|(\d{1,2}\s+\w{3}))/i);
-    if (coMatch) checkOut = parseAirbnbDate(coMatch[1]!);
-  }
-
-  // 3. Absolute fallback: look for dates following the labels anywhere
-  if (!checkIn) {
-    const ciMatch = body.match(/Check-in[:\s]+(\w{3},\s+\d{1,2}\s+\w{3}|\d{1,2}\s+\w{3})/i);
-    if (ciMatch) checkIn = parseAirbnbDate(ciMatch[1]!);
-  }
-  if (!checkOut) {
-    // Specifically skip everything after 'Checkout' until we see a date-like pattern
-    const coPart = body.split(/Checkout/i)[1];
-    if (coPart) {
-      const coMatch = coPart.match(/((\w{3},\s+\d{1,2}\s+\w{3})|(\d{1,2}\s+\w{3}))/i);
-      if (coMatch) checkOut = parseAirbnbDate(coMatch[1]!);
+    const ciMatch = body.match(/Check-in[\s\S]{0,50}?((\w{3},\s+\d{1,2}\s+\w{3}(?:\s+\d{4})?)|(\d{1,2}\s+\w{3}(?:\s+\d{4})?))/i);
+    if (ciMatch) {
+      console.log("Check-in match found:", ciMatch[1]);
+      checkIn = parseAirbnbDate(ciMatch[1]!);
     }
   }
   
-  if (checkIn) {
-    checkIn = setMinutes(setHours(checkIn, 15), 0);
+  if (!checkOut) {
+    console.log("Attempting vertical fallback for checkOut");
+    const coMatch = body.match(/Checkout[:\s\n\r]+[\s\S]*?((\w{3},\s+\d{1,2}\s+\w{3}(?:\s+\d{4})?)|(\d{1,2}\s+\w{3}(?:\s+\d{4})?))/i);
+    if (coMatch) {
+      console.log("Check-out match found:", coMatch[1]);
+      checkOut = parseAirbnbDate(coMatch[1]!);
+    }
   }
-  if (checkOut) {
-    checkOut = setMinutes(setHours(checkOut, 11), 0);
-  }
+
+  console.log("Extracted Dates - In:", checkIn, "Out:", checkOut);
+
 
   const guestCountMatch = body.match(/(\d+)\s+adults?(?:,\s*(\d+)\s+(?:children|child))?/i);
   const adultsCount = guestCountMatch ? parseInt(guestCountMatch[1]) : undefined;
@@ -419,16 +415,22 @@ function parseAirbnbA1(subject: string, body: string): ParsedBookingData {
   const revenueData = revenueMatch ? parsePrice(revenueMatch[1]!) : null;
 
   const idMatch = body.match(/Confirmation code\s*[\n\r\t\s]+([A-Z0-9]+)/i);
-  const bodyNameMatch = body.match(/^[\n\r\s]*([^\n\r]+)[\n\r\s]+Identity verified/im);
+  const bodyNameMatch = body.match(/([^\n\r]+)[\n\r\s]+Identity verified/i);
 
   let property: Property | undefined;
   if (body.toLowerCase().includes("hacjenda")) property = "Hacjenda";
   else if (body.toLowerCase().includes("sadoles") || body.toLowerCase().includes("sadoleś")) property = "Sadoles";
 
+  let guestName = bodyNameMatch ? bodyNameMatch[1].trim() : (nameMatch ? nameMatch[1].trim() : undefined);
+  if (guestName && (guestName.startsWith("http") || guestName.includes("www."))) {
+    console.warn(`[AirbnbParser] Suspicious guest name found: ${guestName}. Ignoring.`);
+    guestName = undefined;
+  }
+
   return {
     channel: "airbnb",
     bookingId: idMatch ? idMatch[1] : undefined,
-    guestName: bodyNameMatch ? bodyNameMatch[1].trim() : (nameMatch ? nameMatch[1].trim() : undefined),
+    guestName: guestName,
     checkIn,
     checkOut,
     guestCount,
@@ -510,7 +512,7 @@ export function detectEmailSource(from: string, subject: string, body: string): 
   const bodyLower = body.toLowerCase();
 
   if (subjectLower.includes("slowhop") || fromLower.includes("slowhop.com")) return "slowhop";
-  if (subjectLower.includes("reservation confirmed") || fromLower.includes("airbnb.com") || bodyLower.includes("automated@airbnb.com")) return "airbnb";
+  if (subjectLower.includes("reservation confirmed") || subjectLower.includes("booking confirmed") || fromLower.includes("airbnb.com") || bodyLower.includes("automated@airbnb.com")) return "airbnb";
   if (subjectLower.includes("nowa rezerwacja") || fromLower.includes("booking.com")) return "booking";
   if (subjectLower.includes("nowa, opłacona rezerwacja") || fromLower.includes("alohacamp.com") || bodyLower.includes("alohacamp")) return "alohacamp";
   if (fromLower.includes("nestbank.pl") || subjectLower.includes("wpływ na konto")) return "nestbank";

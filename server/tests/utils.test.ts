@@ -38,6 +38,14 @@ describe("Date Utilities", () => {
       expect(date).toBeDefined();
       // Logic in parseAirbnbDate increments year if date is > 180 days in past
     });
+
+    it("parses Airbnb format with year 'Thu, 17 Jun 2027'", () => {
+      const date = parseAirbnbDate("Thu, 17 Jun 2027");
+      expect(date).toBeDefined();
+      expect(date?.getFullYear()).toBe(2027);
+      expect(date?.getMonth()).toBe(5); // June
+      expect(date?.getDate()).toBe(17);
+    });
   });
 
   describe("parseBookingComDate", () => {

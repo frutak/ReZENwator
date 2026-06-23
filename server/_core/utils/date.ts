@@ -29,6 +29,9 @@ export function parseDotDate(dateStr: string): Date | undefined {
  * Parse Airbnb date format: "Sat 27 Jun" or "Mon 29 Jun" (assumes current/next year)
  */
 export function parseAirbnbDate(dateStr: string): Date | undefined {
+  const full = parseAirbnbFullDate(dateStr);
+  if (full) return full;
+
   const months: Record<string, number> = {
     jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
     jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
