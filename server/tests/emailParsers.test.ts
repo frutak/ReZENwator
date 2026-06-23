@@ -130,4 +130,130 @@ Obiekt: Sadoles 66`;
       expect(formatDate(data.transferDate)).toBe("2026-03-02");
     });
   });
+
+  describe("Airbnb (A1) - 2027 Year Booking", () => {
+    const from = "automated@airbnb.com";
+    const subject = "New booking confirmed! Magdalena arrives 17 Jun.";
+    const body = `New booking confirmed! Magdalena arrives 17 Jun.
+
+Send a message to confirm check-in details or welcome Magdalena.
+	
+
+Magdalena ŁUgowska
+
+Identity verified · 4 reviews
+
+Wrocław, Poland
+Send Magdalena a MessageSend Magdalena a Message
+Hacjenda Kiekrz
+
+Entire home/flat
+
+Check-in
+
+Thu, 17 Jun 2027
+
+15:00
+	
+
+Checkout
+
+Sun, 20 Jun 2027
+
+11:00
+Guests
+
+6 adults
+More details about who's coming
+
+Guests will now let you know if they're bringing children and infants. Let them know upfront if your listing is suitable for children by updating your House Rules.
+Confirmation code
+
+HM9BYHRY45
+	
+View itinerary
+Guest paid
+
+zł 700.00 x 3 nights
+	
+
+zł 2,100.00
+
+Cleaning fee
+	
+
+zł 800.00
+
+Guest service fee
+	
+
+zł 0.00
+Total (PLN)
+	
+zł 2,900.00
+Host payout
+
+3-night room fee
+	
+
+zł 2,100.00
+
+Cleaning fee
+	
+
+zł 800.00
+
+Host service fee (15.5%)
+	
+
+-zł 449.50
+You earn
+	
+zł 2,450.50
+View earningsView earnings`;
+
+    it("parses Magdalena's 2027 booking correctly", () => {
+      const result = parseEmail(from, subject, body);
+      expect(result?.subTemplate).toBe("A1");
+      const data = result?.data;
+      expect(data.guestName).toBe("Magdalena ŁUgowska");
+      expect(formatDate(data.checkIn)).toBe("2027-06-17");
+      expect(formatDate(data.checkOut)).toBe("2027-06-20");
+      expect(data.adultsCount).toBe(6);
+      expect(data.totalPrice).toBe(2900);
+      expect(data.hostRevenue).toBe(2450.50);
+      expect(data.property).toBe("Hacjenda");
+    });
+  });
+
+  describe("Airbnb (A1) - Variations", () => {
+    const from = "automated@airbnb.com";
+    const subject = "Reservation confirmed";
+    const body = `
+
+      John Doe
+
+      Identity verified · 10 reviews
+      
+      ...
+    `;
+
+    it("parses name with extra whitespace", () => {
+      // Mock subject/body to trigger A1 template
+      const subject = "Reservation confirmed - arrives 1 Jun";
+      const body = `
+      
+      John Doe
+
+      Identity verified · 10 reviews
+      
+      Check-in 1 Jun
+      Checkout 5 Jun
+      `;
+      const result = parseEmail(from, subject, body);
+      expect(result?.subTemplate).toBe("A1");
+      const data = result?.data;
+      expect(data.guestName).toBe("John Doe");
+    });
+  });
 });
