@@ -32,9 +32,18 @@ vi.mock("../_core/logger", () => ({
   },
 }));
 
+vi.mock("../_core/email", () => ({
+  sendAlertEmail: vi.fn(),
+}));
+
 describe("iCalPoller", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // vi.clearAllMocks() clears call history but NOT mockResolvedValue overrides,
+    // so explicitly restore these to their safe defaults each test to prevent a
+    // test that mocks a mass-cancellation scenario from leaking into later tests.
+    (BookingRepository.findMissingBookings as any).mockResolvedValue([]);
+    (BookingRepository.countActiveBookings as any).mockResolvedValue(0);
   });
 
   it("does not redundantly update booking if dates and summary are same", async () => {

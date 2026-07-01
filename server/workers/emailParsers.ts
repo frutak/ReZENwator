@@ -415,16 +415,23 @@ export function parseAirbnbA1(subject: string, body: string): ParsedBookingData 
   const revenueData = revenueMatch ? parsePrice(revenueMatch[1]!) : null;
 
   const idMatch = body.match(/Confirmation code\s*[\n\r\t\s]+([A-Z0-9]+)/i);
-  const bodyNameMatch = body.match(/([^\n\r]+)[\n\r\s]+Identity verified/i);
+  // Plain-text renderings of the email sometimes insert a standalone reference-style
+  // link line (e.g. "[https://...]") for the guest's profile hyperlink right before
+  // "Identity verified". Strip those out first so they aren't mistaken for the name line.
+  const bodyForName = body.replace(/^[ \t]*\[https?:\/\/[^\]]*\][ \t]*$/gim, "");
+  const bodyNameMatch = bodyForName.match(/([^\n\r]+)[\n\r\s]+Identity verified/i);
 
   let property: Property | undefined;
   if (body.toLowerCase().includes("hacjenda")) property = "Hacjenda";
   else if (body.toLowerCase().includes("sadoles") || body.toLowerCase().includes("sadoleś")) property = "Sadoles";
 
-  let guestName = bodyNameMatch ? bodyNameMatch[1].trim() : (nameMatch ? nameMatch[1].trim() : undefined);
+  // The name line can also share a line with a preceding link URL (e.g. "https://...   Paulina Tajdel"),
+  // so strip any inline URLs from the captured candidate before using it.
+  let guestName = bodyNameMatch ? bodyNameMatch[1].replace(/https?:\/\/\S+/g, "").trim() : undefined;
+  if (!guestName) guestName = nameMatch ? nameMatch[1].trim() : undefined;
   if (guestName && (guestName.startsWith("http") || guestName.includes("www."))) {
-    console.warn(`[AirbnbParser] Suspicious guest name found: ${guestName}. Ignoring.`);
-    guestName = undefined;
+    console.warn(`[AirbnbParser] Suspicious guest name found: ${guestName}. Falling back to subject match.`);
+    guestName = nameMatch ? nameMatch[1].trim() : undefined;
   }
 
   return {
