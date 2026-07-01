@@ -55,4 +55,7 @@ export const ENV = {
   get icalHacjendaSlowhop() { return process.env.ICAL_HACJENDA_SLOWHOP ?? ""; },
   get icalHacjendaBooking() { return process.env.ICAL_HACJENDA_BOOKING ?? ""; },
   get icalHacjendaAirbnb() { return process.env.ICAL_HACJENDA_AIRBNB ?? ""; },
+
+  // Google Places API (ratings)
+  get googlePlacesApiKey() { return process.env.GOOGLE_PLACES_API_KEY ?? ""; },
 };
