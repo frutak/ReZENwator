@@ -4,23 +4,65 @@ import { promisify } from "util";
 import { PropertyRepository } from "../repositories/PropertyRepository";
 import { propertyRatings } from "../../drizzle/schema";
 import { Logger } from "../_core/logger";
+import { ENV } from "../_core/env";
 
 const execAsync = promisify(exec);
 
+// NOTE: For every portal except "google" the value is a page URL to scrape.
+// For "google" the value is a Google Places API Place ID (looked up once via the
+// Place ID Finder) — it is fetched through the official Places API, not scraped.
 const RATING_URLS = {
   Sadoles: {
     booking: "https://www.booking.com/hotel/pl/sadoles-66.html",
     slowhop: "https://slowhop.com/pl/miejsca/2256-sadoles-66.html",
     airbnb: "https://www.airbnb.com/rooms/39273784",
     alohacamp: "https://alohacamp.com/pl/property/sadoles-66-4436",
+    // Google rating intentionally omitted for Sadoles — not shown on the page (no space).
+    // Place ID if ever needed: ChIJD0mrqYUBH0cRODizjLWo_iM
   },
   Hacjenda: {
     booking: "https://www.booking.com/hotel/pl/hacienda-kiekrz.html",
     slowhop: "https://slowhop.com/pl/miejsca/4575-hacjenda-kiekrz.html",
     airbnb: "https://www.airbnb.com/rooms/1327633659929514853",
-    google: "https://www.google.com/search?q=Hacjenda+Kiekrz+Reviews&tbm=lcl",
+    google: "ChIJ8d5Zy9pBBEcREGBu54iQAho",
   },
 };
+
+/**
+ * Fetch a Google rating via the official Places API (New).
+ * `placeId` is a Google Place ID, not a URL. Returns null (a clean skip) when the
+ * API key is unconfigured or the place has no rating; throws on a real API error
+ * so the caller logs it.
+ */
+async function scrapeGooglePlaces(placeId: string): Promise<{ rating: number; count: number } | null> {
+  const apiKey = ENV.googlePlacesApiKey;
+  if (!apiKey) {
+    console.warn("[RatingScraper] GOOGLE_PLACES_API_KEY not configured, skipping Google ratings.");
+    return null;
+  }
+
+  try {
+    const { data } = await axios.get(`https://places.googleapis.com/v1/places/${placeId}`, {
+      headers: {
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask": "rating,userRatingCount",
+      },
+      timeout: 15000,
+    });
+
+    const rating = Number(data?.rating);
+    const count = Number(data?.userRatingCount);
+    if (!isNaN(rating) && !isNaN(count)) {
+      return { rating, count };
+    }
+    console.warn(`[RatingScraper] Google Places returned no rating/count for place ${placeId}`);
+    return null;
+  } catch (error) {
+    const status = (error as any)?.response?.status;
+    const detail = (error as any)?.response?.data?.error?.message ?? (error as any).message;
+    throw new Error(`[google] Places API error${status ? ` (${status})` : ""}: ${detail}`);
+  }
+}
 
 const PYTHON_VENV_PATH = "/home/frutak/price-checker/venv/bin/python3";
 const HELPER_SCRIPT_PATH = "scripts/scrape_ratings_pw.py";
@@ -42,6 +84,11 @@ async function scrapeWithPlaywright(url: string): Promise<{ rating: number; coun
 }
 
 async function scrapePortal(property: "Sadoles" | "Hacjenda", url: string, portal: "booking" | "airbnb" | "slowhop" | "alohacamp" | "google"): Promise<{ rating: number; count: number } | null> {
+  // Google is served by the official Places API, not scraped — `url` is a Place ID here.
+  if (portal === "google") {
+    return scrapeGooglePlaces(url);
+  }
+
   // 1. Try Playwright first (most robust, handles JS, Stealth, and generic fallbacks)
   const pwResult = await scrapeWithPlaywright(url);
   if (pwResult) return pwResult;
@@ -122,12 +169,6 @@ async function scrapePortal(property: "Sadoles" | "Hacjenda", url: string, porta
     } else if (portal === "airbnb") {
       const ratingMatch = html.match(/"rating":(\d+[\.,]\d+)/) || html.match(/"avgRating":(\d+[\.,]\d+)/);
       const countMatch = html.match(/"reviewCount":(\d+)/) || html.match(/"reviewsCount":(\d+)/);
-      if (ratingMatch && countMatch) {
-        return { rating: parseFloat(ratingMatch[1].replace(",", ".")), count: parseInt(countMatch[1], 10) };
-      }
-    } else if (portal === "google") {
-      const ratingMatch = html.match(/(\d[\.,]\d)\s+gwiazd/i) || html.match(/(\d[\.,]\d)\s+stars/i) || html.match(/(\d[\.,]\d)\(/);
-      const countMatch = html.match(/(\d+)\s+opinii/i) || html.match(/(\d+)\s+reviews/i) || html.match(/\((\d+)\)/);
       if (ratingMatch && countMatch) {
         return { rating: parseFloat(ratingMatch[1].replace(",", ".")), count: parseInt(countMatch[1], 10) };
       }
