@@ -141,7 +141,7 @@ async def scrape_ratings(url):
                     "status": "OK"
                 }
             else:
-                return {"error": "Could not find rating or count", "status": "NOT_FOUND"}
+                return {"error": f"Could not find rating or count. Body text length: {len(body_text)}, snippet: {body_text[:500]}", "status": "NOT_FOUND"}
 
         except Exception as e:
             return {"error": str(e), "status": "ERROR"}
