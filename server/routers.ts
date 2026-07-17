@@ -23,7 +23,7 @@ import { getICalFeeds } from "./workers/icalConfig";
 import { Logger } from "./_core/logger";
 import { PricingService } from "./services/PricingService";
 import { BookingService } from "./services/BookingService";
-import { BankTransferRepository } from "./repositories/BankTransferRepository";
+import { BankTransferRepository, CASHFLOW_START_MONTH } from "./repositories/BankTransferRepository";
 import { MatchingEngine } from "./services/MatchingEngine";
 import { MonthlyAdjustmentRepository } from "./repositories/MonthlyAdjustmentRepository";
 import { type ParsedBankData } from "./workers/emailParsers";
@@ -152,6 +152,78 @@ const bookingRouter = router({
     )
     .query(async ({ input }) => {
       return BookingRepository.getAnalytics(input ?? {});
+    }),
+
+  /**
+   * Cash-based analytics grouped by when money moved, not by check-in.
+   *
+   * Returns two things per month (from CASHFLOW_START_MONTH onward):
+   *   - cashIn: matched bank transfers received that month.
+   *   - freeCashflow: cashIn minus the cash that went out that month —
+   *       utilities and purchases by their payment date, plus the cleaning
+   *       COMPUTED for the PREVIOUS month's stays (the cleaner is paid the
+   *       month after the guests leave).
+   *
+   * Cleaning is not stored anywhere; it is derived per booking by
+   * getAnalytics (which attributes it to the check-in month), so here we take
+   * month M-1's cleaning figure. Expenses carry no channel, so a channel
+   * filter narrows cashIn and cleaning but not utilities/purchases.
+   */
+  cashflow: publicProcedure
+    .input(
+      z.object({
+        property: z.enum(PROPERTIES).optional(),
+        channel: z.enum(CHANNELS).optional(),
+        year: z.number().optional(),
+      }).optional()
+    )
+    .query(async ({ input }) => {
+      const filters = input ?? {};
+      const year = filters.year ?? new Date().getFullYear();
+
+      const [inflow, expensesPaid, analytics] = await Promise.all([
+        BankTransferRepository.getMonthlyCashflow(filters),
+        ExpenseRepository.getMonthlyPaidByType({ property: filters.property, year }),
+        BookingRepository.getAnalytics(filters),
+      ]);
+
+      // Cleaning by check-in month (from existing analytics logic).
+      const cleaningByMonth = new Map<string, number>();
+      for (const m of analytics.monthlyData) {
+        cleaningByMonth.set(m.month, Number(m.cleaningCosts) || 0);
+      }
+      // A January row needs the prior December's cleaning, which the current
+      // year's analytics doesn't cover — fetch it only when actually needed.
+      if (inflow.some((r) => r.month.endsWith("-01"))) {
+        const prev = await BookingRepository.getAnalytics({ ...filters, year: year - 1 });
+        for (const m of prev.monthlyData) cleaningByMonth.set(m.month, Number(m.cleaningCosts) || 0);
+      }
+
+      const expenseByMonth = new Map(expensesPaid.map((e) => [e.month, e]));
+      const prevMonthKey = (month: string) => {
+        const [y, m] = month.split("-").map(Number);
+        const d = new Date(y, m - 2, 1); // m is 1-based; m-2 => previous month
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      };
+
+      const monthlyData = inflow.map((row) => {
+        const exp = expenseByMonth.get(row.month);
+        const utilitiesPaid = exp?.utilities ?? 0;
+        const purchasesPaid = exp?.purchases ?? 0;
+        const cleaningPrev = cleaningByMonth.get(prevMonthKey(row.month)) ?? 0;
+        const freeCashflow = row.total - utilitiesPaid - purchasesPaid - cleaningPrev;
+        return {
+          month: row.month,
+          total: row.total,
+          count: row.count,
+          utilitiesPaid,
+          purchasesPaid,
+          cleaningPrev,
+          freeCashflow,
+        };
+      });
+
+      return { monthlyData, startMonth: CASHFLOW_START_MONTH };
     }),
 
   getMonthlyAdjustments: publicProcedure

@@ -1,6 +1,17 @@
 import { getDb } from "../db";
 import { bankTransfers, bookings, type InsertBankTransfer, type BankTransfer } from "../../drizzle/schema";
-import { eq, and, isNull, desc } from "drizzle-orm";
+import { eq, and, isNull, desc, gte, lte, sql } from "drizzle-orm";
+import type { Property, Channel } from "@shared/config";
+
+/**
+ * First month with complete transfer data.
+ *
+ * Bank transfers only started being recorded on 2026-04-30, so April holds a
+ * single stray transfer and earlier months none at all. Cashflow is reported
+ * from May 2026 onward; anything before that would understate reality rather
+ * than simply be empty.
+ */
+export const CASHFLOW_START_MONTH = "2026-05";
 
 export class BankTransferRepository {
   /**
@@ -87,10 +98,62 @@ export class BankTransferRepository {
     if (!db) throw new Error("Database not initialized");
     
     return db.update(bankTransfers)
-      .set({ 
-        status, 
-        matchedBookingId: matchedBookingId ?? null 
+      .set({
+        status,
+        matchedBookingId: matchedBookingId ?? null
       })
       .where(eq(bankTransfers.externalId, externalId));
+  }
+
+  /**
+   * Monthly cash inflow, aggregated by the date money actually arrived.
+   *
+   * This is deliberately different from the booking-based analytics, which
+   * group by check-in date: a stay in August paid for in May counts here as
+   * May. Only `matched` transfers are included — `ignored` ones are the
+   * owner's flag for "not rental income" (ZUS, bailiff, personal transfers).
+   *
+   * Property/channel filters resolve through the matched booking, so a
+   * filtered view necessarily drops transfers whose booking is gone.
+   */
+  static async getMonthlyCashflow(filters: {
+    property?: Property;
+    channel?: Channel;
+    year?: number;
+  } = {}): Promise<Array<{ month: string; total: number; count: number }>> {
+    const db = await getDb();
+    if (!db) return [];
+
+    const conditions = [eq(bankTransfers.status, "matched")];
+
+    // Never report months whose data is known to be incomplete.
+    conditions.push(gte(bankTransfers.transferDate, new Date(`${CASHFLOW_START_MONTH}-01T00:00:00Z`)));
+
+    if (filters.year) {
+      conditions.push(gte(bankTransfers.transferDate, new Date(filters.year, 0, 1)));
+      conditions.push(lte(bankTransfers.transferDate, new Date(filters.year, 11, 31, 23, 59, 59)));
+    }
+    if (filters.property) conditions.push(eq(bookings.property, filters.property));
+    if (filters.channel) conditions.push(eq(bookings.channel, filters.channel));
+
+    const rows = await db
+      .select({
+        month: sql<string>`DATE_FORMAT(${bankTransfers.transferDate}, '%Y-%m')`,
+        total: sql<string>`SUM(${bankTransfers.amount})`,
+        count: sql<number>`COUNT(*)`,
+      })
+      .from(bankTransfers)
+      // Inner join: a matched transfer always has a booking, and filtering by
+      // property/channel is only meaningful through it.
+      .innerJoin(bookings, eq(bookings.id, bankTransfers.matchedBookingId))
+      .where(and(...conditions))
+      .groupBy(sql`DATE_FORMAT(${bankTransfers.transferDate}, '%Y-%m')`)
+      .orderBy(sql`DATE_FORMAT(${bankTransfers.transferDate}, '%Y-%m')`);
+
+    return rows.map((r) => ({
+      month: r.month,
+      total: parseFloat(String(r.total ?? "0")) || 0,
+      count: Number(r.count ?? 0),
+    }));
   }
 }
