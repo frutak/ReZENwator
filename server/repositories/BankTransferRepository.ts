@@ -49,20 +49,19 @@ export class BankTransferRepository {
 
   /**
    * Inserts a new bank transfer record.
-   * Uses upsert-like logic via externalId to avoid duplicates.
+   *
+   * Relies on the unique index on `externalId`: a transfer that has already been
+   * seen is skipped rather than updated, and `inserted: false` is returned. The
+   * insert is the idempotency gate for applying payments to a booking — callers
+   * must not apply the money when this returns false, or a re-delivered email
+   * double-counts the transfer.
    */
-  static async insertTransfer(transfer: InsertBankTransfer) {
+  static async insertTransfer(transfer: InsertBankTransfer): Promise<{ inserted: boolean }> {
     const db = await getDb();
     if (!db) throw new Error("Database not initialized");
-    
-    return db.insert(bankTransfers).values(transfer).onDuplicateKeyUpdate({
-      set: { 
-        amount: transfer.amount,
-        senderName: transfer.senderName,
-        transferTitle: transfer.transferTitle,
-        transferDate: transfer.transferDate,
-      }
-    });
+
+    const [result] = await db.insert(bankTransfers).ignore().values(transfer);
+    return { inserted: result.affectedRows > 0 };
   }
 
   /**
