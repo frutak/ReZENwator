@@ -9,6 +9,7 @@ import { sendAlertEmail, forwardUnmatchedEmail } from "../_core/email";
 import { Logger } from "../_core/logger";
 import { initialStatus, initialDepositStatus } from "./icalPoller";
 import { format } from "date-fns";
+import { createHash } from "crypto";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -25,6 +26,19 @@ function getGmailConfig() {
 }
 
 const AUTO_MATCH_THRESHOLD = 80;
+
+/**
+ * Stable identity for an email that carries no Message-ID.
+ *
+ * IMAP sequence numbers are reassigned on every poll, so deriving an id from
+ * them yields a different value each time the same email is seen — which would
+ * slip past the unique index on `bank_transfers.externalId` and let a transfer
+ * be counted twice. Hash the immutable content instead.
+ */
+function stableEmailId(from: string, subject: string, body: string): string {
+  const digest = createHash("sha256").update([from, subject, body].join("\u0000")).digest("hex");
+  return `sha256-${digest}`;
+}
 
 // ─── IMAP helpers ─────────────────────────────────────────────────────────────
 
@@ -71,12 +85,15 @@ async function fetchEmails(testMode: boolean): Promise<
               msg.once("end", async () => {
                 try {
                   const parsed = await simpleParser(rawEmail);
+                  const from = parsed.from?.text ?? "";
+                  const subject = parsed.subject ?? "";
+                  const body = parsed.text ?? (typeof parsed.html === 'string' ? parsed.html.replace(/<[^>]+>/g, " ") : "") ?? "";
                   emails.push({
                     uid: attributes?.uid ?? seqno,
-                    from: parsed.from?.text ?? "",
-                    subject: parsed.subject ?? "",
-                    body: parsed.text ?? (typeof parsed.html === 'string' ? parsed.html.replace(/<[^>]+>/g, " ") : "") ?? "",
-                    messageId: parsed.messageId ?? `seq-${seqno}`,
+                    from,
+                    subject,
+                    body,
+                    messageId: parsed.messageId ?? stableEmailId(from, subject, body),
                   });
                 } finally { res(); }
               });
@@ -233,10 +250,14 @@ async function handleBankTransfer(data: ParsedBankData | null, email: any, testM
     return false;
   }
 
-  // 1. Persist the transfer to the database
+  // 1. Persist the transfer to the database.
+  // This is also the idempotency gate: if the row already exists, the email has
+  // been processed before (e.g. re-delivered, or manually marked unread) and the
+  // payment must not be applied to the booking a second time.
   if (!testMode) {
+    let inserted: boolean;
     try {
-      await BankTransferRepository.insertTransfer({
+      ({ inserted } = await BankTransferRepository.insertTransfer({
         externalId: email.messageId,
         amount: String(data.amount),
         senderName: data.senderName,
@@ -245,10 +266,26 @@ async function handleBankTransfer(data: ParsedBankData | null, email: any, testM
         accountNumber: data.accountNumber,
         currency: data.currency,
         status: "pending",
-      });
+      }));
     } catch (dbErr) {
-      console.error(`[EmailPoller] Failed to insert bank transfer to DB: ${String(dbErr)}`);
-      // We continue even if DB insertion fails, to attempt auto-matching
+      // Never fall through to matching on a failed write: without a persisted
+      // transfer there is nothing to dedupe against, so a retry would re-apply.
+      // The email is already flagged \Seen, so this transfer will not be picked
+      // up again — alert rather than drop it silently.
+      console.error(`[EmailPoller] Failed to insert bank transfer to DB, skipping match: ${String(dbErr)}`);
+      await sendAlertEmail(
+        `⚠️ Bank transfer NOT recorded: ${data.senderName} (${data.amount} ${data.currency})`,
+        `A bank transfer email was parsed but could not be saved to the database, so it was NOT matched to any booking.\n\n` +
+          `Sender: ${data.senderName}\nAmount: ${data.amount} ${data.currency}\nTitle: ${data.transferTitle}\n` +
+          `Date: ${data.transferDate?.toISOString()}\nMessage-ID: ${email.messageId}\n\n` +
+          `Error: ${String(dbErr)}\n\nThis transfer needs to be matched manually.`
+      );
+      throw dbErr;
+    }
+
+    if (!inserted) {
+      console.log(`[EmailPoller] Bank transfer already processed (${email.messageId}), skipping.`);
+      return true;
     }
   }
 
