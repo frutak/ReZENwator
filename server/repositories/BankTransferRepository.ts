@@ -1,4 +1,4 @@
-import { getDb } from "../db";
+import { getDb, type DbExecutor } from "../db";
 import { bankTransfers, bookings, type InsertBankTransfer, type BankTransfer } from "../../drizzle/schema";
 import { eq, and, isNull, desc, gte, lte, sql } from "drizzle-orm";
 import type { Property, Channel } from "@shared/config";
@@ -77,26 +77,32 @@ export class BankTransferRepository {
 
   /**
    * Updates a transfer's status by its internal ID.
+   *
+   * Pass `executor` (a transaction handle) to run this write inside the same
+   * transaction as the booking-payment update, so the two commit atomically.
    */
-  static async updateTransferStatus(id: number, status: BankTransfer["status"], matchedBookingId?: number) {
-    const db = await getDb();
+  static async updateTransferStatus(id: number, status: BankTransfer["status"], matchedBookingId?: number, executor?: DbExecutor) {
+    const db = executor ?? await getDb();
     if (!db) throw new Error("Database not initialized");
-    
+
     return db.update(bankTransfers)
-      .set({ 
-        status, 
-        matchedBookingId: matchedBookingId ?? null 
+      .set({
+        status,
+        matchedBookingId: matchedBookingId ?? null
       })
       .where(eq(bankTransfers.id, id));
   }
 
   /**
    * Updates a transfer's status by its external ID (email Message-ID).
+   *
+   * Pass `executor` (a transaction handle) to run this write inside the same
+   * transaction as the booking-payment update, so the two commit atomically.
    */
-  static async updateTransferStatusByExternalId(externalId: string, status: BankTransfer["status"], matchedBookingId?: number) {
-    const db = await getDb();
+  static async updateTransferStatusByExternalId(externalId: string, status: BankTransfer["status"], matchedBookingId?: number, executor?: DbExecutor) {
+    const db = executor ?? await getDb();
     if (!db) throw new Error("Database not initialized");
-    
+
     return db.update(bankTransfers)
       .set({
         status,

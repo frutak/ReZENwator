@@ -1,6 +1,8 @@
 import "dotenv/config";
 import express from "express";
-import { startScheduler } from "../workers/scheduler";
+import { startScheduler, stopScheduler } from "../workers/scheduler";
+import { validateEnv } from "./env";
+import { closeDb } from "../db";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
@@ -85,6 +87,45 @@ async function startServer() {
 
   // Start background polling jobs
   startScheduler();
+
+  // ── Graceful shutdown ──────────────────────────────────────────────────────
+  // systemd sends SIGTERM on `systemctl restart`. Stop new polls, drain the
+  // HTTP server, and close the DB pool so an in-flight transaction isn't cut
+  // mid-write. Guarded so a second signal can't run teardown twice.
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[Shutdown] Received ${signal}, shutting down gracefully...`);
+    stopScheduler();
+    server.close(() => console.log("[Shutdown] HTTP server closed."));
+    try {
+      await closeDb();
+      console.log("[Shutdown] Database pool closed.");
+    } catch (err) {
+      console.error("[Shutdown] Error closing database pool:", err);
+    }
+    // Give the server a moment to finish draining, then exit.
+    setTimeout(() => process.exit(0), 2_000).unref();
+  };
+
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
 }
 
-startServer().catch(console.error);
+// Fail fast on missing/invalid configuration before doing any work.
+validateEnv();
+
+// A stray rejection or throw in a background cron used to kill the process with
+// no context (or silently stop the scheduler). Log them loudly instead.
+process.on("unhandledRejection", (reason) => {
+  console.error("[Process] Unhandled promise rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("[Process] Uncaught exception:", err);
+});
+
+startServer().catch((err) => {
+  console.error("[Startup] Fatal error during startup:", err);
+  process.exit(1);
+});
