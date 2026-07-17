@@ -9,6 +9,8 @@
  */
 
 import { BookingRepository } from "../repositories/BookingRepository";
+import { BankTransferRepository } from "../repositories/BankTransferRepository";
+import { getDb } from "../db";
 import type { ParsedBankData } from "./emailParsers";
 import { sendAlertEmail } from "../_core/email";
 import { levenshtein, normalizeName } from "../_core/utils/string";
@@ -70,11 +72,22 @@ export async function findMatchingBookings(
 /**
  * Apply a bank transfer match to a booking.
  * Records transfer details and updates status based on amount and channel.
+ *
+ * The booking-payment write and the transfer-status write are committed in a
+ * single transaction so the process can never end up with a booking marked
+ * paid while its transfer is still `pending` (which a later manual re-match
+ * would double-count). Pass `link` to include the transfer-status update in the
+ * same transaction; omit it to update only the booking.
+ *
+ * Side effects (activity log, payment-mismatch email) are deferred until after
+ * the transaction commits — email must never run inside a DB transaction, and a
+ * failed write should not send a "payment received" signal.
  */
 export async function applyTransferMatch(
   bookingId: number,
   transfer: ParsedBankData,
-  score: number
+  score: number,
+  link?: { transferId?: number; externalId?: string }
 ): Promise<void> {
   // Fetch current booking to determine status transition
   const b = await BookingRepository.getBookingById(bookingId);
@@ -83,6 +96,9 @@ export async function applyTransferMatch(
   const transferAmount = transfer.amount ?? 0;
   let newStatus = b.status;
   let newDepositStatus = b.depositStatus;
+
+  // Payment-mismatch notification is captured here and sent AFTER the commit.
+  let pendingMismatch: { toBePaid: number; depositReq: number; resFee?: number } | null = null;
 
   const currentPaid = parseFloat(String(b.amountPaid || "0"));
   const totalPrice = parseFloat(String(b.totalPrice || "0"));
@@ -124,7 +140,7 @@ export async function applyTransferMatch(
     } else if (isDepositMatch) {
       newDepositStatus = "paid";
     } else {
-      await sendPaymentMismatchEmail(b as any, transferAmount, { toBePaid: guestBalance, depositReq, resFee: cResFee });
+      pendingMismatch = { toBePaid: guestBalance, depositReq, resFee: cResFee };
     }
   } else if (b.status === "portal_paid") {
     // Portals (Airbnb/Booking) that were already marked as portal_paid
@@ -139,7 +155,7 @@ export async function applyTransferMatch(
     } else if (isPetFeeMatch) {
       // Pet fee paid
     } else {
-      await sendPaymentMismatchEmail(b as any, transferAmount, { toBePaid: cRevenue, depositReq });
+      pendingMismatch = { toBePaid: cRevenue, depositReq };
     }
   } else if (b.channel === "direct") {
     if (isBothMatch) {
@@ -164,7 +180,7 @@ export async function applyTransferMatch(
         }
       }
       // Notify about unusual amount
-      await sendPaymentMismatchEmail(b as any, transferAmount, { toBePaid, depositReq, resFee: cResFee });
+      pendingMismatch = { toBePaid, depositReq, resFee: cResFee };
     }
   } else {
     // Default portal logic (if not portal_paid yet)
@@ -182,14 +198,14 @@ export async function applyTransferMatch(
     } else {
       newStatus = "paid"; // Usually the portal payment
       if (!isToBePaidMatch && toBePaid > 0) {
-        await sendPaymentMismatchEmail(b as any, transferAmount, { toBePaid, depositReq, resFee: cResFee });
+        pendingMismatch = { toBePaid, depositReq, resFee: cResFee };
       }
     }
   }
 
   let newPaid = currentPaid + transferAmount;
 
-  await BookingRepository.updateBookingPayment(bookingId, {
+  const paymentUpdate = {
     status: newStatus as BookingStatus,
     depositStatus: newDepositStatus as DepositStatus,
     amountPaid: String(newPaid.toFixed(2)),
@@ -198,9 +214,30 @@ export async function applyTransferMatch(
     transferTitle: transfer.transferTitle,
     transferDate: transfer.transferDate,
     matchScore: score,
-  });
+  };
 
+  // Atomic: booking payment + transfer status commit together (or not at all).
+  const db = await getDb();
+  if (db) {
+    await db.transaction(async (tx) => {
+      await BookingRepository.updateBookingPayment(bookingId, paymentUpdate, tx);
+      if (link?.transferId != null) {
+        await BankTransferRepository.updateTransferStatus(link.transferId, "matched", bookingId, tx);
+      } else if (link?.externalId != null) {
+        await BankTransferRepository.updateTransferStatusByExternalId(link.externalId, "matched", bookingId, tx);
+      }
+    });
+  } else {
+    // No DB configured (dev) — best-effort, non-transactional.
+    await BookingRepository.updateBookingPayment(bookingId, paymentUpdate);
+  }
+
+  // ─── Post-commit side effects (never inside the transaction) ───────────────
   await Logger.bookingAction(bookingId, "status_change", `Auto-matched bank transfer (Score: ${score})`, `Sender: ${transfer.senderName}, Amount: ${transferAmount} PLN, New Status: ${newStatus}`);
+
+  if (pendingMismatch) {
+    await sendPaymentMismatchEmail(b as any, transferAmount, pendingMismatch);
+  }
 
   console.log(`[Matcher] Booking #${bookingId} updated: status=${newStatus}, deposit=${newDepositStatus}`);
 }

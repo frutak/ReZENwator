@@ -71,7 +71,10 @@ async function fetchEmails(testMode: boolean): Promise<
           // In test mode, limit to last 80 emails to avoid processing too many
           const targetResults = testMode ? results.slice(-80) : results;
 
-          const fetch = imap.fetch(targetResults, { bodies: "", markSeen: !testMode });
+          // Do NOT mark \Seen here. A message flagged read at fetch time that
+          // then fails processing is lost forever (never re-fetched). Instead we
+          // flag \Seen only after the handler succeeds — see markEmailsSeen.
+          const fetch = imap.fetch(targetResults, { bodies: "", markSeen: false });
           const promises: Promise<void>[] = [];
 
           fetch.on("message", (msg, seqno) => {
@@ -111,6 +114,40 @@ async function fetchEmails(testMode: boolean): Promise<
     });
 
     imap.once("error", (err: Error) => { cleanup(); reject(err); });
+    imap.connect();
+  });
+}
+
+/**
+ * Mark the given messages (by IMAP UID) as \Seen.
+ *
+ * Called only for emails whose handler completed without throwing, so a
+ * transient failure (DB blip, parser error) leaves the message unread and it is
+ * retried on the next poll instead of being silently dropped.
+ */
+async function markEmailsSeen(uids: number[]): Promise<void> {
+  if (uids.length === 0) return;
+  const imap = new Imap(getGmailConfig());
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      try { imap.end(); } catch { /* ignore */ }
+      if (err) reject(err); else resolve();
+    };
+
+    imap.once("ready", () => {
+      imap.openBox("INBOX", false, (err) => {
+        if (err) return finish(err);
+        // UID STORE +FLAGS (\Seen). imap.addFlags is UID-based, matching the
+        // UIDs returned by imap.search / carried on message attributes.
+        imap.addFlags(uids, "\\Seen", (flagErr) => finish(flagErr ?? undefined));
+      });
+    });
+
+    imap.once("error", (err: Error) => finish(err));
     imap.connect();
   });
 }
@@ -297,15 +334,11 @@ async function handleBankTransfer(data: ParsedBankData | null, email: any, testM
     if (best.score >= AUTO_MATCH_THRESHOLD) {
       if (testMode) return true;
 
-      // 3. Apply the match to the booking
-      await applyTransferMatch(best.bookingId, data as any, best.score);
-
-      // 4. Update the transfer record as matched
-      try {
-        await BankTransferRepository.updateTransferStatusByExternalId(email.messageId, "matched", best.bookingId);
-      } catch (updateErr) {
-        console.error(`[EmailPoller] Failed to update transfer status to matched: ${String(updateErr)}`);
-      }
+      // 3. Apply the match to the booking AND flag the transfer matched in one
+      // transaction — see applyTransferMatch. This replaces the previous
+      // two-step (apply, then separately mark matched) that could leave the
+      // transfer stuck `pending` if the process died between the two writes.
+      await applyTransferMatch(best.bookingId, data as any, best.score, { externalId: email.messageId });
 
       return true;
     }
@@ -364,6 +397,10 @@ export async function pollEmails(testMode = false): Promise<{
     bankUnmatched: 0,
   };
 
+  // UIDs of emails whose handler finished without throwing — flagged \Seen
+  // after the loop so a failed email stays unread and is retried next poll.
+  const processedUids: number[] = [];
+
   try {
     const emails = await fetchEmails(testMode);
     console.log(`[EmailPoller] Fetched ${emails.length} emails (testMode: ${testMode}).`);
@@ -421,8 +458,21 @@ export async function pollEmails(testMode = false): Promise<{
           }
         }
 
+        // Reached only if nothing above threw — safe to mark this email read.
+        if (!testMode) processedUids.push(email.uid);
+
       } catch (err) {
         errors.push(`Error in email ${email.subject}: ${String(err)}`);
+      }
+    }
+
+    // Flag successfully-handled emails \Seen in a single pass. Failures stay
+    // unread and are retried on the next poll.
+    if (!testMode) {
+      try {
+        await markEmailsSeen(processedUids);
+      } catch (seenErr) {
+        errors.push(`Failed to mark emails seen: ${String(seenErr)}`);
       }
     }
   } catch (err) {

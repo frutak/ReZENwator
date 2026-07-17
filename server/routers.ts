@@ -3,7 +3,7 @@ import { format, setHours, setMinutes, startOfDay, addMonths, addDays } from "da
 import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
-import { publicProcedure, router } from "./_core/trpc";
+import { publicProcedure, protectedProcedure, adminProcedure, router } from "./_core/trpc";
 import { BookingRepository } from "./repositories/BookingRepository";
 import { UserRepository } from "./repositories/UserRepository";
 import { PropertyRepository } from "./repositories/PropertyRepository";
@@ -55,19 +55,19 @@ function verifyPassword(password: string, storedHash: string): boolean {
 // ─── Booking router ───────────────────────────────────────────────────────────
 
 const bookingRouter = router({
-  list: publicProcedure
+  list: protectedProcedure
     .input(bookingFilterSchema.optional())
     .query(async ({ input }) => {
       return BookingRepository.getBookings(input ?? {});
     }),
 
-  get: publicProcedure
+  get: protectedProcedure
     .input(z.object({ id: z.number() }))
     .query(async ({ input }) => {
       return BookingRepository.getBookingById(input.id);
     }),
 
-  stats: publicProcedure
+  stats: protectedProcedure
     .input(
       z.object({
         property: z.enum(PROPERTIES).optional(),
@@ -80,7 +80,7 @@ const bookingRouter = router({
       return BookingRepository.getBookingStats(input ?? {});
     }),
 
-  updateStatus: publicProcedure
+  updateStatus: protectedProcedure
     .input(
       z.object({
         id: z.number(),
@@ -92,7 +92,7 @@ const bookingRouter = router({
       return { success: true };
     }),
 
-  updateDeposit: publicProcedure
+  updateDeposit: protectedProcedure
     .input(
       z.object({
         id: z.number(),
@@ -104,7 +104,7 @@ const bookingRouter = router({
       return { success: true };
     }),
 
-  updateNotes: publicProcedure
+  updateNotes: protectedProcedure
     .input(
       z.object({
         id: z.number(),
@@ -116,33 +116,33 @@ const bookingRouter = router({
       return { success: true };
     }),
 
-  updateDetails: publicProcedure
+  updateDetails: protectedProcedure
     .input(updateBookingDetailsSchema)
     .mutation(async ({ input }) => {
       const { id, ...details } = input;
       return BookingService.updateBookingDetails(id, details);
     }),
 
-  create: publicProcedure
+  create: protectedProcedure
     .input(createBookingSchema)
     .mutation(async ({ input }) => {
       return BookingService.createManualBooking(input);
     }),
 
-  delete: publicProcedure
+  delete: adminProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       await BookingRepository.deleteBooking(input.id);
       return { success: true };
     }),
 
-  getActivities: publicProcedure
+  getActivities: protectedProcedure
     .input(z.object({ bookingId: z.number() }))
     .query(async ({ input }) => {
       return BookingRepository.getBookingActivities(input.bookingId);
     }),
 
-  analytics: publicProcedure
+  analytics: protectedProcedure
     .input(
       z.object({
         property: z.enum(PROPERTIES).optional(),
@@ -169,7 +169,7 @@ const bookingRouter = router({
    * month M-1's cleaning figure. Expenses carry no channel, so a channel
    * filter narrows cashIn and cleaning but not utilities/purchases.
    */
-  cashflow: publicProcedure
+  cashflow: protectedProcedure
     .input(
       z.object({
         property: z.enum(PROPERTIES).optional(),
@@ -226,7 +226,7 @@ const bookingRouter = router({
       return { monthlyData, startMonth: CASHFLOW_START_MONTH };
     }),
 
-  getMonthlyAdjustments: publicProcedure
+  getMonthlyAdjustments: protectedProcedure
     .input(z.object({
       property: z.enum(PROPERTIES),
       year: z.number(),
@@ -235,7 +235,7 @@ const bookingRouter = router({
       return MonthlyAdjustmentRepository.getAdjustments(input);
     }),
 
-  updateMonthlyAdjustment: publicProcedure
+  updateMonthlyAdjustment: protectedProcedure
     .input(z.object({
       property: z.enum(PROPERTIES),
       month: z.string(), // "YYYY-MM"
@@ -248,13 +248,13 @@ const bookingRouter = router({
     }),
 
   /** Pricing procedures */
-  getPricingPlans: publicProcedure
+  getPricingPlans: protectedProcedure
     .input(z.object({ property: z.enum(PROPERTIES) }))
     .query(async ({ input }) => {
       return PropertyRepository.getPricingPlans(input.property);
     }),
 
-  getCalendarPricing: publicProcedure
+  getCalendarPricing: protectedProcedure
     .input(z.object({
       property: z.enum(PROPERTIES),
       from: z.coerce.date(),
@@ -269,7 +269,7 @@ const bookingRouter = router({
       return PropertyRepository.getCalendarPricing(input.property, from, to);
     }),
 
-  getPropertySettings: publicProcedure
+  getPropertySettings: protectedProcedure
     .input(z.object({ property: z.enum(PROPERTIES) }))
     .query(async ({ input }) => {
       const result = await PropertyRepository.getPropertySettings(input.property);
@@ -285,7 +285,7 @@ const bookingRouter = router({
     }),
 
   /** Detect overlapping bookings for the same property */
-  doubleBookings: publicProcedure.query(async () => {
+  doubleBookings: protectedProcedure.query(async () => {
     const conflicts = await detectDoubleBookings();
     return conflicts.map((c) => ({
       property: c.property,
@@ -309,7 +309,7 @@ const bookingRouter = router({
   }),
 
   /** Manually apply a bank transfer match to a booking */
-  applyTransferMatch: publicProcedure
+  applyTransferMatch: adminProcedure
     .input(
       z.object({
         bookingId: z.number(),
@@ -336,7 +336,7 @@ const bookingRouter = router({
       return { success: true };
     }),
 
-  taxReport: publicProcedure
+  taxReport: protectedProcedure
     .input(z.object({ month: z.number().min(1).max(12), year: z.number() }))
     .query(async ({ input }) => {
       console.log(`[TaxReport] Generating for ${input.month}/${input.year}`);
@@ -403,7 +403,7 @@ const bookingRouter = router({
 // ─── Sync router ──────────────────────────────────────────────────────────────
 
 const syncRouter = router({
-  triggerIcal: publicProcedure.mutation(async () => {
+  triggerIcal: adminProcedure.mutation(async () => {
     const result = await pollAllICalFeeds();
     return { 
       success: result.errors.length === 0, 
@@ -413,7 +413,7 @@ const syncRouter = router({
     };
   }),
 
-  triggerEmail: publicProcedure.mutation(async () => {
+  triggerEmail: adminProcedure.mutation(async () => {
     const result = await pollEmails();
     return {
       success: true,
@@ -425,12 +425,12 @@ const syncRouter = router({
     };
   }),
 
-  triggerRatings: publicProcedure.mutation(async () => {
+  triggerRatings: adminProcedure.mutation(async () => {
     await updateAllPropertyRatings();
     return { success: true };
   }),
 
-  lastRun: publicProcedure.query(async () => {
+  lastRun: protectedProcedure.query(async () => {
     const [icalLast, emailLast] = await Promise.all([
       SyncRepository.getLastSyncTime("ical"),
       SyncRepository.getLastSyncTime("email"),
@@ -443,13 +443,13 @@ const syncRouter = router({
     return { ical: icalLast, email: emailLast, ratings: ratingsLast };
   }),
 
-  logs: publicProcedure
+  logs: protectedProcedure
     .input(z.object({ limit: z.number().min(1).max(100).default(20) }).optional())
     .query(async ({ input }) => {
       return SyncRepository.getRecentSyncLogs(input?.limit ?? 20);
     }),
 
-  feeds: publicProcedure.query(() => {
+  feeds: protectedProcedure.query(() => {
     return getICalFeeds().map((f) => ({
       label: f.label,
       property: f.property,
@@ -457,7 +457,7 @@ const syncRouter = router({
     }));
   }),
 
-  status: publicProcedure.query(async () => {
+  status: protectedProcedure.query(async () => {
     return SyncRepository.getSyncStatus();
   }),
 });
@@ -523,7 +523,7 @@ const publicPortalRouter = router({
 // ─── Pricing router ───────────────────────────────────────────────────────────
 
 const pricingRouter = router({
-  getPricing: publicProcedure
+  getPricing: protectedProcedure
     .input(z.object({
       property: z.enum(PROPERTIES),
       from: z.coerce.date(),
@@ -533,7 +533,7 @@ const pricingRouter = router({
       return PropertyRepository.getCalendarPricing(input.property, input.from, input.to);
     }),
 
-  updatePlan: publicProcedure
+  updatePlan: adminProcedure
     .input(z.object({
       id: z.number(),
       nightlyPrice: z.number(),
@@ -547,7 +547,7 @@ const pricingRouter = router({
       return { success: true };
     }),
 
-  updateSettings: publicProcedure
+  updateSettings: adminProcedure
     .input(z.object({
       property: z.enum(PROPERTIES),
       fixedBookingPrice: z.number(),
@@ -574,7 +574,7 @@ const pricingRouter = router({
 // ─── Pricing audit router ───────────────────────────────────────────────────
 
 const pricingAuditRouter = router({
-  getAudits: publicProcedure
+  getAudits: protectedProcedure
     .input(z.object({
       property: z.enum(PROPERTIES),
       from: z.coerce.date(),
@@ -641,7 +641,7 @@ const pricingAuditRouter = router({
       return enrichedAudits;
     }),
 
-  trigger: publicProcedure.mutation(async () => {
+  trigger: adminProcedure.mutation(async () => {
     if (PricingAuditor.getIsRunning()) {
       throw new Error("Audit already in progress");
     }
@@ -652,7 +652,7 @@ const pricingAuditRouter = router({
     return { success: true };
   }),
 
-  triggerManual: publicProcedure
+  triggerManual: adminProcedure
     .input(z.object({
       property: z.enum(["Sadoles", "Hacjenda"]),
       checkIn: z.date(),
@@ -690,17 +690,17 @@ const userRouter = router({
 // ─── Transfer router ──────────────────────────────────────────────────────────
 
 const transferRouter = router({
-  listPending: publicProcedure
+  listPending: protectedProcedure
     .query(async () => {
       return BankTransferRepository.getTransfersByStatus('pending');
     }),
 
-  listMatched: publicProcedure
+  listMatched: protectedProcedure
     .query(async () => {
       return BankTransferRepository.getMatchedTransfers();
     }),
 
-  getMatches: publicProcedure
+  getMatches: protectedProcedure
     .input(z.object({ transferId: z.number() }))
     .query(async ({ input }) => {
       const transfer = await BankTransferRepository.getTransferById(input.transferId);
@@ -737,7 +737,7 @@ const transferRouter = router({
       return MatchingEngine.scoreCandidates(parsed, candidates as any, !!isPortalPayout);
     }),
 
-  manualMatch: publicProcedure
+  manualMatch: adminProcedure
     .input(z.object({ transferId: z.number(), bookingId: z.number() }))
     .mutation(async ({ input }) => {
       const transfer = await BankTransferRepository.getTransferById(input.transferId);
@@ -757,12 +757,12 @@ const transferRouter = router({
         accountNumber: transfer.accountNumber ?? '',
       };
 
-      await applyTransferMatch(input.bookingId, parsed, 100);
-      await BankTransferRepository.updateTransferStatus(input.transferId, 'matched', input.bookingId);
+      // Apply payment + mark transfer matched atomically (see applyTransferMatch).
+      await applyTransferMatch(input.bookingId, parsed, 100, { transferId: input.transferId });
 
       return { success: true };
     }),
-  markIrrelevant: publicProcedure
+  markIrrelevant: adminProcedure
     .input(z.object({ transferId: z.number() }))
     .mutation(async ({ input }) => {
       await BankTransferRepository.updateTransferStatus(input.transferId, 'ignored');
@@ -771,7 +771,7 @@ const transferRouter = router({
 });
 
 const expenseRouter = router({
-  list: publicProcedure
+  list: protectedProcedure
     .input(z.object({ 
       property: z.enum(PROPERTIES).optional(),
       type: z.enum(["utility", "purchase"]).optional(),
@@ -781,7 +781,7 @@ const expenseRouter = router({
       return ExpenseRepository.getExpenses(input ?? {});
     }),
 
-  add: publicProcedure
+  add: protectedProcedure
     .input(z.object({
       property: z.enum(PROPERTIES),
       type: z.enum(["utility", "purchase"]),
@@ -799,7 +799,7 @@ const expenseRouter = router({
       });
     }),
 
-  update: publicProcedure
+  update: protectedProcedure
     .input(z.object({
       id: z.number(),
       property: z.enum(PROPERTIES),
@@ -816,7 +816,7 @@ const expenseRouter = router({
       return ExpenseRepository.updateExpense(id, values);
     }),
 
-  delete: publicProcedure
+  delete: protectedProcedure
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       await ExpenseRepository.deleteExpense(input.id);

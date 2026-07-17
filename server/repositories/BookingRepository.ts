@@ -1,6 +1,6 @@
 import { and, desc, eq, gte, lte, ne, inArray, or, sql, isNull, isNotNull, lt, notInArray } from "drizzle-orm";
 import { format, startOfDay, differenceInCalendarMonths, startOfMonth, addMonths, differenceInCalendarDays, eachWeekendOfInterval, isAfter, startOfYear, endOfYear } from "date-fns";
-import { getDb } from "../db";
+import { getDb, type DbExecutor } from "../db";
 import { bookings, bookingActivities, expenses, monthlyAdjustments } from "../../drizzle/schema";
 import { Logger } from "../_core/logger";
 import { PROPERTIES, type Property, type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
@@ -494,8 +494,8 @@ export class BookingRepository {
     transferTitle?: string;
     transferDate?: Date;
     matchScore?: number;
-  }) {
-    const db = await getDb();
+  }, executor?: DbExecutor) {
+    const db = executor ?? await getDb();
     if (!db) return;
     await db.update(bookings).set(data).where(eq(bookings.id, id));
   }
