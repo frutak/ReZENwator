@@ -34,7 +34,10 @@ import { TrendingUp, Filter, Wallet, BarChart3, PiggyBank, AlertCircle } from "l
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 
-type MetricType = "hostRevenue" | "totalPrice" | "profit" | "summary";
+type MetricType = "hostRevenue" | "totalPrice" | "profit" | "summary" | "cashflow" | "freeCashflow";
+
+/** Metrics driven by transfer dates rather than booking check-in dates. */
+const CASHFLOW_METRICS: MetricType[] = ["cashflow", "freeCashflow"];
 
 export default function Analytics() {
   const { t, language } = useLanguage();
@@ -46,11 +49,23 @@ export default function Analytics() {
 
   const utils = trpc.useUtils();
 
+  const isCashflow = CASHFLOW_METRICS.includes(metric);
+
   const { data, isLoading, error } = trpc.bookings.analytics.useQuery({
     year,
     property: property === "all" ? undefined : property as any,
     channel: channel === "all" ? undefined : channel as any,
   }, {
+    retry: 1,
+    refetchOnWindowFocus: false,
+  });
+
+  const { data: cashflowData, isLoading: cashflowLoading } = trpc.bookings.cashflow.useQuery({
+    year,
+    property: property === "all" ? undefined : property as any,
+    channel: channel === "all" ? undefined : channel as any,
+  }, {
+    enabled: isCashflow,
     retry: 1,
     refetchOnWindowFocus: false,
   });
@@ -129,6 +144,51 @@ export default function Analytics() {
 
     return [...monthlyItems, totalItem];
   }, [monthlyData, year, language, t]);
+
+  /**
+   * Cashflow rows, keyed on the month money arrived.
+   *
+   * Months before the first month with complete transfer data are omitted
+   * entirely rather than drawn as zero — a zero bar would read as "no money
+   * came in", when the truth is "we weren't recording yet".
+   */
+  const cashflowChartData = useMemo(() => {
+    const rows = cashflowData?.monthlyData ?? [];
+    const startMonth = cashflowData?.startMonth ?? "2026-05";
+
+    const months = Array.from({ length: 12 }, (_, i) => `${year}-${String(i + 1).padStart(2, "0")}`)
+      .filter((m) => m >= startMonth);
+
+    const items = months.map((m) => {
+      const found = rows.find((r) => r.month === m);
+      let dateObj = new Date();
+      try {
+        dateObj = parse(m, "yyyy-MM", new Date());
+      } catch (e) {}
+      return {
+        month: m,
+        label: format(dateObj, "MMM", { locale: language === "PL" ? pl : enUS }),
+        cashIn: found ? Math.round(found.total) : 0,
+        transferCount: found ? found.count : 0,
+        utilitiesPaid: found ? Math.round(found.utilitiesPaid) : 0,
+        purchasesPaid: found ? Math.round(found.purchasesPaid) : 0,
+        cleaningPrev: found ? Math.round(found.cleaningPrev) : 0,
+        freeCashflow: found ? Math.round(found.freeCashflow) : 0,
+      };
+    });
+
+    return items;
+  }, [cashflowData, year, language]);
+
+  const cashflowStats = useMemo(() => {
+    const total = cashflowChartData.reduce((s, i) => s + i.cashIn, 0);
+    const count = cashflowChartData.reduce((s, i) => s + i.transferCount, 0);
+    const free = cashflowChartData.reduce((s, i) => s + i.freeCashflow, 0);
+    const cleaning = cashflowChartData.reduce((s, i) => s + i.cleaningPrev, 0);
+    const utilities = cashflowChartData.reduce((s, i) => s + i.utilitiesPaid, 0);
+    const purchases = cashflowChartData.reduce((s, i) => s + i.purchasesPaid, 0);
+    return { total, count, free, cleaning, utilities, purchases, avg: count > 0 ? Math.round(total / count) : 0 };
+  }, [cashflowChartData]);
 
   const stats = useMemo(() => {
     const sum = (key: string) => monthlyData.reduce((acc, d) => {
@@ -223,6 +283,8 @@ export default function Analytics() {
                   <SelectItem value="profit">{t("dashboard.profit")}</SelectItem>
                   <SelectItem value="hostRevenue">{t("dashboard.host_revenue")}</SelectItem>
                   <SelectItem value="totalPrice">{t("dashboard.total_price")}</SelectItem>
+                  <SelectItem value="cashflow">{t("dashboard.cashflow")}</SelectItem>
+                  <SelectItem value="freeCashflow">{t("dashboard.free_cashflow")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -312,13 +374,13 @@ export default function Analytics() {
         {/* Chart Section */}
         <Card className="p-4 overflow-hidden border-none shadow-none bg-transparent">
           <div ref={chartContainerRef} className="h-[450px] w-full bg-white dark:bg-slate-900/50 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm overflow-hidden p-4">
-            {isLoading ? (
+            {(isCashflow ? cashflowLoading : isLoading) ? (
               <div className="flex h-full items-center justify-center"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" /></div>
             ) : (
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart 
+                <BarChart
                   key={`chart-${year}-${metric}-${property}`}
-                  data={metric === 'summary' ? chartData : chartData.filter(d => d.month !== 'total')} 
+                  data={isCashflow ? cashflowChartData : (metric === 'summary' ? chartData : chartData.filter(d => d.month !== 'total'))}
                   margin={{ top: 10, right: 10, left: 10, bottom: 10 }}
                   stackOffset="sign"
                 >
@@ -338,6 +400,12 @@ export default function Analytics() {
                   />
                   <Legend verticalAlign="top" align="center" height={50} iconType="circle" wrapperStyle={{ paddingTop: '0px', paddingBottom: '20px' }} />
                   
+                  {metric === "cashflow" && (
+                    <Bar dataKey="cashIn" fill="#0ea5e9" name={t("dashboard.cash_in")} radius={[6, 6, 0, 0]} />
+                  )}
+                  {metric === "freeCashflow" && (
+                    <Bar dataKey="freeCashflow" fill="#14b8a6" name={t("dashboard.free_cashflow")} radius={[6, 6, 0, 0]} />
+                  )}
                   {metric === "hostRevenue" && (
                     <Bar dataKey="hostRevenue" fill="#3b82f6" name={t("dashboard.host_revenue")} radius={[6, 6, 0, 0]} />
                   )}
@@ -372,9 +440,78 @@ export default function Analytics() {
         <Card className="border-slate-200 dark:border-slate-800 shadow-sm">
           <CardHeader className="border-b bg-slate-50/50 dark:bg-slate-900/50 py-4">
             <CardTitle className="text-lg font-bold">{t("nav.table")}</CardTitle>
+            {isCashflow && (
+              <p className="text-xs text-muted-foreground font-normal">
+                {metric === "freeCashflow" ? t("dashboard.free_cashflow_desc") : t("dashboard.cashflow_desc")}
+              </p>
+            )}
           </CardHeader>
           <CardContent className="p-0">
             <div className="overflow-x-auto">
+              {isCashflow ? (
+                metric === "freeCashflow" ? (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b text-left text-muted-foreground uppercase text-[10px] tracking-wider font-bold bg-slate-50/30">
+                      <th className="px-6 py-4">{t("dashboard.month")}</th>
+                      <th className="px-4 py-4 text-right">{t("dashboard.cash_in")}</th>
+                      <th className="px-4 py-4 text-right">{t("dashboard.cleaning_prev")}</th>
+                      <th className="px-4 py-4 text-right">{t("dashboard.utility_costs")}</th>
+                      <th className="px-4 py-4 text-right">{t("dashboard.purchase_costs")}</th>
+                      <th className="px-4 py-4 text-right text-foreground font-bold">{t("dashboard.free_cashflow")}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {cashflowChartData.map((row) => (
+                      <tr key={row.month} className="hover:bg-slate-50 transition-colors">
+                        <td className="px-6 py-4 font-semibold text-slate-700 dark:text-slate-300">
+                          {format(parse(row.month, "yyyy-MM", new Date()), "MMMM yyyy", { locale: language === "PL" ? pl : enUS })}
+                        </td>
+                        <td className="px-4 py-4 text-right font-mono text-xs text-slate-600">{row.cashIn.toLocaleString()} PLN</td>
+                        <td className="px-4 py-4 text-right font-mono text-xs text-slate-500">-{row.cleaningPrev.toLocaleString()}</td>
+                        <td className="px-4 py-4 text-right font-mono text-xs text-slate-500">-{row.utilitiesPaid.toLocaleString()}</td>
+                        <td className="px-4 py-4 text-right font-mono text-xs text-slate-500">-{row.purchasesPaid.toLocaleString()}</td>
+                        <td className="px-4 py-4 text-right font-bold font-mono text-xs text-primary">{row.freeCashflow.toLocaleString()} PLN</td>
+                      </tr>
+                    ))}
+                    <tr className="bg-slate-50/50 dark:bg-slate-900/50 font-bold border-t-2">
+                      <td className="px-6 py-5">{t("dashboard.total")}</td>
+                      <td className="px-4 py-5 text-right font-mono">{cashflowStats.total.toLocaleString()} PLN</td>
+                      <td className="px-4 py-5 text-right font-mono text-slate-500">-{cashflowStats.cleaning.toLocaleString()}</td>
+                      <td className="px-4 py-5 text-right font-mono text-slate-500">-{cashflowStats.utilities.toLocaleString()}</td>
+                      <td className="px-4 py-5 text-right font-mono text-slate-500">-{cashflowStats.purchases.toLocaleString()}</td>
+                      <td className="px-4 py-5 text-right text-primary font-mono">{cashflowStats.free.toLocaleString()} PLN</td>
+                    </tr>
+                  </tbody>
+                </table>
+                ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b text-left text-muted-foreground uppercase text-[10px] tracking-wider font-bold bg-slate-50/30">
+                      <th className="px-6 py-4">{t("dashboard.month")}</th>
+                      <th className="px-4 py-4 text-right">{t("dashboard.transfers_count")}</th>
+                      <th className="px-4 py-4 text-right text-foreground font-bold">{t("dashboard.cash_in")}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                    {cashflowChartData.map((row) => (
+                      <tr key={row.month} className="hover:bg-slate-50 transition-colors">
+                        <td className="px-6 py-4 font-semibold text-slate-700 dark:text-slate-300">
+                          {format(parse(row.month, "yyyy-MM", new Date()), "MMMM yyyy", { locale: language === "PL" ? pl : enUS })}
+                        </td>
+                        <td className="px-4 py-4 text-right font-mono text-xs text-slate-600">{row.transferCount}</td>
+                        <td className="px-4 py-4 text-right font-bold font-mono text-xs text-primary">{row.cashIn.toLocaleString()} PLN</td>
+                      </tr>
+                    ))}
+                    <tr className="bg-slate-50/50 dark:bg-slate-900/50 font-bold border-t-2">
+                      <td className="px-6 py-5">{t("dashboard.total")}</td>
+                      <td className="px-4 py-5 text-right font-mono">{cashflowStats.count}</td>
+                      <td className="px-4 py-5 text-right text-primary font-mono">{cashflowStats.total.toLocaleString()} PLN</td>
+                    </tr>
+                  </tbody>
+                </table>
+                )
+              ) : (
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b text-left text-muted-foreground uppercase text-[10px] tracking-wider font-bold bg-slate-50/30">
@@ -423,6 +560,7 @@ export default function Analytics() {
                   )}
                 </tbody>
               </table>
+              )}
             </div>
           </CardContent>
         </Card>
