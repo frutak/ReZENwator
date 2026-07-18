@@ -5,6 +5,7 @@ import { bookings, bookingActivities, expenses, monthlyAdjustments } from "../..
 import { Logger } from "../_core/logger";
 import { PROPERTIES, type Property, type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
 import { CleaningService } from "../services/CleaningService";
+import { CASHFLOW_START_MONTH } from "./BankTransferRepository";
 
 export type BookingFilters = {
   property?: Property;
@@ -86,7 +87,21 @@ export class BookingRepository {
   static async updateDepositStatus(id: number, depositStatus: DepositStatus) {
     const db = await getDb();
     if (!db) return;
-    await db.update(bookings).set({ depositStatus }).where(eq(bookings.id, id));
+    const updates: { depositStatus: DepositStatus; depositReturnedAt?: Date | null } = { depositStatus };
+    if (depositStatus === "returned") {
+      // Stamp the cash-out date the first time it becomes returned; don't move
+      // it if it's already returned and merely re-saved.
+      const [current] = await db
+        .select({ at: bookings.depositReturnedAt })
+        .from(bookings)
+        .where(eq(bookings.id, id))
+        .limit(1);
+      if (!current?.at) updates.depositReturnedAt = new Date();
+    } else {
+      // Leaving the returned state clears the cash-out date.
+      updates.depositReturnedAt = null;
+    }
+    await db.update(bookings).set(updates).where(eq(bookings.id, id));
     await Logger.bookingAction(id, "status_change", `Deposit status updated to ${depositStatus}`);
   }
 
@@ -272,6 +287,50 @@ export class BookingRepository {
           gte(bookings.checkOut, now)
         )
       );
+  }
+
+  /**
+   * Returned security deposits grouped by the month they were returned — a cash
+   * outflow for the free-cashflow view. Deposits aren't stored as transactions;
+   * marking a booking's deposit "returned" is the event, dated by
+   * depositReturnedAt. Only months from CASHFLOW_START_MONTH onward are reported.
+   */
+  static async getMonthlyReturnedDeposits(filters: {
+    property?: Property;
+    channel?: Channel;
+    year?: number;
+  } = {}): Promise<Array<{ month: string; total: number; count: number }>> {
+    const db = await getDb();
+    if (!db) return [];
+
+    const conditions = [
+      eq(bookings.depositStatus, "returned"),
+      isNotNull(bookings.depositReturnedAt),
+      gte(bookings.depositReturnedAt, new Date(`${CASHFLOW_START_MONTH}-01T00:00:00Z`)),
+    ];
+    if (filters.year) {
+      conditions.push(gte(bookings.depositReturnedAt, new Date(filters.year, 0, 1)));
+      conditions.push(lte(bookings.depositReturnedAt, new Date(filters.year, 11, 31, 23, 59, 59)));
+    }
+    if (filters.property) conditions.push(eq(bookings.property, filters.property));
+    if (filters.channel) conditions.push(eq(bookings.channel, filters.channel));
+
+    const rows = await db
+      .select({
+        month: sql<string>`DATE_FORMAT(${bookings.depositReturnedAt}, '%Y-%m')`,
+        total: sql<string>`SUM(${bookings.depositAmount})`,
+        count: sql<number>`COUNT(*)`,
+      })
+      .from(bookings)
+      .where(and(...conditions))
+      .groupBy(sql`DATE_FORMAT(${bookings.depositReturnedAt}, '%Y-%m')`)
+      .orderBy(sql`DATE_FORMAT(${bookings.depositReturnedAt}, '%Y-%m')`);
+
+    return rows.map((r) => ({
+      month: r.month,
+      total: parseFloat(String(r.total ?? "0")) || 0,
+      count: Number(r.count ?? 0),
+    }));
   }
 
   static async findPortalBookingsForTransition(horizon: Date) {

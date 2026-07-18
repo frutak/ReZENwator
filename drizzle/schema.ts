@@ -88,6 +88,14 @@ export const bookings = mysqlTable(
       .default("pending")
       .notNull(),
 
+    /**
+     * When the deposit was marked "returned". This is the cash-out date used by
+     * the free-cashflow view: a returned deposit is money leaving the account,
+     * attributed to the month the status was flipped (not the checkout month).
+     * Null unless the deposit is currently returned.
+     */
+    depositReturnedAt: timestamp("depositReturnedAt"),
+
     // Guest details (populated from email parsing)
     guestName: varchar("guestName", { length: 256 }),
     guestCountry: varchar("guestCountry", { length: 128 }),

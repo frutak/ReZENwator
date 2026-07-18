@@ -181,10 +181,11 @@ const bookingRouter = router({
       const filters = input ?? {};
       const year = filters.year ?? new Date().getFullYear();
 
-      const [inflow, expensesPaid, analytics] = await Promise.all([
+      const [inflow, expensesPaid, analytics, depositsReturned] = await Promise.all([
         BankTransferRepository.getMonthlyCashflow(filters),
         ExpenseRepository.getMonthlyPaidByType({ property: filters.property, year }),
         BookingRepository.getAnalytics(filters),
+        BookingRepository.getMonthlyReturnedDeposits(filters),
       ]);
 
       // Cleaning by check-in month (from existing analytics logic).
@@ -200,6 +201,7 @@ const bookingRouter = router({
       }
 
       const expenseByMonth = new Map(expensesPaid.map((e) => [e.month, e]));
+      const depositsReturnedByMonth = new Map(depositsReturned.map((d) => [d.month, d.total]));
       const prevMonthKey = (month: string) => {
         const [y, m] = month.split("-").map(Number);
         const d = new Date(y, m - 2, 1); // m is 1-based; m-2 => previous month
@@ -211,7 +213,8 @@ const bookingRouter = router({
         const utilitiesPaid = exp?.utilities ?? 0;
         const purchasesPaid = exp?.purchases ?? 0;
         const cleaningPrev = cleaningByMonth.get(prevMonthKey(row.month)) ?? 0;
-        const freeCashflow = row.total - utilitiesPaid - purchasesPaid - cleaningPrev;
+        const depositsReturnedPaid = depositsReturnedByMonth.get(row.month) ?? 0;
+        const freeCashflow = row.total - utilitiesPaid - purchasesPaid - cleaningPrev - depositsReturnedPaid;
         return {
           month: row.month,
           total: row.total,
@@ -219,6 +222,7 @@ const bookingRouter = router({
           utilitiesPaid,
           purchasesPaid,
           cleaningPrev,
+          depositsReturned: depositsReturnedPaid,
           freeCashflow,
         };
       });
