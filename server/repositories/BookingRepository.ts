@@ -246,7 +246,9 @@ export class BookingRepository {
       .from(bookings)
       .where(
         and(
-          ne(bookings.type, "internal"),
+          // Exclude internal bookings and calendar blocks — neither has a guest,
+          // so "missing data" (name/email/country/price) is expected, not actionable.
+          notInArray(bookings.type, ["internal", "block"]),
           or(
             // Leisure: must have guestName
             and(

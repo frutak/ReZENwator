@@ -24,9 +24,11 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
 
   for (const booking of activeBookings) {
     try {
-      // Skip internal bookings - communication is handled manually
-      if (booking.type === "internal") {
-        console.log(`[GuestEmailWorker] Skipping booking #${booking.id} because it is an internal booking.`);
+      // Skip internal bookings and calendar blocks - these are not real guests.
+      // Blocks are availability placeholders (no guest, total price 0/null), so no
+      // guest email — confirmation, reminder, or missing-data alert — should ever fire.
+      if (booking.type === "internal" || booking.type === "block") {
+        console.log(`[GuestEmailWorker] Skipping booking #${booking.id} because it is an ${booking.type} booking.`);
         continue;
       }
 
