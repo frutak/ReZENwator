@@ -173,6 +173,7 @@ export default function Analytics() {
         utilitiesPaid: found ? Math.round(found.utilitiesPaid) : 0,
         purchasesPaid: found ? Math.round(found.purchasesPaid) : 0,
         cleaningPrev: found ? Math.round(found.cleaningPrev) : 0,
+        depositsReturned: found ? Math.round(found.depositsReturned) : 0,
         freeCashflow: found ? Math.round(found.freeCashflow) : 0,
       };
     });
@@ -187,7 +188,8 @@ export default function Analytics() {
     const cleaning = cashflowChartData.reduce((s, i) => s + i.cleaningPrev, 0);
     const utilities = cashflowChartData.reduce((s, i) => s + i.utilitiesPaid, 0);
     const purchases = cashflowChartData.reduce((s, i) => s + i.purchasesPaid, 0);
-    return { total, count, free, cleaning, utilities, purchases, avg: count > 0 ? Math.round(total / count) : 0 };
+    const depositsReturned = cashflowChartData.reduce((s, i) => s + i.depositsReturned, 0);
+    return { total, count, free, cleaning, utilities, purchases, depositsReturned, avg: count > 0 ? Math.round(total / count) : 0 };
   }, [cashflowChartData]);
 
   const stats = useMemo(() => {
@@ -458,6 +460,7 @@ export default function Analytics() {
                       <th className="px-4 py-4 text-right">{t("dashboard.cleaning_prev")}</th>
                       <th className="px-4 py-4 text-right">{t("dashboard.utility_costs")}</th>
                       <th className="px-4 py-4 text-right">{t("dashboard.purchase_costs")}</th>
+                      <th className="px-4 py-4 text-right">{t("dashboard.deposits_returned")}</th>
                       <th className="px-4 py-4 text-right text-foreground font-bold">{t("dashboard.free_cashflow")}</th>
                     </tr>
                   </thead>
@@ -471,6 +474,7 @@ export default function Analytics() {
                         <td className="px-4 py-4 text-right font-mono text-xs text-slate-500">-{row.cleaningPrev.toLocaleString()}</td>
                         <td className="px-4 py-4 text-right font-mono text-xs text-slate-500">-{row.utilitiesPaid.toLocaleString()}</td>
                         <td className="px-4 py-4 text-right font-mono text-xs text-slate-500">-{row.purchasesPaid.toLocaleString()}</td>
+                        <td className="px-4 py-4 text-right font-mono text-xs text-slate-500">-{row.depositsReturned.toLocaleString()}</td>
                         <td className="px-4 py-4 text-right font-bold font-mono text-xs text-primary">{row.freeCashflow.toLocaleString()} PLN</td>
                       </tr>
                     ))}
@@ -480,6 +484,7 @@ export default function Analytics() {
                       <td className="px-4 py-5 text-right font-mono text-slate-500">-{cashflowStats.cleaning.toLocaleString()}</td>
                       <td className="px-4 py-5 text-right font-mono text-slate-500">-{cashflowStats.utilities.toLocaleString()}</td>
                       <td className="px-4 py-5 text-right font-mono text-slate-500">-{cashflowStats.purchases.toLocaleString()}</td>
+                      <td className="px-4 py-5 text-right font-mono text-slate-500">-{cashflowStats.depositsReturned.toLocaleString()}</td>
                       <td className="px-4 py-5 text-right text-primary font-mono">{cashflowStats.free.toLocaleString()} PLN</td>
                     </tr>
                   </tbody>
