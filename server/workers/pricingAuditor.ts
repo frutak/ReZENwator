@@ -275,7 +275,28 @@ export class PricingAuditor {
       }
     }
 
+    // A single channel reporting SOLD_OUT while others sell for the same dates means the
+    // scraper broke for that channel (a genuinely booked property is sold out everywhere).
+    // Treat it as red so the auditor keeps re-probing instead of silently ignoring it.
+    if (anyOk && this.hasSoldOutAnomaly(audit)) return false;
+
     return anyOk; // Only skip if we have at least one valid probe AND all were within 15%
+  }
+
+  /**
+   * True when at least one channel reports SOLD_OUT while at least one other channel
+   * reports OK for the same dates — a mismatch that indicates a scraper failure rather
+   * than genuine unavailability. Null statuses (channel not tracked for the property,
+   * e.g. AlohaCamp on Hacjenda) are ignored.
+   */
+  private static hasSoldOutAnomaly(audit: any): boolean {
+    const channels = ["booking", "airbnb", "slowhop", "alohacamp"];
+    const statuses = channels
+      .map(chan => audit[`${chan}Status` as keyof typeof audit] as string | null)
+      .filter((s): s is string => !!s);
+    const anyOk = statuses.some(s => s === "OK");
+    const anySoldOut = statuses.some(s => s === "SOLD_OUT");
+    return anyOk && anySoldOut;
   }
 
   private static async scrapeWithPlaywright(property: string, channel: string, url: string, nights: number, benchmark?: number): Promise<ScrapeResult> {

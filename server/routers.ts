@@ -624,9 +624,18 @@ const pricingAuditRouter = router({
             }
           }
 
-          const maxDeviation = triggers.length > 0 
-            ? Math.max(...triggers) 
+          const maxDeviation = triggers.length > 0
+            ? Math.max(...triggers)
             : 0;
+
+          // Detect scraper breakage: a channel reporting SOLD_OUT while another channel
+          // sells the same dates means the scrape failed, not that the property is booked.
+          const statuses = channels.map(c => audit[`${c}Status` as keyof typeof audit] as string | null);
+          const anyOk = statuses.some(s => s === "OK");
+          const suspiciousChannels = anyOk
+            ? channels.filter(c => (audit[`${c}Status` as keyof typeof audit] as string | null) === "SOLD_OUT")
+            : [];
+          const hasChannelAnomaly = suspiciousChannels.length > 0;
 
           return {
             ...audit,
@@ -636,9 +645,11 @@ const pricingAuditRouter = router({
             internalValid: true,
             deviations,
             maxDeviation,
+            suspiciousChannels,
+            hasChannelAnomaly,
           };
         } catch (e) {
-          return { ...audit, internalValid: false, internalError: (e as Error).message, deviations: {}, maxDeviation: 0 };
+          return { ...audit, internalValid: false, internalError: (e as Error).message, deviations: {}, maxDeviation: 0, suspiciousChannels: [], hasChannelAnomaly: false };
         }
       }));
 

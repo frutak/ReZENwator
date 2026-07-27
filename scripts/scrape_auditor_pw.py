@@ -9,8 +9,14 @@ from playwright_stealth import Stealth
 # Refined helper to extract all valid prices from text and return the largest one
 def extract_best_price(text, min_p):
     if not text: return None
-    # Allow commas and dots in the price part, and optionally allow text after currency
-    matches = re.findall(r'(\d[\d\s\xa0,.]+?)(?:\s?zł|PLN)', text, re.IGNORECASE)
+    # Match the amount whether the currency is a suffix ("3 132 zł" — Polish locale)
+    # or a prefix ("zł 3,132" — English/US locale, which Airbnb now serves to some
+    # user-agents). Capturing both directions in a single pass preserves the original
+    # left-to-right order so "last valid value" semantics still hold.
+    num = r'\d[\d\s\xa0.,]*\d|\d'
+    matches = []
+    for mm in re.finditer(rf'(?:zł|PLN)\s?({num})|({num})\s?(?:zł|PLN)', text, re.IGNORECASE):
+        matches.append(mm.group(1) or mm.group(2))
     valid_values = []
     for m in matches:
         try:

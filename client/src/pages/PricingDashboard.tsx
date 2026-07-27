@@ -537,7 +537,7 @@ function AuditorCalendar({
                   <>
                     {[...ongoingAudits, ...endingAudits].map((audit, idx) => {
                       const isEnding = isSameDay(new Date(audit.checkOut), day);
-                      const isRed = audit.maxDeviation > 0.15;
+                      const isRed = audit.maxDeviation > 0.15 || audit.hasChannelAnomaly;
                       return (
                         <div 
                           key={`ongoing-${audit.id}-${idx}`}
@@ -557,7 +557,7 @@ function AuditorCalendar({
                             <div 
                               className={cn(
                                 "text-[9px] font-bold px-1.5 py-1 rounded-l-md shadow-sm cursor-help flex items-center justify-between transition-transform hover:scale-[1.02] z-10",
-                                audit.maxDeviation > 0.15 ? "bg-red-500 text-white" : "bg-green-600 text-white"
+                                (audit.maxDeviation > 0.15 || audit.hasChannelAnomaly) ? "bg-red-500 text-white" : "bg-green-600 text-white"
                               )}
                               onClick={(e) => e.stopPropagation()}
                             >
@@ -593,10 +593,10 @@ function AuditorCalendar({
                                 </div>
                               ))}
                               <div className="text-[10px] italic text-muted-foreground pt-1 border-t mt-1">
-                                {audit.bookingStatus !== "OK" && <div>Booking: {audit.bookingStatus}</div>}
-                                {audit.airbnbStatus !== "OK" && <div>Airbnb: {audit.airbnbStatus}</div>}
-                                {audit.slowhopStatus !== "OK" && <div>Slowhop: {audit.slowhopStatus}</div>}
-                                {audit.alohacampStatus !== "OK" && audit.alohacampStatus && <div>Alohacamp: {audit.alohacampStatus}</div>}
+                                {audit.bookingStatus !== "OK" && <div className={cn((audit.suspiciousChannels || []).includes("booking") && "text-red-500 font-semibold not-italic")}>Booking: {audit.bookingStatus}{(audit.suspiciousChannels || []).includes("booking") && " ⚠ scrape suspect"}</div>}
+                                {audit.airbnbStatus !== "OK" && <div className={cn((audit.suspiciousChannels || []).includes("airbnb") && "text-red-500 font-semibold not-italic")}>Airbnb: {audit.airbnbStatus}{(audit.suspiciousChannels || []).includes("airbnb") && " ⚠ scrape suspect"}</div>}
+                                {audit.slowhopStatus !== "OK" && <div className={cn((audit.suspiciousChannels || []).includes("slowhop") && "text-red-500 font-semibold not-italic")}>Slowhop: {audit.slowhopStatus}{(audit.suspiciousChannels || []).includes("slowhop") && " ⚠ scrape suspect"}</div>}
+                                {audit.alohacampStatus !== "OK" && audit.alohacampStatus && <div className={cn((audit.suspiciousChannels || []).includes("alohacamp") && "text-red-500 font-semibold not-italic")}>Alohacamp: {audit.alohacampStatus}{(audit.suspiciousChannels || []).includes("alohacamp") && " ⚠ scrape suspect"}</div>}
                               </div>
                             </div>
                           </TooltipContent>
