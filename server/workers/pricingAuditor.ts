@@ -9,6 +9,8 @@ import { addDays, format, isAfter, isBefore, startOfDay } from "date-fns";
 const execAsync = promisify(exec);
 
 const MAX_PROBES_PER_DAY = 10;
+const SCRAPE_ATTEMPTS = 3;
+const SCRAPE_RETRY_DELAY_MS = 5000;
 const PYTHON_VENV_PATH = "/home/frutak/price-checker/venv/bin/python3";
 const HELPER_SCRIPT_PATH = "scripts/scrape_auditor_pw.py";
 
@@ -130,7 +132,8 @@ export class PricingAuditor {
     try {
       const properties: ("Sadoles" | "Hacjenda")[] = ["Sadoles", "Hacjenda"];
       const MAX_PROBES = 10;
-      
+      const today = startOfDay(new Date());
+
       // Get all recent audits to find "red" ones to re-probe
       const recentAuditEntries = await PricingAuditRepository.getRecentAuditEntries(14);
       
@@ -166,6 +169,11 @@ export class PricingAuditor {
 
           // SKIP if now booked
           if (!isAvailable(audit.checkIn, audit.checkOut)) continue;
+
+          // SKIP dates that have passed. Entries are selected by dateScraped, not checkIn, so
+          // a stale red audit stays in this pool as its dates slip into the past — where every
+          // channel reports SOLD_OUT forever and the probe can never go green.
+          if (!isAfter(startOfDay(new Date(audit.checkIn)), today)) continue;
 
           try {
             const benchmark = await PricingService.getBenchmarkPrice(property, audit.checkIn, audit.checkOut);
@@ -278,9 +286,26 @@ export class PricingAuditor {
     // A single channel reporting SOLD_OUT while others sell for the same dates means the
     // scraper broke for that channel (a genuinely booked property is sold out everywhere).
     // Treat it as red so the auditor keeps re-probing instead of silently ignoring it.
+    // This still applies to min-stay tests: a channel selling a 1-night stay while the others
+    // refuse it means that channel is not enforcing the minimum, which is worth surfacing.
     if (anyOk && this.hasSoldOutAnomaly(audit)) return false;
 
+    // A min-stay test probes a 1-night stay expecting to be refused. Every channel reporting
+    // SOLD_OUT is the test PASSING — the minimum is enforced — not a scraper failure. Without
+    // this it can never go green, so it stays in the re-probe queue and burns the daily probe
+    // budget forever. ERROR statuses do not count: those are failures, not a passing test.
+    if (!anyOk && audit.isMinStayTest && this.allChannelsSoldOut(audit)) return true;
+
     return anyOk; // Only skip if we have at least one valid probe AND all were within 15%
+  }
+
+  /** True when every tracked channel reported SOLD_OUT (and at least one reported it). */
+  private static allChannelsSoldOut(audit: any): boolean {
+    const channels = ["booking", "airbnb", "slowhop", "alohacamp"];
+    const statuses = channels
+      .map(chan => audit[`${chan}Status` as keyof typeof audit] as string | null)
+      .filter((s): s is string => !!s);
+    return statuses.length > 0 && statuses.every(s => s === "SOLD_OUT");
   }
 
   /**
@@ -299,7 +324,46 @@ export class PricingAuditor {
     return anyOk && anySoldOut;
   }
 
+  /**
+   * Scrape a channel, retrying when the probe comes back SOLD_OUT or ERROR.
+   *
+   * A single Playwright probe is unreliable — roughly half of Airbnb probes fail to render
+   * the booking panel in time (bot detection / slow load) and fall through to SOLD_OUT, which
+   * is indistinguishable from genuine unavailability once written to the DB. Retrying and
+   * only accepting SOLD_OUT when it is consistent across every attempt removes that noise.
+   *
+   * The first OK wins immediately, so the extra cost is paid only by dates that really are
+   * unavailable (notably min-stay tests, which are sold out on every channel by design).
+   */
   private static async scrapeWithPlaywright(property: string, channel: string, url: string, nights: number, benchmark?: number): Promise<ScrapeResult> {
+    let lastResult: ScrapeResult = { price: null, status: "ERROR", error: "No attempt made" };
+    let sawError = false;
+
+    for (let attempt = 1; attempt <= SCRAPE_ATTEMPTS; attempt++) {
+      const result = await this.scrapeOnce(property, channel, url, nights, benchmark);
+
+      // A price is definitive — no reason to probe again.
+      if (result.status === "OK" && result.price) return result;
+
+      if (result.status !== "SOLD_OUT") sawError = true;
+      lastResult = result;
+
+      if (attempt < SCRAPE_ATTEMPTS) {
+        console.warn(`[PricingAuditor] ${channel} returned ${result.status} (attempt ${attempt}/${SCRAPE_ATTEMPTS}), retrying...`);
+        await new Promise(resolve => setTimeout(resolve, SCRAPE_RETRY_DELAY_MS));
+      }
+    }
+
+    // Only report SOLD_OUT when every attempt agreed. A mix of SOLD_OUT and ERROR means the
+    // scraper was unhealthy, so surface that instead of asserting the dates are unavailable.
+    if (sawError && lastResult.status === "SOLD_OUT") {
+      return { price: null, status: "ERROR", error: "Inconsistent probes (SOLD_OUT/ERROR)" };
+    }
+
+    return lastResult;
+  }
+
+  private static async scrapeOnce(property: string, channel: string, url: string, nights: number, benchmark?: number): Promise<ScrapeResult> {
     try {
       // Heuristic: Min price for a house must be at least the cleaning fee + some nightly rate.
       // Sadoles cleaning: 900, Hacjenda: 700.
