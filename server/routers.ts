@@ -5,6 +5,7 @@ import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, adminProcedure, router } from "./_core/trpc";
 import { BookingRepository } from "./repositories/BookingRepository";
+import { GuestReplyRepository } from "./repositories/GuestReplyRepository";
 import { UserRepository } from "./repositories/UserRepository";
 import { PropertyRepository } from "./repositories/PropertyRepository";
 import { SyncRepository } from "./repositories/SyncRepository";
@@ -18,7 +19,7 @@ import { findMatchingBookings, applyTransferMatch, revertTransferMatch } from ".
 import { updateAllPropertyRatings } from "./workers/ratingScraper";
 import { PricingAuditor } from "./workers/pricingAuditor";
 import { PricingAuditRepository } from "./repositories/PricingAuditRepository";
-import { sendGuestEmail, sendAlertEmail } from "./_core/email";
+import { sendGuestEmail, sendAlertEmail, sendApprovedReply } from "./_core/email";
 import { detectDoubleBookings } from "./workers/doubleBookingDetector";
 import { getICalFeeds } from "./workers/icalConfig";
 import { Logger } from "./_core/logger";
@@ -52,6 +53,110 @@ function verifyPassword(password: string, storedHash: string): boolean {
     return false;
   }
 }
+
+// ─── Guest reply router ───────────────────────────────────────────────────────
+
+const guestReplyRouter = router({
+  /** Drafts awaiting the owner, plus recently handled ones for context. */
+  list: protectedProcedure.query(async () => {
+    return GuestReplyRepository.listForReview(["pending", "sent", "rejected", "failed"]);
+  }),
+
+  /** Saves an edit without sending, so a draft can be fixed and left to sit. */
+  saveEdit: protectedProcedure
+    .input(z.object({ id: z.number(), body: z.string().max(8000) }))
+    .mutation(async ({ input }) => {
+      await GuestReplyRepository.update(input.id, { editedBody: input.body });
+      return { success: true };
+    }),
+
+  reject: protectedProcedure
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      await GuestReplyRepository.update(input.id, { status: "rejected", cancelledBy: "user" });
+      return { success: true };
+    }),
+
+  /**
+   * Sends the draft to the guest.
+   *
+   * The row is claimed before anything leaves, so a double click cannot deliver
+   * twice. A send that fails returns the draft to `pending` with the reason
+   * rather than burning it — the owner can fix and retry.
+   */
+  approve: protectedProcedure
+    .input(z.object({ id: z.number(), body: z.string().max(8000).optional() }))
+    .mutation(async ({ input }) => {
+      const draft = await GuestReplyRepository.getById(input.id);
+      if (!draft) throw new TRPCError({ code: "NOT_FOUND", message: "Draft nie istnieje." });
+      if (!draft.bookingId) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Draft nie ma przypisanej rezerwacji." });
+      }
+
+      const booking = await BookingRepository.getBookingById(draft.bookingId);
+      if (!booking?.guestEmail) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Rezerwacja nie ma adresu e-mail gościa." });
+      }
+
+      // Last edit wins: what the owner has on screen, then anything saved
+      // earlier, then the model's original.
+      const body = input.body ?? draft.editedBody ?? draft.draftBody;
+      if (!body) throw new TRPCError({ code: "BAD_REQUEST", message: "Draft nie ma treści." });
+
+      if (!(await GuestReplyRepository.claimForSending(input.id))) {
+        throw new TRPCError({ code: "CONFLICT", message: "Draft został już wysłany albo jest w trakcie wysyłki." });
+      }
+
+      const sent = await sendApprovedReply({
+        to: booking.guestEmail,
+        property: booking.property,
+        subject: draft.draftSubject ?? `Re: ${draft.inboundSubject ?? ""}`,
+        body,
+        inReplyTo: draft.inboundMessageId,
+      });
+
+      if (!sent) {
+        await GuestReplyRepository.update(input.id, {
+          status: "pending",
+          errorMessage: "Wysyłka nie powiodła się — spróbuj ponownie.",
+        });
+        throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Nie udało się wysłać wiadomości." });
+      }
+
+      await GuestReplyRepository.update(input.id, {
+        status: "sent",
+        sentAt: new Date(),
+        sentMessageId: sent.messageId,
+        editedBody: input.body ?? draft.editedBody,
+        errorMessage: null,
+      });
+
+      // The model's proposal is applied only now, on the owner's action, and is
+      // logged like any other booking change.
+      let animalsApplied = false;
+      if (draft.proposedAnimalsCount !== null && draft.proposedAnimalsCount !== booking.animalsCount) {
+        await BookingRepository.updateBookingDetails(booking.id, {
+          animalsCount: draft.proposedAnimalsCount,
+        });
+        await Logger.bookingAction(
+          booking.id,
+          "enrichment",
+          "Updated animal count from guest email",
+          `${booking.animalsCount ?? 0} -> ${draft.proposedAnimalsCount} (draft #${draft.id}, approved by owner)`
+        );
+        animalsApplied = true;
+      }
+
+      await Logger.bookingAction(
+        booking.id,
+        "email",
+        "Sent approved reply to guest",
+        `Draft #${draft.id}, edited: ${Boolean(input.body ?? draft.editedBody)}`
+      );
+
+      return { success: true, animalsApplied };
+    }),
+});
 
 // ─── Booking router ───────────────────────────────────────────────────────────
 
@@ -896,6 +1001,7 @@ export const appRouter = router({
   booking: bookingRouter, // Alias for singular compatibility
   portal: publicPortalRouter,
   sync: syncRouter,
+  guestReplies: guestReplyRouter,
   pricing: pricingRouter,
   pricingAudit: pricingAuditRouter,
 });

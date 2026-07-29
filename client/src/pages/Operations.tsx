@@ -12,10 +12,11 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { RefreshCw, Mail, CheckCircle2, XCircle, FileText, Download, Star, Receipt } from "lucide-react";
+import { RefreshCw, Mail, CheckCircle2, XCircle, FileText, Download, Star, Receipt, MessageSquare } from "lucide-react";
 import { format, formatDistanceToNow } from "date-fns";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { ExpensesManager } from "@/components/ExpensesManager";
+import { GuestReplyPanel } from "@/components/GuestReplyPanel";
 
 export default function Operations() {
   const { t } = useLanguage();
@@ -170,7 +171,7 @@ export default function Operations() {
         </div>
 
         <Tabs defaultValue="sync" className="space-y-6">
-          <TabsList className="grid w-full grid-cols-2 lg:w-[400px]">
+          <TabsList className="grid w-full grid-cols-3 lg:w-[560px]">
             <TabsTrigger value="sync" className="flex items-center gap-2">
               <RefreshCw className="h-4 w-4" />
               Sync & Reports
@@ -178,6 +179,10 @@ export default function Operations() {
             <TabsTrigger value="expenses" className="flex items-center gap-2">
               <Receipt className="h-4 w-4" />
               {t("operations.expenses")}
+            </TabsTrigger>
+            <TabsTrigger value="replies" className="flex items-center gap-2">
+              <MessageSquare className="h-4 w-4" />
+              Odpowiedzi
             </TabsTrigger>
           </TabsList>
 
@@ -467,6 +472,10 @@ export default function Operations() {
 
           <TabsContent value="expenses">
             <ExpensesManager />
+          </TabsContent>
+
+          <TabsContent value="replies">
+            <GuestReplyPanel />
           </TabsContent>
         </Tabs>
       </div>

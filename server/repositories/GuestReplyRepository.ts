@@ -56,6 +56,41 @@ export class GuestReplyRepository {
   }
 
   /**
+   * Drafts for the review panel, each with the booking it was grounded in.
+   *
+   * Left join, not inner: a draft with no booking is exactly the case that
+   * needs a human, so dropping those rows would hide the ones that matter most.
+   */
+  static async listForReview(statuses: Array<(typeof guestReplyDrafts.$inferSelect)["status"]>, limit = 50) {
+    const db = await getDb();
+    if (!db) return [];
+    return db
+      .select({ draft: guestReplyDrafts, booking: bookings })
+      .from(guestReplyDrafts)
+      .leftJoin(bookings, eq(guestReplyDrafts.bookingId, bookings.id))
+      .where(inArray(guestReplyDrafts.status, statuses))
+      .orderBy(desc(guestReplyDrafts.receivedAt))
+      .limit(limit);
+  }
+
+  /**
+   * Claims a draft for sending.
+   *
+   * The conditional update is the guard against double delivery: two clicks, or
+   * a click racing a retry, both call this and only the one that flips the row
+   * out of `pending` gets to send. Returns false when someone else got there.
+   */
+  static async claimForSending(id: number): Promise<boolean> {
+    const db = await getDb();
+    if (!db) throw new Error("Database not initialized");
+    const [result]: any = await db
+      .update(guestReplyDrafts)
+      .set({ status: "sending" })
+      .where(and(eq(guestReplyDrafts.id, id), eq(guestReplyDrafts.status, "pending")));
+    return (result?.affectedRows ?? 0) > 0;
+  }
+
+  /**
    * Inbound emails waiting to be drafted, oldest first.
    *
    * Oldest first on purpose: if several arrive at once, the guest who wrote

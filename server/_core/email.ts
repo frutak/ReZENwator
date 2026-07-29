@@ -181,6 +181,64 @@ export async function sendAlertEmail(subject: string, text: string): Promise<boo
 }
 
 /**
+ * Sends an approved reply to the guest, threaded onto their own message.
+ *
+ * The `In-Reply-To` / `References` headers are what make this land inside the
+ * conversation the guest started rather than as a stray new mail — without them
+ * the reply reads as machine-generated at a glance.
+ *
+ * Returns the sent Message-ID so the draft row can record what actually went
+ * out, or null when nothing was sent.
+ */
+export async function sendApprovedReply(input: {
+  to: string;
+  property: string;
+  subject: string;
+  body: string;
+  /** Message-ID of the guest's email; omitted when we never had a real one. */
+  inReplyTo?: string | null;
+}): Promise<{ messageId: string } | null> {
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.warn("[Email] No transporter available, cannot send approved reply.");
+    return null;
+  }
+
+  // TEST_MODE redirects guest mail to the admin everywhere else in this file;
+  // an approved reply must honour it too, or enabling test mode would still let
+  // real guests receive drafts.
+  const recipient = process.env.TEST_MODE === "true" ? await getRecipientForEmail("alert") : input.to;
+
+  const fromName =
+    input.property === "Sadoles"
+      ? (process.env.SADOLES_NAME ?? "Sadoles")
+      : (process.env.HACJENDA_NAME ?? "Hacjenda");
+
+  // Our own fallback ids (`sha256-…`, minted when a sender omits Message-ID)
+  // are not routable references. Threading on one would produce a header no
+  // client can resolve, so send it unthreaded instead.
+  const threadId = input.inReplyTo && input.inReplyTo.includes("@") && !input.inReplyTo.startsWith("sha256-")
+    ? input.inReplyTo
+    : undefined;
+
+  try {
+    const info = await transporter.sendMail({
+      from: `"${fromName}" <${GMAIL_USER}>`,
+      to: recipient,
+      subject: input.subject,
+      text: input.body,
+      inReplyTo: threadId,
+      references: threadId ? [threadId] : undefined,
+    });
+    console.log(`[Email] Sent approved reply to ${recipient} (threaded: ${Boolean(threadId)})`);
+    return { messageId: info.messageId };
+  } catch (err) {
+    console.error("[Email] Failed to send approved reply:", err);
+    return null;
+  }
+}
+
+/**
  * Sends a drafted reply to the admin for approval.
  *
  * The draft is not sent to the guest and this mail is not a reply to them — it
