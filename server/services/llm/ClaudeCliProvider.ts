@@ -1,9 +1,45 @@
 import { execFile } from "child_process";
 import { promisify } from "util";
+import fs from "fs";
 import os from "os";
+import path from "path";
 import type { LlmGenerationRequest, LlmGenerationResult, LlmProvider } from "./types";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Finds the `claude` binary without relying on the caller's PATH.
+ *
+ * Under systemd the service inherits a minimal PATH that does not include
+ * `~/.local/bin`, which is where the CLI installs itself — so a bare "claude"
+ * resolves in an interactive shell and fails in production, with nothing to
+ * distinguish that from an expired login. Look in the usual install locations
+ * directly, and let `CLAUDE_CLI_PATH` override when it lives somewhere else.
+ */
+function resolveClaudeBinary(): string {
+  const configured = process.env.CLAUDE_CLI_PATH;
+  if (configured) return configured;
+
+  const home = process.env.HOME ?? os.homedir();
+  const candidates = [
+    path.join(home, ".local/bin/claude"),
+    "/usr/local/bin/claude",
+    "/usr/bin/claude",
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here; try the next one.
+    }
+  }
+
+  // Fall back to PATH resolution — correct when running from a shell, and the
+  // clearest failure mode when the binary genuinely is not installed.
+  return "claude";
+}
 
 /**
  * Shape of the `--output-format json` envelope. Only the fields we rely on;
@@ -39,19 +75,24 @@ export class ClaudeCliProvider implements LlmProvider {
 
   private readonly model: string;
   private readonly timeoutMs: number;
+  private readonly binary: string;
   /** Tail of the in-flight chain; every call awaits its predecessor. */
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(options: { model?: string; timeoutMs?: number } = {}) {
     this.model = options.model ?? process.env.GUEST_REPLY_LLM_MODEL ?? "claude-opus-5";
     this.timeoutMs = options.timeoutMs ?? Number(process.env.GUEST_REPLY_LLM_TIMEOUT_MS ?? 120_000);
+    this.binary = resolveClaudeBinary();
   }
 
   async isAvailable(): Promise<boolean> {
     try {
-      await execFileAsync("claude", ["--version"], { timeout: 15_000 });
+      await execFileAsync(this.binary, ["--version"], { timeout: 15_000 });
       return true;
-    } catch {
+    } catch (err) {
+      // Name the path we tried: "unavailable" otherwise reads as an expired
+      // login when it is usually a binary the service cannot see.
+      console.error(`[ClaudeCliProvider] Binary not usable at "${this.binary}":`, err);
       return false;
     }
   }
@@ -81,7 +122,7 @@ export class ClaudeCliProvider implements LlmProvider {
 
     let stdout: string;
     try {
-      ({ stdout } = await execFileAsync("claude", args, {
+      ({ stdout } = await execFileAsync(this.binary, args, {
         cwd: os.tmpdir(),
         timeout: this.timeoutMs,
         maxBuffer: 10 * 1024 * 1024,
