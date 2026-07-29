@@ -173,6 +173,9 @@ export const bookings = mysqlTable(
     index("idx_status").on(table.status),
     index("idx_checkIn").on(table.checkIn),
     index("idx_checkOut").on(table.checkOut),
+    // Every inbound guest email is matched to a booking by sender address, so
+    // this lookup runs on each polled message rather than on user action.
+    index("idx_guestEmail").on(table.guestEmail),
   ]
 );
 
@@ -226,6 +229,106 @@ export const guestEmails = mysqlTable("guest_emails", {
 
 export type GuestEmail = typeof guestEmails.$inferSelect;
 export type InsertGuestEmail = typeof guestEmails.$inferInsert;
+
+/**
+ * Inbound guest emails and the replies drafted for them.
+ *
+ * Counterpart to `guest_emails`: that table records what we send on a schedule,
+ * this one records what guests send back and what we intend to answer. A row is
+ * created at ingestion time with `status: "new"` and no draft — drafting and
+ * sending are separate passes, so an LLM or SMTP outage never blocks the poller
+ * from reading the mailbox.
+ */
+export const guestReplyDrafts = mysqlTable("guest_reply_drafts", {
+  id: int("id").autoincrement().primaryKey(),
+
+  /**
+   * Message-ID of the guest's email. Unique, and the idempotency gate for the
+   * whole pipeline: the scheduler re-polls every 30 minutes and a message that
+   * failed mid-handler stays unread, so the same email is seen more than once.
+   * Falls back to a content hash when the sender omits a Message-ID.
+   */
+  inboundMessageId: varchar("inboundMessageId", { length: 512 }).notNull().unique(),
+
+  /** Null when no booking could be matched, or when the match was ambiguous. */
+  bookingId: int("bookingId"),
+  /**
+   * How the booking was resolved. `ambiguous` means several bookings share the
+   * sender's address and none could be singled out — deliberately distinct from
+   * `none`, because it needs a human rather than a better matcher.
+   */
+  matchMethod: mysqlEnum("matchMethod", ["email", "ambiguous", "none"]).notNull(),
+
+  // Inbound message, stored verbatim. Quoted history is stripped at drafting
+  // time, not here — the raw body is what we want for debugging a bad match.
+  inboundFrom: varchar("inboundFrom", { length: 320 }).notNull(),
+  inboundSubject: varchar("inboundSubject", { length: 512 }),
+  inboundBody: text("inboundBody"),
+  receivedAt: timestamp("receivedAt").defaultNow().notNull(),
+
+  /**
+   * `new` — recorded, not yet drafted.
+   * `scheduled` — draft ready, auto-send after `sendAfter`.
+   * `pending` — needs the owner (ambiguous match, missing facts, blocked intent).
+   * `sending` — claimed by the send worker; guards against double delivery.
+   */
+  status: mysqlEnum("status", [
+    "new",
+    "scheduled",
+    "pending",
+    "sending",
+    "sent",
+    "cancelled",
+    "rejected",
+    "failed",
+  ])
+    .default("new")
+    .notNull(),
+
+  // Draft — populated by the drafting pass, all null until then.
+  /** Categorised intent, drives the auto-send blocklist. */
+  intent: varchar("intent", { length: 64 }),
+  /** 1 when the model could not answer from the fact sheet alone. */
+  needsHuman: int("needsHuman").default(0).notNull(),
+  /** Facts the model was missing, for display next to the draft. */
+  missingInfo: json("missingInfo"),
+  draftSubject: varchar("draftSubject", { length: 512 }),
+  draftBody: text("draftBody"),
+  draftLanguage: mysqlEnum("draftLanguage", ["PL", "EN"]),
+  /** Which provider produced the draft — the CLI and API paths are swappable. */
+  provider: varchar("provider", { length: 64 }),
+  modelNotes: text("modelNotes"),
+
+  /**
+   * Animal count the guest's message implies, when it says so unambiguously.
+   *
+   * A proposal, never applied by the drafting pass: the model is reading free
+   * prose, where "we're bringing the dog" and "we're wondering about a dog"
+   * differ by one word. Approving the draft is what writes it to the booking,
+   * and that write is logged like any other booking change. Null means the
+   * message said nothing definite.
+   */
+  proposedAnimalsCount: int("proposedAnimalsCount"),
+
+  /** Earliest send time; the cancellation window closes here. */
+  sendAfter: timestamp("sendAfter"),
+  /** Owner's edit, kept separate from `draftBody` to measure draft quality. */
+  editedBody: text("editedBody"),
+  sentAt: timestamp("sentAt"),
+  sentMessageId: varchar("sentMessageId", { length: 512 }),
+  cancelledBy: varchar("cancelledBy", { length: 32 }),
+  errorMessage: text("errorMessage"),
+
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  index("idx_reply_status").on(table.status),
+  index("idx_reply_booking").on(table.bookingId),
+  index("idx_reply_received").on(table.receivedAt),
+]);
+
+export type GuestReplyDraft = typeof guestReplyDrafts.$inferSelect;
+export type InsertGuestReplyDraft = typeof guestReplyDrafts.$inferInsert;
 
 /**
  * Property ratings — stores average ratings and counts from external portals.

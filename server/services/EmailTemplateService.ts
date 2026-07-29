@@ -47,14 +47,23 @@ export class EmailTemplateService {
     const deposit = parseFloat(String(booking.depositAmount || "500"));
     const includeDepositInRemaining = booking.depositStatus !== "paid" && booking.depositStatus !== "returned";
 
-    let petFeeHtml = "";
-    if (booking.channel === "booking") {
-      petFeeHtml = isPL ? `
-        <p>Czy planujecie przyjechać ze zwierzętami? Zapraszamy także futrzastych i kudłatych gości, pobyt psa lub kota kosztuje 200 zł za zwierzaka, płatności można dokonać przelewem na numer konta ${ENV.bankAccountNumber}, Nazwisko do przelewu: ${ENV.ownerName}, lub blikiem na numer ${ENV.blikNumber} (koniecznie napisz, o który pobyt chodzi oraz że jest to opłata za zwierzaka). W razie pytań dawaj znać.</p>
+    // Pet fee goes to every channel, not just Booking.com.
+    //
+    // Only Booking.com guests used to be told, because they are the ones who
+    // cannot declare a pet at booking time. But a guest from any channel can
+    // turn up with an animal they never declared — or a second one — and if we
+    // never mention the fee, it is simply never paid. Stating how many animals
+    // the reservation covers makes the gap visible to the guest instead.
+    const paidAnimals = booking.animalsCount ?? 0;
+    const petFeeHtml = isPL ? `
+        <p>Zwierzaki: w Waszej rezerwacji ${paidAnimals === 0
+          ? "nie mamy zgłoszonego żadnego zwierzaka"
+          : `mamy zgłoszone i opłacone zwierzaki w liczbie ${paidAnimals}`}. Zapraszamy także futrzastych i kudłatych gości — jeśli chcecie zabrać jakiegoś dodatkowego, pobyt psa lub kota kosztuje 200 zł za zwierzaka. Najprościej BLIK-iem na numer ${ENV.blikNumber} lub przelewem na konto ${ENV.bankAccountNumber} (nazwisko do przelewu: ${ENV.ownerName}), koniecznie z dopiskiem, o który pobyt chodzi i że to opłata za zwierzaka. Dajcie znać, to dopiszemy go do rezerwacji.</p>
       ` : `
-        <p>Are you planning to come with pets? We also welcome furry and shaggy guests, the stay of a dog or cat costs 200 PLN per pet, payment can be made by transfer to account number ${ENV.bankAccountNumber}, transfer name: ${ENV.ownerName}, or by BLIK to number ${ENV.blikNumber} (be sure to write which stay it is and that it is a pet fee). If you have any questions, let me know.</p>
+        <p>Pets: your reservation currently ${paidAnimals === 0
+          ? "does not include any pet"
+          : `includes ${paidAnimals} pet(s)`}. We also welcome furry and shaggy guests — if you would like to bring an extra one, the stay of a dog or cat costs 200 PLN per pet. The easiest way is BLIK to ${ENV.blikNumber}, or a transfer to account ${ENV.bankAccountNumber} (transfer name: ${ENV.ownerName}); please state which stay it is and that it is a pet fee. Let us know and we will add it to your reservation.</p>
       `;
-    }
 
     let paymentHtml = "";
     if (needsPaymentInfo) {

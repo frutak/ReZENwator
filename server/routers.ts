@@ -425,6 +425,7 @@ const syncRouter = router({
       added: result.added,
       enriched: result.enriched,
       matched: result.matched,
+      guestReplies: result.guestReplies,
       errors: result.errors,
     };
   }),

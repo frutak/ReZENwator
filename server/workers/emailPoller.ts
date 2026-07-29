@@ -5,7 +5,9 @@ import { BookingRepository } from "../repositories/BookingRepository";
 import { BankTransferRepository } from "../repositories/BankTransferRepository";
 import { qualifyEmail, QualifiedEmail, ParsedBookingData, ParsedBankData } from "./emailParsers";
 import { findMatchingBookings, applyTransferMatch } from "./bookingMatcher";
-import { sendAlertEmail, forwardUnmatchedEmail } from "../_core/email";
+import { extractEmailAddress, matchBookingForEmail } from "./guestReplyMatcher";
+import { GuestReplyRepository } from "../repositories/GuestReplyRepository";
+import { sendAlertEmail, forwardUnmatchedEmail, GMAIL_USER } from "../_core/email";
 import { Logger } from "../_core/logger";
 import { initialStatus, initialDepositStatus } from "./icalPoller";
 import { format } from "date-fns";
@@ -366,13 +368,96 @@ async function handleBankTransfer(data: ParsedBankData | null, email: any, testM
   return false;
 }
 
+/**
+ * Longest inbound body we keep.
+ *
+ * `inboundBody` is a MySQL TEXT column (64 KB), and Polish text can run four
+ * bytes per character. A thread with a lot of quoted history could overflow it,
+ * and an insert that throws leaves the email unread — so the next poll retries
+ * it, fails again, and the mailbox never drains. Truncating loses the tail of a
+ * long quote; not truncating loses the pipeline.
+ */
+const MAX_INBOUND_BODY_CHARS = 16000;
+
+/**
+ * Handle an inbound email from a guest.
+ *
+ * Ingestion only. The sender is matched to a booking and the message recorded;
+ * nothing is drafted and nothing is sent. Drafting and sending run as separate
+ * passes so that neither can block the poller from draining the mailbox.
+ *
+ * The caller still forwards the email to the admin exactly as before. That is
+ * deliberate for now: until the matcher has been checked against real traffic,
+ * recording a row must not cost the owner visibility of the message.
+ */
+async function handleGuestReply(email: any, testMode: boolean): Promise<"recorded" | "duplicate" | "skipped"> {
+  try {
+    return await recordGuestReply(email, testMode);
+  } catch (err) {
+    // Never let this fail the email. Throwing here would leave the message
+    // unread — the poller only flags \Seen after a clean handler — so a missing
+    // table or a DB blip would wedge the mailbox on the same message every
+    // 30 minutes. The admin forward below still delivers it either way, so the
+    // worst case is a draft we did not record.
+    console.error(`[EmailPoller] Failed to record guest email ${email.messageId}:`, err);
+    return "skipped";
+  }
+}
+
+async function recordGuestReply(email: any, testMode: boolean): Promise<"recorded" | "duplicate" | "skipped"> {
+  const address = extractEmailAddress(email.from);
+  if (!address) return "skipped";
+
+  // Our own outbound mail coming back (bounce, self-copy) is not a guest.
+  if (address === GMAIL_USER.toLowerCase()) return "skipped";
+
+  const match = await matchBookingForEmail(address);
+
+  // No booking behind the address: this is the generic unrecognized mail the
+  // poller has always forwarded — newsletters, spam, portal notices. Recording
+  // those would bury real guest correspondence.
+  if (match.method === "none") return "skipped";
+
+  if (testMode) return "recorded";
+
+  const { inserted } = await GuestReplyRepository.insertInbound({
+    inboundMessageId: email.messageId,
+    bookingId: match.method === "email" ? match.booking.id : null,
+    matchMethod: match.method,
+    inboundFrom: address,
+    inboundSubject: (email.subject ?? "").slice(0, 512),
+    inboundBody: (email.body ?? "").slice(0, MAX_INBOUND_BODY_CHARS),
+    status: "new",
+  });
+
+  if (!inserted) {
+    console.log(`[EmailPoller] Guest email already recorded (${email.messageId}), skipping.`);
+    return "duplicate";
+  }
+
+  if (match.method === "email") {
+    await Logger.bookingAction(
+      match.booking.id,
+      "email",
+      "Received guest email",
+      `From ${address}: "${email.subject}"`
+    );
+  } else {
+    console.log(`[EmailPoller] Guest email from ${address} matched ${match.candidates.length} bookings — needs manual resolution.`);
+  }
+
+  return "recorded";
+}
+
 // ─── Main Dispatcher ──────────────────────────────────────────────────────────
 
 export async function pollEmails(testMode = false): Promise<{ 
-  processed: number; 
+  processed: number;
   added: number;
-  enriched: number; 
+  enriched: number;
   matched: number;
+  /** Inbound guest emails recorded for reply drafting. */
+  guestReplies: number;
   errors: string[];
   unmatchedBankTransfers: Array<{ subject: string; date: Date; sender: string }>;
   stats: {
@@ -387,6 +472,7 @@ export async function pollEmails(testMode = false): Promise<{
   let added = 0;
   let enriched = 0;
   let matched = 0;
+  let guestReplies = 0;
   const errors: string[] = [];
   const unmatchedBankTransfers: Array<{ subject: string; date: Date; sender: string }> = [];
   
@@ -443,6 +529,10 @@ export async function pollEmails(testMode = false): Promise<{
             }
             break;
           case "OTHER":
+            // A guest writing in lands here, since no parser claims it. Record
+            // it if the sender maps to a booking; the forward below still runs
+            // either way.
+            if (await handleGuestReply(email, testMode) === "recorded") guestReplies++;
             break;
         }
 
@@ -489,5 +579,5 @@ export async function pollEmails(testMode = false): Promise<{
     });
   }
 
-  return { processed, added, enriched, matched, errors, stats, unmatchedBankTransfers };
+  return { processed, added, enriched, matched, guestReplies, errors, stats, unmatchedBankTransfers };
 }

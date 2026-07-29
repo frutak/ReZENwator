@@ -228,12 +228,44 @@ describe("Email Template Dynamic Population", () => {
 
   it("should include pet fee section for Booking.com channel", async () => {
     const bookingCom = { ...mockBooking, channel: "booking" as const };
-    
+
     await sendGuestEmail("arrival_reminder", bookingCom, { isEarlyArrival: true });
 
     expect(sendMailMock).toHaveBeenCalled();
     const sentHtml = sendMailMock.mock.calls[0][0].html;
     expect(sentHtml).toContain("200 zł za zwierzaka");
     expect(sentHtml).toContain("11 1870 1045 2078 1067 6998 0001");
+  });
+
+  // The fee used to reach Booking.com guests only, so a Slowhop or direct guest
+  // could arrive with an undeclared animal having never been told it costs
+  // anything. These two cases guard the channel-independent behaviour.
+  it("tells guests on every channel about the pet fee, not just Booking.com", async () => {
+    const slowhop = { ...mockBooking, channel: "slowhop" as const, animalsCount: 0 };
+
+    await sendGuestEmail("arrival_reminder", slowhop, { isEarlyArrival: true });
+
+    const sentHtml = sendMailMock.mock.calls[0][0].html;
+    expect(sentHtml).toContain("200 zł za zwierzaka");
+    expect(sentHtml).toContain("571525563"); // BLIK — the route the owner prefers
+  });
+
+  it("states how many animals the reservation already covers", async () => {
+    const withPets = { ...mockBooking, channel: "direct" as const, animalsCount: 2 };
+
+    await sendGuestEmail("arrival_reminder", withPets, { isEarlyArrival: true });
+
+    const sentHtml = sendMailMock.mock.calls[0][0].html;
+    expect(sentHtml).toContain("w liczbie 2");
+    // The extra-animal offer must survive alongside the declared count.
+    expect(sentHtml).toContain("200 zł za zwierzaka");
+  });
+
+  it("says plainly when no animal is declared", async () => {
+    const noPets = { ...mockBooking, channel: "airbnb" as const, animalsCount: 0 };
+
+    await sendGuestEmail("arrival_reminder", noPets, { isEarlyArrival: true });
+
+    expect(sendMailMock.mock.calls[0][0].html).toContain("nie mamy zgłoszonego żadnego zwierzaka");
   });
 });
