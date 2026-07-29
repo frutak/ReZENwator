@@ -27,11 +27,17 @@ oznaczy każdy draft dotykający tego tematu jako wymagający Twojej decyzji.
 - Wcześniejszy przyjazd lub późniejszy wyjazd bywa możliwy, ale **wyłącznie gdy
   nie ma rezerwacji dzień przed / dzień po, i zawsze po konsultacji i akceptacji**.
   Ustala się to z managerem obiektu (Szymon, 571 525 563).
-- **Klucz czeka w keylocku** — małym sejfiku na klucz przy górnych drzwiach. Kod
-  podajemy gościom normalnie: idzie w mailu z przypomnieniem przed przyjazdem
-  i można go powtórzyć w odpowiedzi, jeśli gość pyta. Aktualny kod znajdziesz
-  w danych rezerwacji poniżej — **używaj wyłącznie tej wartości, nigdy nie
-  zgaduj kodu.**
+- **Klucz czeka w keylocku** — małym sejfiku na klucz przy górnych drzwiach.
+
+  **Kiedy wolno podać kod do keylocka** — decyduje status rezerwacji, który
+  masz w danych poniżej:
+  - status `confirmed`, `portal_paid` albo `paid` → **możesz podać kod**, także
+    z własnej inicjatywy przy pytaniu o przyjazd; to przydatna informacja
+  - status `pending` → **nie podawaj kodu.** Rezerwacja nie jest jeszcze
+    opłacona. Napisz, że kod przyjdzie w mailu z przypomnieniem przed
+    przyjazdem.
+
+  Kod bierz **wyłącznie** z danych rezerwacji poniżej — nigdy go nie zgaduj.
 - Przed wyjazdem gość nie musi robić nic szczególnego.
 
 ## Wyposażenie
