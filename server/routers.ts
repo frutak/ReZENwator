@@ -420,6 +420,19 @@ const syncRouter = router({
 
   triggerEmail: adminProcedure.mutation(async () => {
     const result = await pollEmails();
+
+    // Draft in the same pass as the scheduler does, so the manual button gives
+    // the same end state as waiting for the next tick — otherwise a test would
+    // ingest an email and then sit for up to half an hour before a draft
+    // appeared. A drafting failure must not fail the poll that already
+    // succeeded, so it is reported rather than thrown.
+    let drafted = 0;
+    try {
+      drafted = (await processGuestReplyDrafts()).drafted;
+    } catch (err) {
+      console.error("[Sync] Guest reply drafting failed after manual email poll:", err);
+    }
+
     return {
       success: true,
       processed: result.processed,
@@ -427,6 +440,7 @@ const syncRouter = router({
       enriched: result.enriched,
       matched: result.matched,
       guestReplies: result.guestReplies,
+      drafted,
       errors: result.errors,
     };
   }),

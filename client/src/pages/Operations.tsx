@@ -46,7 +46,7 @@ export default function Operations() {
       utils.sync.lastRun.invalidate();
       utils.sync.status.invalidate();
       toast.success(
-        `Email check complete — ${data.processed} processed, ${data.added} added, ${data.enriched} enriched, ${data.matched} matched`
+        `Email check complete — ${data.processed} processed, ${data.added} added, ${data.enriched} enriched, ${data.matched} matched, ${data.guestReplies} guest replies, ${data.drafted} drafted`
       );
     },
     onError: (e) => toast.error(`Email check failed: ${e.message}`),
