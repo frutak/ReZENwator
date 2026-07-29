@@ -15,6 +15,7 @@
 import cron, { type ScheduledTask } from "node-cron";
 import { pollAllICalFeeds } from "./icalPoller";
 import { pollEmails } from "./emailPoller";
+import { processGuestReplyDrafts } from "./guestReplyWorker";
 import { runDailyMaintenance } from "./dailyAlerts";
 import { updateAllPropertyRatings } from "./ratingScraper";
 import { PricingAuditor } from "./pricingAuditor";
@@ -68,6 +69,15 @@ export function startScheduler(): void {
       if (!outcome.ran) console.log("[Scheduler] Email poll skipped (another run in progress).");
     } catch (err) {
       console.error("[Scheduler] Email poll failed:", err);
+    }
+
+    // Drafting runs after the poll but outside its lock and its try block: a
+    // model outage must not be reported as a mail-polling failure, and a poll
+    // that failed halfway may still have recorded emails worth drafting.
+    try {
+      await processGuestReplyDrafts();
+    } catch (err) {
+      console.error("[Scheduler] Guest reply drafting failed:", err);
     }
   }, {
     timezone: "Europe/Warsaw"

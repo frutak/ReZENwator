@@ -13,6 +13,7 @@ import { ExpenseRepository } from "./repositories/ExpenseRepository";
 import { TRPCError } from "@trpc/server";
 import { pollAllICalFeeds, pollICalFeed } from "./workers/icalPoller";
 import { pollEmails } from "./workers/emailPoller";
+import { processGuestReplyDrafts } from "./workers/guestReplyWorker";
 import { findMatchingBookings, applyTransferMatch, revertTransferMatch } from "./workers/bookingMatcher";
 import { updateAllPropertyRatings } from "./workers/ratingScraper";
 import { PricingAuditor } from "./workers/pricingAuditor";
@@ -428,6 +429,11 @@ const syncRouter = router({
       guestReplies: result.guestReplies,
       errors: result.errors,
     };
+  }),
+
+  triggerGuestReplyDrafts: adminProcedure.mutation(async () => {
+    const result = await processGuestReplyDrafts();
+    return { success: true, ...result };
   }),
 
   triggerRatings: adminProcedure.mutation(async () => {

@@ -55,6 +55,29 @@ export class GuestReplyRepository {
       .orderBy(desc(guestReplyDrafts.receivedAt));
   }
 
+  /**
+   * Inbound emails waiting to be drafted, oldest first.
+   *
+   * Oldest first on purpose: if several arrive at once, the guest who wrote
+   * first is answered first, and a backlog drains in the order it formed.
+   */
+  static async findPendingDrafting(limit = 20) {
+    const db = await getDb();
+    if (!db) return [];
+    return db
+      .select()
+      .from(guestReplyDrafts)
+      .where(eq(guestReplyDrafts.status, "new"))
+      .orderBy(guestReplyDrafts.receivedAt)
+      .limit(limit);
+  }
+
+  static async update(id: number, fields: Partial<typeof guestReplyDrafts.$inferInsert>) {
+    const db = await getDb();
+    if (!db) throw new Error("Database not initialized");
+    return db.update(guestReplyDrafts).set(fields).where(eq(guestReplyDrafts.id, id));
+  }
+
   static async getById(id: number) {
     const db = await getDb();
     if (!db) return null;

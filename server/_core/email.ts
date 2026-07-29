@@ -181,6 +181,95 @@ export async function sendAlertEmail(subject: string, text: string): Promise<boo
 }
 
 /**
+ * Sends a drafted reply to the admin for approval.
+ *
+ * The draft is not sent to the guest and this mail is not a reply to them — it
+ * is the review surface until the approval UI exists. Everything the owner needs
+ * to judge the draft is in here: what the guest actually wrote, what the model
+ * proposes to answer, and what it says it was unsure about.
+ */
+export async function sendDraftForApproval(input: {
+  draftId: number;
+  bookingId: number | null;
+  property: string;
+  guestName: string;
+  guestEmail: string;
+  guestSubject: string;
+  guestBody: string;
+  intent: string;
+  needsHuman: boolean;
+  missingInfo: string[];
+  proposedAnimalsCount: number | null;
+  notes: string;
+  draftSubject: string;
+  draftBody: string;
+  shouldReply: boolean;
+}): Promise<boolean> {
+  const transporter = getTransporter();
+  const adminEmail = await getRecipientForEmail("alert");
+  if (!transporter) return false;
+
+  const flag = (label: string, on: boolean) =>
+    on ? `<span style="background:#fde68a;padding:2px 6px;border-radius:3px;">${label}</span>` : "";
+
+  const warnings = [
+    flag("WYMAGA CIEBIE", input.needsHuman),
+    flag("PIENIĄDZE", input.intent === "question_payment"),
+    input.proposedAnimalsCount !== null
+      ? flag(`PROPOZYCJA: zwierzęta → ${input.proposedAnimalsCount}`, true)
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const missing = input.missingInfo.length
+    ? `<p><strong>Model nie miał tych informacji:</strong></p><ul>${input.missingInfo
+        .map((m) => `<li>${m}</li>`)
+        .join("")}</ul>`
+    : "";
+
+  const body = input.shouldReply
+    ? `<h3>Proponowana odpowiedź</h3>
+       <p><strong>Temat:</strong> ${input.draftSubject}</p>
+       <div style="border-left:3px solid #2563eb;padding-left:12px;white-space:pre-wrap;">${input.draftBody}</div>`
+    : `<h3>Model uznał, że odpowiedź nie jest potrzebna</h3>`;
+
+  const html = `
+    <p>Draft #${input.draftId} — ${input.property}, rezerwacja ${
+      input.bookingId ? `#${input.bookingId}` : "niedopasowana"
+    }, gość: ${input.guestName} &lt;${input.guestEmail}&gt;</p>
+    <p>Intencja: <code>${input.intent}</code> ${warnings}</p>
+
+    <h3>Wiadomość gościa</h3>
+    <p><strong>Temat:</strong> ${input.guestSubject}</p>
+    <div style="border-left:3px solid #999;padding-left:12px;white-space:pre-wrap;color:#444;">${input.guestBody}</div>
+
+    ${body}
+    ${missing}
+
+    <h3>Notatka modelu</h3>
+    <p style="color:#555;">${input.notes}</p>
+
+    <hr style="border:0;border-top:1px solid #eee;margin:20px 0;" />
+    <p style="color:#888;font-size:12px;">Nic nie zostało wysłane do gościa. Ten mail jest wyłącznie do Twojej oceny.</p>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"ReZENwator" <${GMAIL_USER}>`,
+      to: adminEmail,
+      subject: `[DRAFT${input.needsHuman ? " / wymaga Ciebie" : ""}] ${input.guestName}: ${input.guestSubject}`,
+      html,
+    });
+    console.log(`[Email] Sent draft #${input.draftId} for approval to ${adminEmail}`);
+    return true;
+  } catch (err) {
+    console.error(`[Email] Failed to send draft #${input.draftId} for approval:`, err);
+    return false;
+  }
+}
+
+/**
  * Forwards an unrecognized or unmatched email to the admin.
  */
 export async function forwardUnmatchedEmail(
