@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, ne } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, ne } from "drizzle-orm";
 import { getDb } from "../db";
 import { bookings, guestReplyDrafts, type InsertGuestReplyDraft } from "../../drizzle/schema";
 
@@ -38,6 +38,31 @@ export class GuestReplyRepository {
       .where(
         and(
           eq(bookings.guestEmail, email),
+          inArray(bookings.type, ["normal"]),
+          ne(bookings.status, "cancelled")
+        )
+      )
+      .orderBy(bookings.checkIn);
+  }
+
+  /**
+   * Bookings whose stay has not long finished, for the name fallback.
+   *
+   * Bounded by checkout rather than fetched whole: a name match only makes
+   * sense against a stay the guest could still be writing about, and the
+   * comparison itself has to happen in JS — MySQL cannot tell that
+   * "Gibalska, Maja" and "Maja Gibalska" are one person.
+   */
+  static async findBookingsWithGuestNameSince(checkOutAfter: Date) {
+    const db = await getDb();
+    if (!db) return [];
+    return db
+      .select()
+      .from(bookings)
+      .where(
+        and(
+          isNotNull(bookings.guestName),
+          gte(bookings.checkOut, checkOutAfter),
           inArray(bookings.type, ["normal"]),
           ne(bookings.status, "cancelled")
         )

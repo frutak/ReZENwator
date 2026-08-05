@@ -94,8 +94,17 @@ const guestReplyRouter = router({
       }
 
       const booking = await BookingRepository.getBookingById(draft.bookingId);
-      if (!booking?.guestEmail) {
-        throw new TRPCError({ code: "BAD_REQUEST", message: "Rezerwacja nie ma adresu e-mail gościa." });
+      if (!booking) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Rezerwacja z draftu już nie istnieje." });
+      }
+
+      // Reply to whoever wrote, not to the address on the booking. Portals put
+      // an alias there (`…@allegro.com`) that the guest never reads, so sending
+      // to it means the answer never arrives. `inboundFrom` is the mailbox the
+      // question actually came from, which is also what threading needs.
+      const recipient = draft.inboundFrom || booking.guestEmail;
+      if (!recipient) {
+        throw new TRPCError({ code: "BAD_REQUEST", message: "Brak adresu, na który odpowiedzieć." });
       }
 
       // Last edit wins: what the owner has on screen, then anything saved
@@ -108,7 +117,7 @@ const guestReplyRouter = router({
       }
 
       const sent = await sendApprovedReply({
-        to: booking.guestEmail,
+        to: recipient,
         property: booking.property,
         subject: draft.draftSubject ?? `Re: ${draft.inboundSubject ?? ""}`,
         body,

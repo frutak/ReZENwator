@@ -103,11 +103,24 @@ export async function processGuestReplyDrafts(limit = 20): Promise<GuestReplyDra
 
       const d = outcome.draft;
 
+      // A name match identified the guest by their display name, not by an
+      // address only they could have. The facts are the right ones often enough
+      // to be worth drafting against, but not enough to answer unreviewed — so
+      // it carries the same flag as a draft the model itself was unsure of.
+      const needsHuman = d.needsHuman || row.matchMethod === "name";
+      const missingInfo =
+        row.matchMethod === "name"
+          ? [
+              `Dopasowano po nazwisku nadawcy, nie po adresie — sprawdź, czy to rezerwacja #${booking.id}.`,
+              ...d.missingInfo,
+            ]
+          : d.missingInfo;
+
       await GuestReplyRepository.update(row.id, {
         status: "pending",
         intent: d.intent,
-        needsHuman: d.needsHuman ? 1 : 0,
-        missingInfo: d.missingInfo,
+        needsHuman: needsHuman ? 1 : 0,
+        missingInfo,
         draftSubject: d.subject,
         draftBody: d.body,
         draftLanguage: d.language,
@@ -126,8 +139,8 @@ export async function processGuestReplyDrafts(limit = 20): Promise<GuestReplyDra
         guestSubject: row.inboundSubject ?? "",
         guestBody: row.inboundBody ?? "",
         intent: d.intent,
-        needsHuman: d.needsHuman,
-        missingInfo: d.missingInfo,
+        needsHuman,
+        missingInfo,
         proposedAnimalsCount: d.proposedAnimalsCount,
         notes: d.notes,
         draftSubject: d.subject,

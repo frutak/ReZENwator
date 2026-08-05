@@ -5,8 +5,9 @@ import { BookingRepository } from "../repositories/BookingRepository";
 import { BankTransferRepository } from "../repositories/BankTransferRepository";
 import { qualifyEmail, QualifiedEmail, ParsedBookingData, ParsedBankData } from "./emailParsers";
 import { findMatchingBookings, applyTransferMatch } from "./bookingMatcher";
-import { extractEmailAddress, matchBookingForEmail } from "./guestReplyMatcher";
+import { extractDisplayName, extractEmailAddress, matchBookingForEmail } from "./guestReplyMatcher";
 import { GuestReplyRepository } from "../repositories/GuestReplyRepository";
+import { ProcessedEmailRepository } from "../repositories/ProcessedEmailRepository";
 import { sendAlertEmail, forwardUnmatchedEmail, GMAIL_USER } from "../_core/email";
 import { Logger } from "../_core/logger";
 import { initialStatus, initialDepositStatus } from "./icalPoller";
@@ -28,6 +29,18 @@ function getGmailConfig() {
 }
 
 const AUTO_MATCH_THRESHOLD = 80;
+
+/**
+ * How far back a normal poll looks.
+ *
+ * The poller used to search `UNSEEN` and lean on the \Seen flag as its record of
+ * what it had handled. That record is shared with the owner's mail client: a
+ * message opened in Gmail before the next poll was never fetched, and a guest's
+ * question went unanswered because of it. It now searches by date over a window
+ * comfortably wider than any plausible outage and skips what
+ * `processed_emails` says is done — read state no longer decides anything.
+ */
+const POLL_LOOKBACK_DAYS = 7;
 
 /**
  * Stable identity for an email that carries no Message-ID.
@@ -65,7 +78,12 @@ async function fetchEmails(testMode: boolean): Promise<
       imap.openBox("INBOX", false, (err) => {
         if (err) { cleanup(); return reject(err); }
 
-        const searchCriteria = testMode ? ["ALL"] : ["UNSEEN"];
+        // Date window rather than UNSEEN: see POLL_LOOKBACK_DAYS. IMAP wants
+        // the RFC 3501 form, `SINCE 29-Jul-2026`, and compares whole days.
+        const since = new Date(Date.now() - POLL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
+        const searchCriteria = testMode
+          ? ["ALL"]
+          : [["SINCE", format(since, "dd-MMM-yyyy")]];
         imap.search(searchCriteria, (searchErr, results) => {
           if (searchErr) { cleanup(); return reject(searchErr); }
           if (!results || results.length === 0) { cleanup(); return resolve([]); }
@@ -411,18 +429,18 @@ async function recordGuestReply(email: any, testMode: boolean): Promise<"recorde
   // Our own outbound mail coming back (bounce, self-copy) is not a guest.
   if (address === GMAIL_USER.toLowerCase()) return "skipped";
 
-  const match = await matchBookingForEmail(address);
+  const match = await matchBookingForEmail(address, new Date(), extractDisplayName(email.from));
 
-  // No booking behind the address: this is the generic unrecognized mail the
-  // poller has always forwarded — newsletters, spam, portal notices. Recording
-  // those would bury real guest correspondence.
+  // Neither the address nor the sender's name maps to a booking: this is the
+  // generic unrecognized mail the poller has always forwarded — newsletters,
+  // spam, portal notices. Recording those would bury real correspondence.
   if (match.method === "none") return "skipped";
 
   if (testMode) return "recorded";
 
   const { inserted } = await GuestReplyRepository.insertInbound({
     inboundMessageId: email.messageId,
-    bookingId: match.method === "email" ? match.booking.id : null,
+    bookingId: match.method === "email" || match.method === "name" ? match.booking.id : null,
     matchMethod: match.method,
     inboundFrom: address,
     inboundSubject: (email.subject ?? "").slice(0, 512),
@@ -435,12 +453,12 @@ async function recordGuestReply(email: any, testMode: boolean): Promise<"recorde
     return "duplicate";
   }
 
-  if (match.method === "email") {
+  if (match.method === "email" || match.method === "name") {
     await Logger.bookingAction(
       match.booking.id,
       "email",
       "Received guest email",
-      `From ${address}: "${email.subject}"`
+      `From ${address}: "${email.subject}"${match.method === "name" ? " (matched by sender name, not address)" : ""}`
     );
   } else {
     console.log(`[EmailPoller] Guest email from ${address} matched ${match.candidates.length} bookings — needs manual resolution.`);
@@ -488,9 +506,23 @@ export async function pollEmails(testMode = false): Promise<{
   const processedUids: number[] = [];
 
   try {
-    const emails = await fetchEmails(testMode);
-    console.log(`[EmailPoller] Fetched ${emails.length} emails (testMode: ${testMode}).`);
+    const fetched = await fetchEmails(testMode);
 
+    // The search window covers a week, so most of what comes back was handled
+    // on an earlier poll. Drop those before anything runs: re-handling them
+    // would forward the same message to the owner again every 30 minutes.
+    const emails = testMode
+      ? fetched
+      : await (async () => {
+          const unprocessed = await ProcessedEmailRepository.filterUnprocessed(
+            fetched.map((e) => e.messageId)
+          );
+          return fetched.filter((e) => unprocessed.has(e.messageId));
+        })();
+
+    console.log(
+      `[EmailPoller] Fetched ${fetched.length} emails, ${emails.length} new (testMode: ${testMode}).`
+    );
 
     for (const email of emails) {
       processed++;
@@ -548,21 +580,35 @@ export async function pollEmails(testMode = false): Promise<{
           }
         }
 
-        // Reached only if nothing above threw — safe to mark this email read.
-        if (!testMode) processedUids.push(email.uid);
+        // Reached only if nothing above threw. Recording it here is what stops
+        // the next poll from handling it again; a message that failed is left
+        // unrecorded on purpose and retried.
+        if (!testMode) {
+          await ProcessedEmailRepository.markProcessed(email.messageId, email.subject ?? "");
+          processedUids.push(email.uid);
+        }
 
       } catch (err) {
         errors.push(`Error in email ${email.subject}: ${String(err)}`);
       }
     }
 
-    // Flag successfully-handled emails \Seen in a single pass. Failures stay
-    // unread and are retried on the next poll.
+    // Flagging \Seen is now cosmetic — `processed_emails` decides what gets
+    // handled — but it is still what keeps the owner's inbox readable.
     if (!testMode) {
       try {
         await markEmailsSeen(processedUids);
       } catch (seenErr) {
         errors.push(`Failed to mark emails seen: ${String(seenErr)}`);
+      }
+
+      // Entries older than the search window can never be consulted again.
+      try {
+        await ProcessedEmailRepository.pruneOlderThan(
+          new Date(Date.now() - (POLL_LOOKBACK_DAYS + 7) * 24 * 60 * 60 * 1000)
+        );
+      } catch (pruneErr) {
+        console.error("[EmailPoller] Failed to prune processed emails:", pruneErr);
       }
     }
   } catch (err) {

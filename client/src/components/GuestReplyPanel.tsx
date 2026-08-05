@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
-import { Send, X, Save, AlertTriangle, Banknote, PawPrint, Inbox } from "lucide-react";
+import { Send, X, Save, AlertTriangle, Banknote, PawPrint, Inbox, UserSearch } from "lucide-react";
 import { format } from "date-fns";
 
 /** Intents that never auto-send; shown so the reason is visible on the card. */
@@ -88,6 +88,11 @@ export function GuestReplyPanel() {
                     {draft.needsHuman === 1 && (
                       <Badge className="border-0 bg-amber-100 text-amber-800">
                         <AlertTriangle className="mr-1 h-3 w-3" /> wymaga Ciebie
+                      </Badge>
+                    )}
+                    {draft.matchMethod === "name" && (
+                      <Badge className="border-0 bg-violet-100 text-violet-800">
+                        <UserSearch className="mr-1 h-3 w-3" /> dopasowane po nazwisku
                       </Badge>
                     )}
                     {draft.intent === MONEY_INTENT && (

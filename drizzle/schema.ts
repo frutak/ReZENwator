@@ -256,8 +256,13 @@ export const guestReplyDrafts = mysqlTable("guest_reply_drafts", {
    * How the booking was resolved. `ambiguous` means several bookings share the
    * sender's address and none could be singled out — deliberately distinct from
    * `none`, because it needs a human rather than a better matcher.
+   *
+   * `name` is the weaker fallback: the address is unknown but the sender's
+   * display name equals a guest's. Portals hand out alias addresses
+   * (`…@allegro.com`), so the guest's real mailbox never matches the booking.
+   * A name match always reaches the owner rather than being trusted outright.
    */
-  matchMethod: mysqlEnum("matchMethod", ["email", "ambiguous", "none"]).notNull(),
+  matchMethod: mysqlEnum("matchMethod", ["email", "name", "ambiguous", "none"]).notNull(),
 
   // Inbound message, stored verbatim. Quoted history is stripped at drafting
   // time, not here — the raw body is what we want for debugging a bad match.
@@ -573,3 +578,24 @@ export const monthlyAdjustments = mysqlTable("monthly_adjustments", {
 
 export type MonthlyAdjustment = typeof monthlyAdjustments.$inferSelect;
 export type InsertMonthlyAdjustment = typeof monthlyAdjustments.$inferInsert;
+
+/**
+ * Emails the poller has already handled.
+ *
+ * The poller used to search `UNSEEN` and rely on the \Seen flag as its memory,
+ * which meant opening a message in Gmail before the next poll dropped it for
+ * good — that is how a guest's mail went unanswered. It now searches a rolling
+ * window by date and remembers what it handled here instead, so the read state
+ * of the mailbox no longer decides what gets processed.
+ */
+export const processedEmails = mysqlTable("processed_emails", {
+  id: int("id").autoincrement().primaryKey(),
+  /** Message-ID, or the content hash minted when a sender omits one. */
+  messageId: varchar("messageId", { length: 512 }).notNull().unique(),
+  subject: varchar("subject", { length: 512 }),
+  processedAt: timestamp("processedAt").defaultNow().notNull(),
+}, (table) => [
+  index("idx_processed_at").on(table.processedAt),
+]);
+
+export type ProcessedEmail = typeof processedEmails.$inferSelect;
