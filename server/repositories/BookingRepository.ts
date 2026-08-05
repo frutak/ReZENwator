@@ -422,6 +422,33 @@ export class BookingRepository {
       );
   }
 
+  /**
+   * Arrivals in the window that carry a note.
+   *
+   * The note is where an arrangement made over email ends up — "zgoda na
+   * przyjazd pierwszej grupy ok 12", "dostęp do piwnicy". It is agreed weeks
+   * ahead and then has to be remembered on the day, which is exactly what the
+   * daily mail is for. Blocks and internal bookings are included: a note on one
+   * is a note about what happens at the property that morning.
+   */
+  static async findArrivalsWithNotes(from: Date, to: Date) {
+    const db = await getDb();
+    if (!db) return [];
+    return db
+      .select()
+      .from(bookings)
+      .where(
+        and(
+          gte(bookings.checkIn, from),
+          lte(bookings.checkIn, to),
+          ne(bookings.status, "cancelled"),
+          isNotNull(bookings.notes),
+          ne(bookings.notes, "")
+        )
+      )
+      .orderBy(bookings.checkIn);
+  }
+
   static async findDepositsToReturn() {
     const db = await getDb();
     if (!db) return [];

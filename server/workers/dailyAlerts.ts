@@ -1,4 +1,4 @@
-import { format, subDays, startOfDay, endOfDay } from "date-fns";
+import { format, subDays, startOfDay, endOfDay, addDays, isSameDay } from "date-fns";
 import { getTransporter, GMAIL_USER, sendAlertEmail, sendGuestEmail, getRecipientForEmail } from "../_core/email";
 import { processGuestEmails, GuestEmailSummary } from "./guestEmailWorker";
 import { Logger } from "../_core/logger";
@@ -109,6 +109,7 @@ export async function runDailyMaintenance() {
   let bookingsMissingData: any[] = [];
   let failedSyncs: any[] = [];
   let failedGuestEmails: any[] = [];
+  let arrivalNotes: any[] = [];
   let latestSyncs: any[] = [];
   let portalStats: Array<{ page: string, count: number }> = [];
 
@@ -214,6 +215,13 @@ export async function runDailyMaintenance() {
       const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
       stalePortalPaid = await BookingRepository.findStalePortalPaid(sevenDaysAgo);
 
+      // Today and tomorrow, so an arrangement for a morning arrival is read the
+      // evening before rather than on the way to the property.
+      arrivalNotes = await BookingRepository.findArrivalsWithNotes(
+        startOfDay(now),
+        endOfDay(addDays(now, 1))
+      );
+
       // Fetch Errors from last 24h
       failedSyncs = await SyncRepository.findFailedSyncs(twentyFourHoursAgo);
       latestSyncs = await SyncRepository.findLatestSyncsBySource(twentyFourHoursAgo);
@@ -234,6 +242,7 @@ export async function runDailyMaintenance() {
         depositsToReturn,
         stalePortalPaid,
         bookingsMissingData,
+        arrivalNotes,
         transitions,
         guestEmailSummary,
         failedSyncs,
@@ -277,13 +286,15 @@ export async function runDailyMaintenance() {
   }
 }
 
-async function sendConsolidatedAlertEmail(data: {
+/** Exported for tests: the arrival-notes block is worth asserting on directly. */
+export async function sendConsolidatedAlertEmail(data: {
   stalePending: any[];
   upcomingUnpaid: any[];
   upcomingPendingDeposits: any[];
   depositsToReturn: any[];
   stalePortalPaid: any[];
   bookingsMissingData: any[];
+  arrivalNotes: any[];
   transitions: string[];
   guestEmailSummary: GuestEmailSummary;
   failedSyncs: any[];
@@ -298,6 +309,10 @@ async function sendConsolidatedAlertEmail(data: {
 
   const fmt = (d: Date | string) => format(new Date(d), "dd.MM.yyyy HH:mm");
   const fmtDate = (d: Date | string) => format(new Date(d), "dd.MM.yyyy");
+  const fmtTime = (d: Date | string) => format(new Date(d), "HH:mm");
+  /** Notes are free text the owner typed; a stray `<` must not eat the layout. */
+  const esc = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
   let html = `
     <div style="font-family:sans-serif;max-width:700px;margin:0 auto">
@@ -306,6 +321,32 @@ async function sendConsolidatedAlertEmail(data: {
       </div>
       <div style="background:#f8fafc;border:1px solid #e2e8f0;padding:16px 24px">
   `;
+
+  // --- ARRIVAL NOTES ---
+  // First in the mail, above the health block: an arrangement written into a
+  // booking weeks ago ("zgoda na przyjazd pierwszej grupy ok 12") is only
+  // useful if it is read on the morning it applies.
+  if (data.arrivalNotes.length > 0) {
+    const today = new Date();
+    html += `
+      <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;padding:12px 16px;margin-bottom:20px">
+        <h3 style="color:#b45309;margin:0 0 8px 0">📝 Notatki do przyjazdów (dziś i jutro)</h3>
+        <ul style="font-size:14px;margin:0;padding-left:20px">
+          ${data.arrivalNotes.map(b => {
+            const when = isSameDay(new Date(b.checkIn), today) ? "DZIŚ" : "JUTRO";
+            const kind = b.type !== "normal" ? ` <span style="color:#6b7280">[${b.type}]</span>` : "";
+            return `
+              <li style="margin-bottom:6px">
+                <span style="background:#b45309;color:white;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:bold">${when} ${fmtTime(b.checkIn)}</span>
+                <strong>${b.property}</strong>: ${getGuestName(b)} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)})${kind}
+                <div style="color:#78350f;margin-top:2px;white-space:pre-wrap">${esc(b.notes ?? "")}</div>
+              </li>
+            `;
+          }).join("")}
+        </ul>
+      </div>
+    `;
+  }
 
   // --- APP HEALTH / ERRORS ---
   html += `<h3 style="color:#1e40af;margin-top:0">🛠️ App Health (last 24h)</h3>`;
@@ -482,12 +523,14 @@ async function sendConsolidatedAlertEmail(data: {
 
   const totalItems = data.stalePending.length + data.upcomingUnpaid.length + data.upcomingPendingDeposits.length + data.depositsToReturn.length + data.stalePortalPaid.length + data.bookingsMissingData.length;
   const totalErrors = data.failedSyncs.length + data.failedGuestEmails.length;
+  // Called out in the subject: it is the one item that is worthless if read late.
+  const notesFlag = data.arrivalNotes.length > 0 ? `📝 ${data.arrivalNotes.length} notatki do przyjazdów — ` : "";
 
   try {
     await transporter.sendMail({
       from: `"ReZENwator" <${GMAIL_USER}>`,
       to: adminEmail,
-      subject: `📅 Daily Report: ${totalErrors} errors, ${data.guestEmailSummary.sentCount} emails sent, ${totalItems} tasks`,
+      subject: `${notesFlag}📅 Daily Report: ${totalErrors} errors, ${data.guestEmailSummary.sentCount} emails sent, ${totalItems} tasks`,
       html,
     });
     console.log(`[DailyAlerts] Consolidated email sent to ${adminEmail}`);
