@@ -24,8 +24,65 @@ function getGmailConfig() {
     port: 993,
     tls: true,
     tlsOptions: { rejectUnauthorized: false },
-    authTimeout: 10000,
+    // Gmail's IMAP frontend is occasionally slow to complete the AUTH exchange.
+    // At the old 10s budget roughly one poll in forty died on `timeout-auth`
+    // alone; the connection itself was fine, we just stopped waiting. 30s is
+    // still far below the 30-minute poll interval, so a slow login costs
+    // latency rather than a whole cycle.
+    connTimeout: 30000,
+    authTimeout: 30000,
   };
+}
+
+/**
+ * Is this IMAP error worth another attempt?
+ *
+ * node-imap tags every error it raises with a `source`. The timeout and socket
+ * families are transient — the server was slow or the connection dropped — and
+ * a second attempt usually succeeds. `authentication` is deliberately excluded:
+ * retrying a rejected password is how an account gets locked out, and no amount
+ * of retrying fixes a wrong app password.
+ */
+const TRANSIENT_IMAP_SOURCES = new Set(["timeout", "timeout-auth", "socket", "socket-timeout"]);
+
+function isTransientImapError(err: unknown): boolean {
+  const source = (err as { source?: string } | null)?.source;
+  if (source) return TRANSIENT_IMAP_SOURCES.has(source);
+  // Older node-imap paths and raw socket failures arrive without a source tag.
+  const code = (err as { code?: string } | null)?.code;
+  return code === "ECONNRESET" || code === "ETIMEDOUT" || code === "EPIPE" || code === "ECONNREFUSED";
+}
+
+const IMAP_MAX_ATTEMPTS = 3;
+const IMAP_RETRY_BASE_MS = 3000;
+
+/**
+ * Run an IMAP operation, retrying transient failures with linear backoff.
+ *
+ * A single dropped login used to cost the entire 30-minute cycle. Nothing was
+ * lost — the date-window search plus `processed_emails` means the next poll
+ * re-reads the same mail — but a guest's message sat unseen for an extra half
+ * hour for no better reason than a slow TLS handshake.
+ */
+async function withImapRetry<T>(label: string, op: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+
+  for (let attempt = 1; attempt <= IMAP_MAX_ATTEMPTS; attempt++) {
+    try {
+      return await op();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientImapError(err) || attempt === IMAP_MAX_ATTEMPTS) break;
+
+      const delay = IMAP_RETRY_BASE_MS * attempt;
+      console.warn(
+        `[EmailPoller] ${label} failed (attempt ${attempt}/${IMAP_MAX_ATTEMPTS}): ${String(err)}. Retrying in ${delay}ms...`
+      );
+      await new Promise((res) => setTimeout(res, delay));
+    }
+  }
+
+  throw lastErr;
 }
 
 const AUTO_MATCH_THRESHOLD = 80;
@@ -133,7 +190,13 @@ async function fetchEmails(testMode: boolean): Promise<
       });
     });
 
-    imap.once("error", (err: Error) => { cleanup(); reject(err); });
+    // `on`, not `once`: node-imap can emit a second error while the socket is
+    // torn down (an EPIPE from the logout write is the usual one). With `once`
+    // the listener is gone by then, and an 'error' event without a listener
+    // takes down the whole process — iCal polling and the watchdog with it.
+    // The `isFinished` guard makes the repeat call a no-op, and settling an
+    // already-settled promise is ignored.
+    imap.on("error", (err: Error) => { cleanup(); reject(err); });
     imap.connect();
   });
 }
@@ -167,7 +230,9 @@ async function markEmailsSeen(uids: number[]): Promise<void> {
       });
     });
 
-    imap.once("error", (err: Error) => finish(err));
+    // See fetchEmails: `on` rather than `once` so a follow-up socket error
+    // during teardown is absorbed instead of crashing the process.
+    imap.on("error", (err: Error) => finish(err));
     imap.connect();
   });
 }
@@ -506,7 +571,7 @@ export async function pollEmails(testMode = false): Promise<{
   const processedUids: number[] = [];
 
   try {
-    const fetched = await fetchEmails(testMode);
+    const fetched = await withImapRetry("Fetch", () => fetchEmails(testMode));
 
     // The search window covers a week, so most of what comes back was handled
     // on an earlier poll. Drop those before anything runs: re-handling them
@@ -597,8 +662,11 @@ export async function pollEmails(testMode = false): Promise<{
     // handled — but it is still what keeps the owner's inbox readable.
     if (!testMode) {
       try {
-        await markEmailsSeen(processedUids);
+        await withImapRetry("Mark seen", () => markEmailsSeen(processedUids));
       } catch (seenErr) {
+        // Cosmetic only — `processed_emails` already recorded the work, so the
+        // next poll will not re-handle these. The inbox just stays bold.
+        console.error("[EmailPoller] Failed to mark emails seen:", seenErr);
         errors.push(`Failed to mark emails seen: ${String(seenErr)}`);
       }
 
@@ -612,6 +680,11 @@ export async function pollEmails(testMode = false): Promise<{
       }
     }
   } catch (err) {
+    // Log to stderr as well as to sync_logs. This failure used to be recorded
+    // only in the database, so a poll that died left nothing in journalctl but
+    // a missing "Fetched N emails" line — the outage was invisible unless you
+    // knew to go query the table.
+    console.error("[EmailPoller] Poll failed:", err);
     errors.push(`Polling failed: ${String(err)}`);
   }
 
