@@ -57,9 +57,17 @@ export function normalizeDecimalFields<T extends Record<string, any>>(details: T
 
 /**
  * Calculates the balance due for a booking.
+ *
+ * `amountPaid` is always money that reached the owner's account — never what a
+ * guest has paid a portal. So the balance is what the owner is still owed, from
+ * every source combined: on a 2700 zł Alohacamp stay with a 675 zł zaliczka that
+ * is 176.85 (the portal's forward of the zaliczka less its commission) + 2025
+ * (the guest's balance, paid to the owner directly) + 500 (kaucja) = 2701.85,
+ * dropping as each of those lands.
+ *
  * Logic:
- * - For Airbnb/Booking.com: hostRevenue - amountPaid
- * - For others: totalPrice - amountPaid
+ * - hostRevenue - amountPaid, falling back to totalPrice when no net revenue is
+ *   known (direct bookings, where the two are the same)
  * - Optional: include deposit if not returned
  */
 export function calculateBalanceDue(booking: {
@@ -80,6 +88,8 @@ export function calculateBalanceDue(booking: {
   // otherwise it's the totalPrice. This handles all channels:
   // - Direct: hostRevenue usually equals totalPrice (or is null, falling back to totalPrice)
   // - Airbnb/Booking: hostRevenue is price minus commission
+  // - Slowhop/Alohacamp: hostRevenue is what the portal and the guest together
+  //   still have to transfer to the owner
   const baseAmount = (hostRevenue > 0) ? hostRevenue : totalPrice;
 
   let balance = baseAmount - amountPaid;

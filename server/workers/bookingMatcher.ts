@@ -123,13 +123,24 @@ export async function applyTransferMatch(
 
   let isPortalForward = false;
 
-  if (b.channel === "slowhop") {
+  // Slowhop and Alohacamp both settle in two steps: the portal takes its whole
+  // commission out of the guest's zaliczka and forwards the remainder to the
+  // owner's account, then the rest follows once the guest pays the balance. For
+  // Alohacamp that first forward is 675 − 498.15 = 176.85 on a 2700 zł stay —
+  // without this branch it fell through to the generic portal logic, which read
+  // it as the whole payment and flipped the booking to `paid` with a mismatch
+  // alert. A booking with no zaliczka recorded has nothing to split, so it stays
+  // on the portal logic below (an Alohacamp stay paid in full is settled in one
+  // payout of hostRevenue).
+  const isTwoStepPortal = b.channel === "slowhop" || (b.channel === "alohacamp" && cResFee > 0);
+
+  if (isTwoStepPortal) {
     const hostPrepayment = cResFee - cComm;
     const guestBalance = totalPrice - cResFee;
     const guestBalancePlusDeposit = guestBalance + depositReq;
 
     if (Math.abs(transferAmount - hostPrepayment) < 1.0) {
-      // Slowhop pre-payment forward - status stays 'confirmed' (or current)
+      // Portal pre-payment forward - status stays 'confirmed' (or current)
       newStatus = b.status === "pending" ? "confirmed" : b.status;
       isPortalForward = true;
     } else if (Math.abs(transferAmount - guestBalancePlusDeposit) < 1.0) {

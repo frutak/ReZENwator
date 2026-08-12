@@ -301,20 +301,27 @@ export class MatchingEngine {
       if (candidate.status === "portal_paid" && cRevenue > 0 && Math.abs(transfer.amount - cRevenue) < 1.0) {
         amountScore = 100;
         reasons.push("Matches host revenue (portal payout)");
-      } else if (candidate.channel === "slowhop") {
+      } else if (candidate.channel === "slowhop" || candidate.channel === "alohacamp") {
+        // Both portals settle the same way: they forward the guest's zaliczka
+        // less their whole commission, and the guest then pays the rest (plus
+        // the kaucja) straight to the owner's account. The forward is the amount
+        // that needs naming explicitly — on a 2700 zł Alohacamp stay it is
+        // 675 − 498.15 = 176.85, which none of the generic amount tests below
+        // come close to, leaving it at a score of 10.
+        const label = candidate.channel === "slowhop" ? "Slowhop" : "Alohacamp";
         const hostPrepayment = cResFee - cComm;
         const guestBalance = (cTotal - cResFee) + cDeposit;
         const guestJustBalance = (cTotal - cResFee);
         if (cResFee > 0 && Math.abs(transfer.amount - hostPrepayment) < 1.0) {
           amountScore = 100;
-          reasons.push("Matches Slowhop host pre-payment (ResFee - Gross Commission)");
+          reasons.push(`Matches ${label} host pre-payment (ResFee - Gross Commission)`);
           bonus += 20;
         } else if (cTotal > 0 && Math.abs(transfer.amount - guestBalance) < 1.0) {
           amountScore = 100;
-          reasons.push("Matches Slowhop guest balance + deposit");
+          reasons.push(`Matches ${label} guest balance + deposit`);
         } else if (cTotal > 0 && Math.abs(transfer.amount - guestJustBalance) < 1.0) {
           amountScore = 100;
-          reasons.push("Matches Slowhop guest balance");
+          reasons.push(`Matches ${label} guest balance`);
         }
       }
 

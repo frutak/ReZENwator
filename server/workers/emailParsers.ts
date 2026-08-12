@@ -57,6 +57,12 @@ export interface ParsedBookingData {
   hostRevenue?: number;
   currency?: string;
   property?: Property;
+  /**
+   * The guest owes the portal nothing further. Says nothing about the owner
+   * having been paid — the portal still has to forward the payout — so it maps
+   * to the `portal_paid` status rather than to `amountPaid`.
+   */
+  settledWithPortalInFull?: boolean;
 }
 
 // ─── Qualification Logic ──────────────────────────────────────────────────────
@@ -178,25 +184,36 @@ function parseAlohacampAL1(subject: string, body: string): ParsedBookingData {
   const guestMatch = body.match(/Goście:\s*(\d+)\s+dorosłych(?:,\s*(\d+)\s+dzieci)?/i);
 
   // Liberal amount matching: find number following label until end of line or "zł"
+  // Alohacamp sends two shapes of the same confirmation:
+  //   fully paid    → "Cena: 3000.00 zł - opłacona w całości"
+  //   prepayment    → "Zapłacono zaliczkę: 675.00 zł" + "Do dopłaty: 2025.00 zł"
+  // Only the second shape states a per-line total, so the first is reconstructed.
   const priceMatch = body.match(/Cena:\s*([^-\r\n]+)/i);
-  const hostRevenueMatch = body.match(/Wpłata Gościa:\s*([^\r\n]+)/i);
-  
-  // Variations for partial payments
   const prepaymentMatch = body.match(/Zapłacono zaliczkę:\s*([^\r\n]+)/i);
   const remainingMatch = body.match(/Do dopłaty:\s*([^\r\n]+)/i);
 
   let totalPrice = priceMatch ? parsePrice(priceMatch[1]!)?.amount : undefined;
-  let hostRevenue = hostRevenueMatch ? parsePrice(hostRevenueMatch[1]!)?.amount : undefined;
-  const amountPaid = prepaymentMatch ? parsePrice(prepaymentMatch[1]!)?.amount : undefined;
+  const prepayment = prepaymentMatch ? parsePrice(prepaymentMatch[1]!)?.amount : undefined;
   const remaining = remainingMatch ? parsePrice(remainingMatch[1]!)?.amount : undefined;
 
   // If we have prepayment + remaining, calculate total
-  if (!totalPrice && amountPaid != null && remaining != null) {
-    totalPrice = amountPaid + remaining;
+  if (!totalPrice && prepayment != null && remaining != null) {
+    totalPrice = prepayment + remaining;
   }
+
+  // Everything the guest pays here goes to Alohacamp, not to the owner, so none
+  // of it belongs in `amountPaid` — that field records money that has reached the
+  // owner's account, and the balance due is measured against it. The zaliczka is
+  // kept as `reservationFee` instead, which is what the portal's forward is
+  // derived from (zaliczka − commission).
+  //
+  // ("Wpłata Gościa" is NOT host revenue either — it is the part the guest put on
+  // a card, with "Środki z portfela Gościa" covering the rest. Ignore both.)
+  const settledWithPortalInFull = /opłacona w całości/i.test(body);
 
   // Alohacamp Commission: 15% + 23% VAT = 18.45%
   let commission: number | undefined;
+  let hostRevenue: number | undefined;
   if (totalPrice) {
     commission = Math.round(totalPrice * 0.1845 * 100) / 100;
     hostRevenue = Math.round((totalPrice - commission) * 100) / 100;
@@ -211,7 +228,7 @@ function parseAlohacampAL1(subject: string, body: string): ParsedBookingData {
   const childrenCount = guestMatch && guestMatch[2] ? parseInt(guestMatch[2]) : 0;
   const guestCount = adultsCount !== undefined ? adultsCount + childrenCount : undefined;
 
-  console.log(`[AlohacampParser] ID: ${idMatch?.[1]}, In: ${checkInMatch?.[1]}, Out: ${checkOutMatch?.[1]}, Name: ${nameMatch?.[1]}, Guests: ${guestCount}, Price: ${totalPrice}, Commission: ${commission}, Revenue: ${hostRevenue}`);
+  console.log(`[AlohacampParser] ID: ${idMatch?.[1]}, In: ${checkInMatch?.[1]}, Out: ${checkOutMatch?.[1]}, Name: ${nameMatch?.[1]}, Guests: ${guestCount}, Price: ${totalPrice}, Zaliczka: ${prepayment}${settledWithPortalInFull ? " (settled with portal in full)" : ""}, Commission: ${commission}, Revenue: ${hostRevenue}`);
 
   return {
     channel: "alohacamp",
@@ -226,7 +243,12 @@ function parseAlohacampAL1(subject: string, body: string): ParsedBookingData {
     totalPrice,
     hostRevenue,
     commission,
-    amountPaid,
+    // Nothing has reached the owner's account at this point — see above.
+    amountPaid: undefined,
+    // Only a genuine zaliczka counts as a reservation fee; a stay settled with
+    // the portal in full has no separate prepayment.
+    reservationFee: prepayment,
+    settledWithPortalInFull,
     currency: "PLN",
     property,
   };
@@ -303,7 +325,11 @@ function parseSlowhopS1(subject: string, body: string): ParsedBookingData {
     childrenCount,
     animalsCount,
     totalPrice: priceData?.amount,
-    amountPaid: paidData?.amount,
+    // The przedpłata was paid to Slowhop, not to the owner, so it is not an
+    // inflow — `amountPaid` only ever records money that reached the owner's
+    // account. Slowhop keeps its commission out of this prepayment and forwards
+    // the remainder; that bank transfer is what raises amountPaid. Writing it
+    // here as well double-counted the przedpłata once the forward was matched.
     reservationFee: paidData?.amount,
     commission,
     hostRevenue,
@@ -318,8 +344,8 @@ function parseSlowhopS2(subject: string, body: string): ParsedBookingData {
   
   // structured table: Total, Prepayment, Commission, Net to Host
   const totalPrice = prices[0] ? parsePrice(prices[0][0])?.amount : undefined;
-  const amountPaid = prices[1] ? parsePrice(prices[1][0])?.amount : undefined;
-  
+  const prepayment = prices[1] ? parsePrice(prices[1][0])?.amount : undefined;
+
   let commission = prices[2] ? parsePrice(prices[2][0])?.amount : undefined;
   if (commission != null) {
     // Manually add 23% VAT to commission as requested
@@ -341,8 +367,10 @@ function parseSlowhopS2(subject: string, body: string): ParsedBookingData {
     checkIn: detailMatch ? parseDMY(detailMatch[2]!) : undefined,
     checkOut: detailMatch ? parseDMY(detailMatch[3]!) : undefined,
     totalPrice,
-    amountPaid: amountPaid,
-    reservationFee: amountPaid,
+    // Accounting mail: it states the przedpłata the guest paid Slowhop, which is
+    // not an inflow to the owner. See parseSlowhopS1 — the forward's bank
+    // transfer is what raises amountPaid.
+    reservationFee: prepayment,
     commission,
     hostRevenue,
     currency: "PLN",

@@ -44,7 +44,10 @@ Wysokość opłaconej przedpłaty: 540 pln`;
       expect(formatDate(data.checkOut)).toBe("2026-04-01");
       expect(data.guestPhone).toBe("447956002507");
       expect(data.totalPrice).toBe(1800);
-      expect(data.amountPaid).toBe(540);
+      // The przedpłata went to Slowhop, not to the owner's account, so it is
+      // recorded as a reservation fee rather than as money received.
+      expect(data.reservationFee).toBe(540);
+      expect(data.amountPaid).toBeUndefined();
       expect(data.property).toBe("Hacjenda");
     });
   });
@@ -60,7 +63,8 @@ Wysokość opłaconej przedpłaty: 540 pln`;
       const data = result?.data;
       expect(data.guestName).toBe("Evelina De Lain");
       expect(data.totalPrice).toBe(1800);
-      expect(data.amountPaid).toBe(540);
+      expect(data.reservationFee).toBe(540);
+      expect(data.amountPaid).toBeUndefined();
       // Original commission 270, now 270 * 1.23 = 332.1
       expect(data.commission).toBe(332.1);
       expect(data.hostRevenue).toBe(1800 - 332.1);

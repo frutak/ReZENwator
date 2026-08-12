@@ -73,6 +73,9 @@ function detectChannel(
 export function initialDepositStatus(
   channel: ICalFeed["channel"]
 ): "pending" | "not_applicable" {
+  // Alohacamp stays here alongside slowhop/direct: the kaucja is collected by
+  // bank transfer to the owner's own account, separately from what the guest
+  // pays the portal for the stay.
   if (channel === "airbnb" || channel === "booking") return "not_applicable";
   return "pending";
 }

@@ -124,4 +124,73 @@ describe("MatchingEngine", () => {
     expect(results[0].bookingId).toBe(1);
     expect(results[0].reasons).toContain("Matches deposit amount + keyword");
   });
+
+  describe("Alohacamp forwards", () => {
+    // Booking #181: 2700 zł stay, 675 zł zaliczka, 498.15 zł commission. The
+    // portal forwards 675 − 498.15 = 176.85 and the guest pays the remaining
+    // 2025 zł (plus the kaucja) straight to the owner's account.
+    const alohacamp: CandidateBooking[] = [{
+      id: 181,
+      guestName: "Serhii Kozachenko",
+      companyName: null,
+      checkIn: new Date("2026-10-02T16:00:00Z"),
+      channel: "alohacamp",
+      property: "Sadoles",
+      totalPrice: "2700.00",
+      amountPaid: "675.00",
+      hostRevenue: "2201.85",
+      commission: "498.15",
+      reservationFee: "675.00",
+      depositAmount: "500.00",
+      icalUid: "8896f74f8bae75f74a962fe6c56ebf83@alohacamp.com",
+      icalSummary: "Reservation no 202608952357 at alohacamp.com",
+      status: "confirmed",
+    }];
+
+    it("scores the portal's zaliczka forward on amount alone", () => {
+      // The sender is the portal, not the guest, so nothing but the amount
+      // identifies this transfer. Without the Alohacamp branch it scored 10.
+      const transfer: ParsedBankData = {
+        amount: 176.85,
+        senderName: "ALOHACAMP SP. Z O.O.",
+        transferTitle: "Wyplata",
+        transferDate: new Date("2026-08-13T12:00:00Z"),
+        currency: "PLN",
+        accountNumber: "123",
+      } as ParsedBankData;
+
+      const results = MatchingEngine.scoreCandidates(transfer, alohacamp, false);
+      expect(results[0].reasons).toContain("Matches Alohacamp host pre-payment (ResFee - Gross Commission)");
+    });
+
+    it("auto-matches the guest paying the balance directly", () => {
+      const transfer: ParsedBankData = {
+        amount: 2025,
+        senderName: "SERHII KOZACHENKO",
+        transferTitle: "Sadoles doplata",
+        transferDate: new Date("2026-09-20T12:00:00Z"),
+        currency: "PLN",
+        accountNumber: "123",
+      } as ParsedBankData;
+
+      const results = MatchingEngine.scoreCandidates(transfer, alohacamp, false);
+      expect(results[0].bookingId).toBe(181);
+      expect(results[0].score).toBeGreaterThanOrEqual(80);
+    });
+
+    it("auto-matches the guest paying balance and kaucja together", () => {
+      const transfer: ParsedBankData = {
+        amount: 2525,
+        senderName: "SERHII KOZACHENKO",
+        transferTitle: "Sadoles doplata + kaucja",
+        transferDate: new Date("2026-09-20T12:00:00Z"),
+        currency: "PLN",
+        accountNumber: "123",
+      } as ParsedBankData;
+
+      const results = MatchingEngine.scoreCandidates(transfer, alohacamp, false);
+      expect(results[0].bookingId).toBe(181);
+      expect(results[0].score).toBeGreaterThanOrEqual(80);
+    });
+  });
 });

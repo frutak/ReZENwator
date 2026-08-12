@@ -663,16 +663,27 @@ export class BookingRepository {
       );
   }
 
-  static async findSlowhopBySummaryId(bookingId: string) {
+  /**
+   * Finds a booking whose iCal summary carries the channel's own reservation
+   * number — e.g. Alohacamp writes "Reservation no 202608952357 at
+   * alohacamp.com". Matching on that number is exact, unlike the ±1-day date
+   * window used as a fallback, which can attach a confirmation to the wrong
+   * stay when two bookings sit back to back.
+   */
+  static async findBySummaryId(channel: Channel, bookingId: string) {
     const db = await getDb();
     if (!db) return null;
     const result = await db.select().from(bookings).where(
       and(
-        eq(bookings.channel, "slowhop"),
+        eq(bookings.channel, channel),
         sql`${bookings.icalSummary} LIKE ${`%${bookingId}%`}`
       )
     ).limit(1);
     return result[0] ?? null;
+  }
+
+  static async findSlowhopBySummaryId(bookingId: string) {
+    return this.findBySummaryId("slowhop", bookingId);
   }
 
   static async getTaxReportData(startDate: Date, endDate: Date) {

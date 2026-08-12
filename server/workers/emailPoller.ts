@@ -240,31 +240,54 @@ async function markEmailsSeen(uids: number[]): Promise<void> {
 // ─── Logic Handlers ───────────────────────────────────────────────────────────
 
 /**
- * Handle Booking Confirmation Emails (S1, A1, B1).
+ * True when the confirmation says the guest has settled the whole stay with the
+ * portal. The owner has still been paid nothing at this point — the portal owes
+ * them the payout — so this maps to `portal_paid`, not to `paid`, and never to an
+ * `amountPaid` figure. A partial zaliczka does not qualify.
+ */
+function settledWithPortalInFull(data: ParsedBookingData): boolean {
+  return data.channel !== "slowhop" && data.settledWithPortalInFull === true;
+}
+
+/**
+ * Handle Booking Confirmation Emails (S1, A1, B1, AL1).
  * Purpose: Filling-out all possible booking data.
  */
 async function handleBookingConfirmation(subTemplate: string, data: ParsedBookingData, email: any, testMode: boolean): Promise<"created" | "updated" | null> {
   if (!data.checkIn || !data.checkOut) return null;
 
-  // 1. Find existing booking by channel + dates (±1 day)
-  const dayMs = 24 * 60 * 60 * 1000;
-  const checkInMin = new Date(data.checkIn.getTime() - dayMs);
-  const checkInMax = new Date(data.checkIn.getTime() + dayMs);
-  const checkOutMin = new Date(data.checkOut.getTime() - dayMs);
-  const checkOutMax = new Date(data.checkOut.getTime() + dayMs);
+  // 1a. Prefer an exact match on the channel's reservation number, which some
+  // feeds (Alohacamp, Slowhop) put in the iCal summary. This is what the email
+  // and the feed genuinely share, so it beats the date window below.
+  let match = data.bookingId
+    ? await BookingRepository.findBySummaryId(data.channel as any, data.bookingId)
+    : null;
 
-  const candidates = await BookingRepository.findEmailMatchCandidates(data.channel as any, data.property as any);
+  if (match) {
+    console.log(`[EmailPoller] Matched ${subTemplate} by reservation no ${data.bookingId} → booking #${match.id}.`);
+  }
 
-  const match = candidates.find((b) => 
-    b.checkIn >= checkInMin && b.checkIn <= checkInMax &&
-    b.checkOut >= checkOutMin && b.checkOut <= checkOutMax
-  );
+  // 1b. Fall back to channel + dates (±1 day)
+  if (!match) {
+    const dayMs = 24 * 60 * 60 * 1000;
+    const checkInMin = new Date(data.checkIn.getTime() - dayMs);
+    const checkInMax = new Date(data.checkIn.getTime() + dayMs);
+    const checkOutMin = new Date(data.checkOut.getTime() - dayMs);
+    const checkOutMax = new Date(data.checkOut.getTime() + dayMs);
+
+    const candidates = await BookingRepository.findEmailMatchCandidates(data.channel as any, data.property as any);
+
+    match = candidates.find((b) =>
+      b.checkIn >= checkInMin && b.checkIn <= checkInMax &&
+      b.checkOut >= checkOutMin && b.checkOut <= checkOutMax
+    ) ?? null;
+  }
 
   if (!match) {
     if (testMode) return "created";
     // If not found, create it (iCal hasn't seen it yet)
     console.log(`[EmailPoller] No match for ${subTemplate} confirmation (${data.checkIn?.toDateString()}). Creating new booking.`);
-    
+
     let insertResult: any;
     try {
       [insertResult] = await BookingRepository.insertBooking({
@@ -273,8 +296,11 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
         channel: data.channel as any,
         checkIn: data.checkIn,
         checkOut: data.checkOut,
-        status: initialStatus(data.channel as any),
+        status: settledWithPortalInFull(data) ? "portal_paid" : initialStatus(data.channel as any),
         depositStatus: initialDepositStatus(data.channel as any),
+        // Mirror the feed's summary so the reservation number stays searchable
+        // if the iCal event shows up (or another mail arrives) later on.
+        icalSummary: data.bookingId ? `Reservation no ${data.bookingId} (from ${subTemplate} email)` : undefined,
         guestName: data.guestName,
         guestEmail: data.guestEmail,
         guestPhone: data.guestPhone,
@@ -286,8 +312,11 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
         totalPrice: data.totalPrice != null ? String(data.totalPrice) : undefined,
         commission: data.commission != null ? String(data.commission) : undefined,
         hostRevenue: data.hostRevenue != null ? String(data.hostRevenue) : undefined,
-        amountPaid: data.amountPaid != null ? String(data.amountPaid) : "0.00",
-        reservationFee: (data.reservationFee ?? data.amountPaid) != null ? String(data.reservationFee ?? data.amountPaid) : undefined,
+        // A confirmation mail never reports money reaching the owner's account —
+        // a portal prepayment is recorded as reservationFee and turns into
+        // amountPaid only when the portal's forward is matched to a transfer.
+        amountPaid: "0.00",
+        reservationFee: data.reservationFee != null ? String(data.reservationFee) : undefined,
         currency: data.currency ?? "PLN",
         emailMessageId: email.messageId,
       });
@@ -312,7 +341,7 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
   if (data.channel !== "slowhop") {
     // For Airbnb/Booking, if it's currently pending or it was auto-cancelled (not finished), we can set it to confirmed
     if (match.status === "pending" || match.status === "cancelled") {
-      newStatus = "confirmed";
+      newStatus = settledWithPortalInFull(data) ? "portal_paid" : "confirmed";
     }
   }
 
@@ -329,8 +358,9 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
     totalPrice: data.totalPrice != null ? String(data.totalPrice) : match.totalPrice,
     commission: data.commission != null ? String(data.commission) : match.commission,
     hostRevenue: data.hostRevenue != null ? String(data.hostRevenue) : match.hostRevenue,
-    amountPaid: data.amountPaid != null ? String(data.amountPaid) : match.amountPaid,
-    reservationFee: (data.reservationFee ?? data.amountPaid) != null ? String(data.reservationFee ?? data.amountPaid) : match.reservationFee,
+    // Never overwritten from a confirmation mail — see the insert path above.
+    amountPaid: match.amountPaid,
+    reservationFee: data.reservationFee != null ? String(data.reservationFee) : match.reservationFee,
     currency: data.currency ?? match.currency,
   });
 
@@ -349,12 +379,14 @@ async function handleSlowhopS2(data: ParsedBookingData, testMode: boolean): Prom
 
   if (match) {
     if (testMode) return true;
+    // `amountPaid` is deliberately not written here: the przedpłata this mail
+    // reports went to Slowhop, and the forward it announces raises amountPaid
+    // when its own bank transfer is matched.
     await BookingRepository.updateBookingDetails(match.id, {
       status: "confirmed",
       commission: data.commission ? String(data.commission) : match.commission,
       hostRevenue: data.hostRevenue ? String(data.hostRevenue) : match.hostRevenue,
-      amountPaid: data.amountPaid != null ? String(data.amountPaid) : match.amountPaid,
-      reservationFee: (data.reservationFee ?? data.amountPaid) != null ? String(data.reservationFee ?? data.amountPaid) : match.reservationFee,
+      reservationFee: data.reservationFee != null ? String(data.reservationFee) : match.reservationFee,
     });
     
     await Logger.bookingAction(match.id, "enrichment", "Enriched via S2 (Accounting) email", "Filled: Commission, Host Revenue, Reservation Fee");
