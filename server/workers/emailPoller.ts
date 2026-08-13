@@ -12,6 +12,7 @@ import { sendAlertEmail, forwardUnmatchedEmail, GMAIL_USER } from "../_core/emai
 import { Logger } from "../_core/logger";
 import { initialStatus, initialDepositStatus } from "./icalPoller";
 import { format } from "date-fns";
+import { normalizeBookingDates } from "@shared/utils";
 import { createHash } from "crypto";
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -252,9 +253,22 @@ function settledWithPortalInFull(data: ParsedBookingData): boolean {
 /**
  * Handle Booking Confirmation Emails (S1, A1, B1, AL1).
  * Purpose: Filling-out all possible booking data.
+ *
+ * Exported for the tests, which drive it directly — the alternative is standing
+ * up an IMAP server to reach it.
  */
-async function handleBookingConfirmation(subTemplate: string, data: ParsedBookingData, email: any, testMode: boolean): Promise<"created" | "updated" | null> {
+export async function handleBookingConfirmation(subTemplate: string, data: ParsedBookingData, email: any, testMode: boolean): Promise<"created" | "updated" | null> {
   if (!data.checkIn || !data.checkOut) return null;
+
+  // Confirmation mails state a date and no time, and the parsers hand that back
+  // as local midnight. Every other way a booking is born settles the hours — the
+  // iCal poller for an all-day event, `BookingService` for a manual create — but
+  // this path wrote the parse through untouched, so a booking whose mail arrived
+  // before its iCal event showed up sat at 00:00 and stayed there: the feed then
+  // preserves whatever time the row already has, taking a midnight for a
+  // deliberate early arrival. That is how Sofia Krutko's stay (#174) came to
+  // read "16 Oct 2026 00:00" in the app and would have told her so by mail.
+  const { checkIn, checkOut } = normalizeBookingDates(data.checkIn, data.checkOut);
 
   // 1a. Prefer an exact match on the channel's reservation number, which some
   // feeds (Alohacamp, Slowhop) put in the iCal summary. This is what the email
@@ -270,10 +284,10 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
   // 1b. Fall back to channel + dates (±1 day)
   if (!match) {
     const dayMs = 24 * 60 * 60 * 1000;
-    const checkInMin = new Date(data.checkIn.getTime() - dayMs);
-    const checkInMax = new Date(data.checkIn.getTime() + dayMs);
-    const checkOutMin = new Date(data.checkOut.getTime() - dayMs);
-    const checkOutMax = new Date(data.checkOut.getTime() + dayMs);
+    const checkInMin = new Date(checkIn.getTime() - dayMs);
+    const checkInMax = new Date(checkIn.getTime() + dayMs);
+    const checkOutMin = new Date(checkOut.getTime() - dayMs);
+    const checkOutMax = new Date(checkOut.getTime() + dayMs);
 
     const candidates = await BookingRepository.findEmailMatchCandidates(data.channel as any, data.property as any);
 
@@ -286,7 +300,7 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
   if (!match) {
     if (testMode) return "created";
     // If not found, create it (iCal hasn't seen it yet)
-    console.log(`[EmailPoller] No match for ${subTemplate} confirmation (${data.checkIn?.toDateString()}). Creating new booking.`);
+    console.log(`[EmailPoller] No match for ${subTemplate} confirmation (${checkIn.toDateString()}). Creating new booking.`);
 
     let insertResult: any;
     try {
@@ -294,8 +308,8 @@ async function handleBookingConfirmation(subTemplate: string, data: ParsedBookin
         icalUid: `email-${data.channel}-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         property: data.property ?? "Sadoles",
         channel: data.channel as any,
-        checkIn: data.checkIn,
-        checkOut: data.checkOut,
+        checkIn,
+        checkOut,
         status: settledWithPortalInFull(data) ? "portal_paid" : initialStatus(data.channel as any),
         depositStatus: initialDepositStatus(data.channel as any),
         // Mirror the feed's summary so the reservation number stays searchable
