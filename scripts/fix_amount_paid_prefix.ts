@@ -27,11 +27,14 @@
  * recorded transfers: Wysocka (466.62 + 3528 − 500 = 3494.62, pet fee included)
  * and Daniłowska (207.90 + 1760 − 500 = 1467.90).
  *
- * #98 Damian Kryński is deliberately absent. His flow was 288.75 + 3050 − 500,
- * which is 800 zł more than the rule predicts — the guest transferred something
- * the stay price does not account for. Wysocka's pet fee was handled by raising
- * `totalPrice`, and his 800 probably wants the same treatment, but not before
- * the owner says what it was.
+ * #98 Damian Kryński needs one more step before the rule reaches him. His flow
+ * was 288.75 + 3050 − 500, which is 800 zł more than the rule predicts: the
+ * party arrived on Thursday 15.01, a night ahead of the 16–18.01 Slowhop
+ * reservation, and paid for that night directly. Slowhop charged its commission
+ * on the 2500 it brokered, so the extra night is the owner's in full — the same
+ * shape as Wysocka's 200 zł pet fee, which was handled by raising `totalPrice`
+ * and leaving `commission` alone. So his stay price becomes 3300, his
+ * hostRevenue 3300 − 461.25 = 2838.75, and the rule then applies as usual.
  *
  * Guarded: each row is written only if it still holds the exact value expected
  * here and its kaucja is settled. Re-running is a no-op.
@@ -58,15 +61,87 @@ const CORRECTIONS: Array<{ id: number; guest: string; from: string; to: string; 
   { id: 2, guest: "Gabriela Raczyńska", from: "3300.00", to: "2691.15", evidence: "2810 recorded transfer (2310 + 500 kaucja) + 381.15 Slowhop forward − 500 returned; no S2 mail survives, so the forward is derived" },
   { id: 26, guest: "Evelina De Lain", from: "1800.00", to: "1467.90", evidence: "no bank record survives; the rule applies — zaliczka 540, forward 207.90, balance 1260, kaucja returned" },
   { id: 69, guest: "Agata Bengel", from: "345.00", to: "937.82", evidence: "held her zaliczka as if received; S2 mail states a 132.82 forward, balance 805, kaucja returned" },
+  { id: 98, guest: "Damian Kryński", from: "2500.00", to: "2838.75", evidence: "288.75 Slowhop + 3050 guest (1750 balance + 500 kaucja + 800 for the extra night of 15.01) − 500 returned" },
 ];
 
 const SETTLED_DEPOSIT = ["returned", "not_applicable"];
+
+/**
+ * The extra night Kryński's party paid for directly, which has to be on the
+ * booking before its `amountPaid` can equal `hostRevenue`. Commission stays as
+ * Slowhop charged it, on the 2500 it brokered.
+ */
+const EXTRA_NIGHT = {
+  id: 98,
+  guest: "Damian Kryński",
+  totalPrice: ["2500.00", "3300.00"] as [string, string],
+  hostRevenue: ["2038.75", "2838.75"] as [string, string],
+  reason:
+    "Guests arrived Thursday 15.01, a night ahead of the 16–18.01 Slowhop reservation, and paid the " +
+    "800 zł for it directly (bank: 288.75 Slowhop + 3050 guest − 500 kaucja returned = 2838.75). " +
+    "Slowhop's commission of 461.25 was charged on the 2500 it brokered and is unchanged, so the " +
+    "extra night is the owner's in full.",
+};
+
+async function applyExtraNight(conn: mysql.Connection): Promise<void> {
+  const [rows]: any = await conn.query(
+    "SELECT id, guestName, totalPrice, commission, hostRevenue FROM bookings WHERE id = ?",
+    [EXTRA_NIGHT.id]
+  );
+  if (rows.length === 0) return;
+  const b = rows[0];
+
+  if (b.totalPrice !== EXTRA_NIGHT.totalPrice[0] || b.hostRevenue !== EXTRA_NIGHT.hostRevenue[0]) {
+    console.log(
+      `#${EXTRA_NIGHT.id} (${EXTRA_NIGHT.guest}): totalPrice ${b.totalPrice} / hostRevenue ${b.hostRevenue} — ` +
+        "already corrected or changed. SKIPPED (extra night).\n"
+    );
+    return;
+  }
+
+  console.log(`#${EXTRA_NIGHT.id} (${EXTRA_NIGHT.guest}) — extra night`);
+  console.log(`   totalPrice   ${EXTRA_NIGHT.totalPrice[0]}  ->  ${EXTRA_NIGHT.totalPrice[1]}`);
+  console.log(`   hostRevenue  ${EXTRA_NIGHT.hostRevenue[0]}  ->  ${EXTRA_NIGHT.hostRevenue[1]}`);
+  console.log(`   commission   ${b.commission} (unchanged — charged on the 2500 Slowhop brokered)`);
+  console.log(`   ${EXTRA_NIGHT.reason}`);
+
+  if (!APPLY) {
+    console.log("   (dry run — nothing written)\n");
+    return;
+  }
+
+  await conn.beginTransaction();
+  try {
+    const [res]: any = await conn.query(
+      "UPDATE bookings SET totalPrice = ?, hostRevenue = ? WHERE id = ? AND totalPrice = ? AND hostRevenue = ?",
+      [EXTRA_NIGHT.totalPrice[1], EXTRA_NIGHT.hostRevenue[1], EXTRA_NIGHT.id, EXTRA_NIGHT.totalPrice[0], EXTRA_NIGHT.hostRevenue[0]]
+    );
+    if (res.affectedRows !== 1) throw new Error(`expected 1 row updated, got ${res.affectedRows}`);
+
+    await conn.query("INSERT INTO booking_activities (bookingId, type, action, details) VALUES (?,?,?,?)", [
+      EXTRA_NIGHT.id,
+      "manual_edit",
+      "Extra night added to the stay price",
+      `totalPrice: ${EXTRA_NIGHT.totalPrice[0]} -> ${EXTRA_NIGHT.totalPrice[1]}, ` +
+        `hostRevenue: ${EXTRA_NIGHT.hostRevenue[0]} -> ${EXTRA_NIGHT.hostRevenue[1]}. ${EXTRA_NIGHT.reason}`,
+    ]);
+    await conn.commit();
+    console.log("   WRITTEN + logged to booking_activities\n");
+  } catch (err) {
+    await conn.rollback();
+    console.error(`   FAILED, rolled back: ${String(err)}\n`);
+    throw err;
+  }
+}
 
 async function main() {
   const conn = await mysql.createConnection(process.env.DATABASE_URL!);
   console.log(APPLY ? "MODE: APPLY (writing changes)\n" : "MODE: DRY RUN (no changes — pass --apply to write)\n");
 
   const written: number[] = [];
+
+  // Must run before the amountPaid pass below, which checks against hostRevenue.
+  await applyExtraNight(conn);
 
   for (const fix of CORRECTIONS) {
     const [rows]: any = await conn.query(
