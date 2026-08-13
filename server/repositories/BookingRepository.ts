@@ -70,8 +70,13 @@ export class BookingRepository {
       .offset(filters.offset ?? 0);
   }
 
-  static async getBookingById(id: number) {
-    const db = await getDb();
+  /**
+   * Pass `executor` to read inside a transaction the caller owns — the payment
+   * decision is made from these values, so reading them outside the transaction
+   * that writes them would decide from a state that no longer holds.
+   */
+  static async getBookingById(id: number, executor?: DbExecutor) {
+    const db = executor ?? (await getDb());
     if (!db) return null;
     const result = await db.select().from(bookings).where(eq(bookings.id, id)).limit(1);
     return result[0] ?? null;

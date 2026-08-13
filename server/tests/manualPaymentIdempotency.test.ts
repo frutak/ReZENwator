@@ -3,6 +3,7 @@ import { appRouter } from "../routers";
 import { BankTransferRepository, transferContentKey } from "../repositories/BankTransferRepository";
 import { applyTransferMatch, revertTransferMatch } from "../workers/bookingMatcher";
 import type { TrpcContext } from "../_core/context";
+import { getDb } from "../db";
 
 /**
  * The two ways money is applied by hand, and why neither can be applied twice.
@@ -20,12 +21,35 @@ import type { TrpcContext } from "../_core/context";
  * and applies it only if that row is new.
  */
 
+/**
+ * A transaction that behaves like the real one for what these tests care about:
+ * the callback runs, and an error inside it propagates after a rollback — which
+ * is how "nothing landed" is asserted below.
+ */
+function fakeDb() {
+  const rolledBack: boolean[] = [];
+  return {
+    db: {
+      transaction: async (cb: (tx: any) => Promise<void>) => {
+        try {
+          await cb({ __tx: true });
+        } catch (err) {
+          rolledBack.push(true);
+          throw err;
+        }
+      },
+    },
+    rolledBack,
+  };
+}
+
 vi.mock("../repositories/BankTransferRepository", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../repositories/BankTransferRepository")>();
   return {
     ...actual,
     BankTransferRepository: {
       getTransferById: vi.fn(),
+      getTransferByIdForUpdate: vi.fn(),
       claimMatch: vi.fn(),
       insertTransfer: vi.fn(),
       findByContentKey: vi.fn().mockResolvedValue([]),
@@ -39,7 +63,7 @@ vi.mock("../workers/bookingMatcher", () => ({
   revertTransferMatch: vi.fn(),
   findMatchingBookings: vi.fn().mockResolvedValue([]),
 }));
-vi.mock("../db", () => ({ getDb: vi.fn().mockResolvedValue(null), runWithLock: vi.fn() }));
+vi.mock("../db", () => ({ getDb: vi.fn(), runWithLock: vi.fn() }));
 vi.mock("../_core/logger", () => ({ Logger: { bookingAction: vi.fn(), audit: vi.fn() } }));
 
 function adminCaller() {
@@ -77,14 +101,18 @@ const pendingTransfer = {
 describe("transfers.manualMatch", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    (getDb as any).mockResolvedValue(fakeDb().db);
     (BankTransferRepository.getTransferById as any).mockResolvedValue(pendingTransfer);
+    (BankTransferRepository.getTransferByIdForUpdate as any).mockResolvedValue(pendingTransfer);
     (BankTransferRepository.claimMatch as any).mockResolvedValue(true);
+    (applyTransferMatch as any).mockResolvedValue(undefined);
+    (revertTransferMatch as any).mockResolvedValue(undefined);
   });
 
   it("applies the payment when it wins the claim", async () => {
     const result = await adminCaller().transfers.manualMatch({ transferId: 57, bookingId: 172 });
 
-    expect(BankTransferRepository.claimMatch).toHaveBeenCalledWith(57, 172);
+    expect(BankTransferRepository.claimMatch).toHaveBeenCalledWith(57, 172, expect.anything());
     expect(applyTransferMatch).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ success: true });
   });
@@ -101,7 +129,7 @@ describe("transfers.manualMatch", () => {
   });
 
   it("gives the money back to the previous booking when re-matched elsewhere", async () => {
-    (BankTransferRepository.getTransferById as any).mockResolvedValue({
+    (BankTransferRepository.getTransferByIdForUpdate as any).mockResolvedValue({
       ...pendingTransfer,
       status: "matched",
       matchedBookingId: 99,
@@ -109,13 +137,13 @@ describe("transfers.manualMatch", () => {
 
     await adminCaller().transfers.manualMatch({ transferId: 57, bookingId: 172 });
 
-    expect(revertTransferMatch).toHaveBeenCalledWith(99, 980);
+    expect(revertTransferMatch).toHaveBeenCalledWith(99, 980, expect.anything());
     expect(applyTransferMatch).toHaveBeenCalledTimes(1);
   });
 
   it("does not revert a booking it is about to re-apply to", async () => {
     // Re-matching to the same booking is a no-op, not a subtract-then-add.
-    (BankTransferRepository.getTransferById as any).mockResolvedValue({
+    (BankTransferRepository.getTransferByIdForUpdate as any).mockResolvedValue({
       ...pendingTransfer,
       status: "matched",
       matchedBookingId: 172,
@@ -126,6 +154,47 @@ describe("transfers.manualMatch", () => {
 
     expect(revertTransferMatch).not.toHaveBeenCalled();
     expect(applyTransferMatch).not.toHaveBeenCalled();
+  });
+
+  it("leaves both bookings untouched when crediting the new one fails", async () => {
+    // The window this whole design exists for: the money has been taken off the
+    // old booking and the transfer already claims to belong to the new one, when
+    // the process dies. Run as three separate writes, that 980 zł is simply
+    // gone — off booking 99, never on 172, and a retry refuses to act because
+    // the claim is taken. Inside one transaction it rolls back instead.
+    const { db, rolledBack } = fakeDb();
+    (getDb as any).mockResolvedValue(db);
+    (BankTransferRepository.getTransferByIdForUpdate as any).mockResolvedValue({
+      ...pendingTransfer,
+      status: "matched",
+      matchedBookingId: 99,
+    });
+    const revertEffect = vi.fn();
+    (revertTransferMatch as any).mockResolvedValue(revertEffect);
+    (applyTransferMatch as any).mockRejectedValue(new Error("connection lost"));
+
+    await expect(
+      adminCaller().transfers.manualMatch({ transferId: 57, bookingId: 172 })
+    ).rejects.toThrow("connection lost");
+
+    expect(rolledBack).toHaveLength(1);
+    // The revert ran, but inside the transaction — the rollback undoes it. What
+    // must not happen is its activity-log entry surviving to describe a write
+    // that no longer exists.
+    expect(revertEffect).not.toHaveBeenCalled();
+  });
+
+  it("logs nothing until the transaction has committed", async () => {
+    const applyEffect = vi.fn();
+    (applyTransferMatch as any).mockImplementation(async () => {
+      // Still inside the transaction here.
+      expect(applyEffect).not.toHaveBeenCalled();
+      return applyEffect;
+    });
+
+    await adminCaller().transfers.manualMatch({ transferId: 57, bookingId: 172 });
+
+    expect(applyEffect).toHaveBeenCalledTimes(1);
   });
 });
 

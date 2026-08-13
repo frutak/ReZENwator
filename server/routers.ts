@@ -4,6 +4,7 @@ import { COOKIE_NAME } from "@shared/const";
 import { getSessionCookieOptions } from "./_core/cookies";
 import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, protectedProcedure, adminProcedure, router } from "./_core/trpc";
+import { getDb, type DbExecutor } from "./db";
 import { BookingRepository } from "./repositories/BookingRepository";
 import { GuestReplyRepository } from "./repositories/GuestReplyRepository";
 import { UserRepository } from "./repositories/UserRepository";
@@ -920,39 +921,67 @@ const transferRouter = router({
   manualMatch: adminProcedure
     .input(z.object({ transferId: z.number(), bookingId: z.number() }))
     .mutation(async ({ input }) => {
-      const transfer = await BankTransferRepository.getTransferById(input.transferId);
-      if (!transfer) throw new Error('Transfer not found');
+      const asParsed = (t: { amount: string; currency: string; senderName: string; transferTitle: string; transferDate: Date; accountNumber: string | null }): ParsedBankData => ({
+        amount: parseFloat(t.amount),
+        currency: t.currency,
+        senderName: t.senderName,
+        transferTitle: t.transferTitle,
+        transferDate: t.transferDate,
+        accountNumber: t.accountNumber ?? '',
+      });
 
-      const previousBookingId =
-        transfer.status === 'matched' && transfer.matchedBookingId ? transfer.matchedBookingId : null;
-
-      // Claim the transfer for this booking before touching any money. Two of
-      // these running at once — a double-click, or a client retry — would
-      // otherwise both read the transfer as unmatched, both skip the revert
-      // below and both add the amount to the booking. The claim is a single
-      // conditional UPDATE, so MySQL serialises them and the loser stops here.
-      const claimed = await BankTransferRepository.claimMatch(input.transferId, input.bookingId);
-      if (!claimed) {
-        return { success: true, alreadyApplied: true };
+      const db = await getDb();
+      if (!db) {
+        // No database configured (dev) — nothing to be atomic about.
+        const transfer = await BankTransferRepository.getTransferById(input.transferId);
+        if (!transfer) throw new Error('Transfer not found');
+        await applyTransferMatch(input.bookingId, asParsed(transfer), 100, { transferId: input.transferId });
+        return { success: true };
       }
 
-      // Only now, and only if this pairing is new: give the previous booking its
-      // money back.
-      if (previousBookingId && previousBookingId !== input.bookingId) {
-        await revertTransferMatch(previousBookingId, parseFloat(transfer.amount));
-      }
+      // Moving a payment from one booking to another is three writes — claim the
+      // transfer, take the money off the old booking, put it on the new one —
+      // and all three have to land or none of them. Run separately, a crash
+      // between the second and the third leaves the money nowhere: off the old
+      // booking, never on the new one, with the transfer row claiming otherwise
+      // and a retry refusing to act because the claim is already taken.
+      //
+      // Side effects come back from the two helpers instead of running inside
+      // here: an activity log entry or a mismatch email must not describe a
+      // write that a rollback is about to erase.
+      const afterCommit: Array<() => Promise<void>> = [];
+      let alreadyApplied = false;
 
-      const parsed: ParsedBankData = {
-        amount: parseFloat(transfer.amount),
-        currency: transfer.currency,
-        senderName: transfer.senderName,
-        transferTitle: transfer.transferTitle,
-        transferDate: transfer.transferDate,
-        accountNumber: transfer.accountNumber ?? '',
-      };
+      await db.transaction(async (tx: DbExecutor) => {
+        // Locking read: the decision below depends on `matchedBookingId`, so two
+        // concurrent re-matches of the same transfer must not both read the same
+        // "previous" booking and both hand it its money back.
+        const transfer = await BankTransferRepository.getTransferByIdForUpdate(input.transferId, tx);
+        if (!transfer) throw new Error('Transfer not found');
 
-      // Apply payment + mark transfer matched atomically (see applyTransferMatch).
-      await applyTransferMatch(input.bookingId, parsed, 100, { transferId: input.transferId });
+        const previousBookingId =
+          transfer.status === 'matched' && transfer.matchedBookingId ? transfer.matchedBookingId : null;
+
+        // Refuses a repeat of the same pairing — a double-click or a client
+        // retry stops here rather than adding the amount a second time.
+        const claimed = await BankTransferRepository.claimMatch(input.transferId, input.bookingId, tx);
+        if (!claimed) {
+          alreadyApplied = true;
+          return;
+        }
+
+        if (previousBookingId && previousBookingId !== input.bookingId) {
+          const reverted = await revertTransferMatch(previousBookingId, parseFloat(transfer.amount), tx);
+          if (reverted) afterCommit.push(reverted);
+        }
+
+        const applied = await applyTransferMatch(input.bookingId, asParsed(transfer), 100, { transferId: input.transferId }, tx);
+        if (applied) afterCommit.push(applied);
+      });
+
+      if (alreadyApplied) return { success: true, alreadyApplied: true };
+
+      for (const effect of afterCommit) await effect();
 
       return { success: true };
     }),

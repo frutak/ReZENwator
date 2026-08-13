@@ -10,7 +10,7 @@
 
 import { BookingRepository } from "../repositories/BookingRepository";
 import { BankTransferRepository } from "../repositories/BankTransferRepository";
-import { getDb } from "../db";
+import { getDb, type DbExecutor } from "../db";
 import type { ParsedBankData } from "./emailParsers";
 import { sendAlertEmail } from "../_core/email";
 import { levenshtein, normalizeName } from "../_core/utils/string";
@@ -82,15 +82,22 @@ export async function findMatchingBookings(
  * Side effects (activity log, payment-mismatch email) are deferred until after
  * the transaction commits — email must never run inside a DB transaction, and a
  * failed write should not send a "payment received" signal.
+ *
+ * Pass `executor` to enlist in a transaction the caller already owns — the
+ * manual-match flow does, so that reverting one booking and crediting another
+ * cannot come apart. The side effects are then returned instead of being run:
+ * only the caller knows when its transaction commits, and a rollback must take
+ * the activity log and the mismatch mail down with it.
  */
 export async function applyTransferMatch(
   bookingId: number,
   transfer: ParsedBankData,
   score: number,
-  link?: { transferId?: number; externalId?: string }
-): Promise<void> {
+  link?: { transferId?: number; externalId?: string },
+  executor?: DbExecutor
+): Promise<(() => Promise<void>) | undefined> {
   // Fetch current booking to determine status transition
-  const b = await BookingRepository.getBookingById(bookingId);
+  const b = await BookingRepository.getBookingById(bookingId, executor);
   if (!b) return;
 
   const transferAmount = transfer.amount ?? 0;
@@ -227,41 +234,59 @@ export async function applyTransferMatch(
     matchScore: score,
   };
 
+  const writes = async (tx: DbExecutor) => {
+    await BookingRepository.updateBookingPayment(bookingId, paymentUpdate, tx);
+    if (link?.transferId != null) {
+      await BankTransferRepository.updateTransferStatus(link.transferId, "matched", bookingId, tx);
+    } else if (link?.externalId != null) {
+      await BankTransferRepository.updateTransferStatusByExternalId(link.externalId, "matched", bookingId, tx);
+    }
+  };
+
+  // ─── Post-commit side effects (never inside the transaction) ───────────────
+  const afterCommit = async () => {
+    await Logger.bookingAction(bookingId, "status_change", `Auto-matched bank transfer (Score: ${score})`, `Sender: ${transfer.senderName}, Amount: ${transferAmount} PLN, New Status: ${newStatus}`);
+
+    if (pendingMismatch) {
+      await sendPaymentMismatchEmail(b as any, transferAmount, pendingMismatch);
+    }
+
+    console.log(`[Matcher] Booking #${bookingId} updated: status=${newStatus}, deposit=${newDepositStatus}`);
+  };
+
+  // Enlisted in the caller's transaction: it decides when this is durable, so
+  // the side effects go back to it rather than firing on an uncommitted write.
+  if (executor) {
+    await writes(executor);
+    return afterCommit;
+  }
+
   // Atomic: booking payment + transfer status commit together (or not at all).
   const db = await getDb();
   if (db) {
-    await db.transaction(async (tx) => {
-      await BookingRepository.updateBookingPayment(bookingId, paymentUpdate, tx);
-      if (link?.transferId != null) {
-        await BankTransferRepository.updateTransferStatus(link.transferId, "matched", bookingId, tx);
-      } else if (link?.externalId != null) {
-        await BankTransferRepository.updateTransferStatusByExternalId(link.externalId, "matched", bookingId, tx);
-      }
-    });
+    await db.transaction(async (tx) => writes(tx));
   } else {
     // No DB configured (dev) — best-effort, non-transactional.
     await BookingRepository.updateBookingPayment(bookingId, paymentUpdate);
   }
 
-  // ─── Post-commit side effects (never inside the transaction) ───────────────
-  await Logger.bookingAction(bookingId, "status_change", `Auto-matched bank transfer (Score: ${score})`, `Sender: ${transfer.senderName}, Amount: ${transferAmount} PLN, New Status: ${newStatus}`);
-
-  if (pendingMismatch) {
-    await sendPaymentMismatchEmail(b as any, transferAmount, pendingMismatch);
-  }
-
-  console.log(`[Matcher] Booking #${bookingId} updated: status=${newStatus}, deposit=${newDepositStatus}`);
+  await afterCommit();
 }
 
 /**
  * Reverts a bank transfer match from a booking.
  * Decreases paid amount and potentially reverts status.
+ *
+ * Takes an optional `executor` for the same reason as applyTransferMatch: giving
+ * one booking its money back and crediting another has to be one atomic step,
+ * or a crash between them loses the payment from the books entirely.
  */
 export async function revertTransferMatch(
   bookingId: number,
-  transferAmount: number
-): Promise<void> {
-  const b = await BookingRepository.getBookingById(bookingId);
+  transferAmount: number,
+  executor?: DbExecutor
+): Promise<(() => Promise<void>) | undefined> {
+  const b = await BookingRepository.getBookingById(bookingId, executor);
   if (!b) return;
 
   const currentPaid = parseFloat(String(b.amountPaid || "0"));
@@ -316,9 +341,14 @@ export async function revertTransferMatch(
     // We don't clear transfer fields here as they might be overwritten by a new match soon,
     // but for clarity we can set them to null/undefined if this was the last match.
     // However, updateBookingPayment usually sets them to what's provided.
-  });
+  }, executor);
 
-  await Logger.bookingAction(bookingId, "status_change", `Manual match reversal`, `Removed ${transferAmount} PLN. Status: ${newStatus}`);
+  const afterCommit = async () => {
+    await Logger.bookingAction(bookingId, "status_change", `Manual match reversal`, `Removed ${transferAmount} PLN. Status: ${newStatus}`);
+  };
+
+  if (executor) return afterCommit;
+  await afterCommit();
 }
 
 async function sendPaymentMismatchEmail(booking: any, amount: number, expected: { toBePaid: number; depositReq: number; resFee?: number }) {
