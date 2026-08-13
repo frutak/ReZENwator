@@ -555,6 +555,18 @@ export const bankTransfers = mysqlTable("bank_transfers", {
    * Nullable for the rows that predate it; every new insert sets it.
    */
   contentKey: varchar("contentKey", { length: 64 }).unique(),
+  /**
+   * Who sent the money.
+   *
+   * `amountPaid` is a single figure that does not remember where each złoty came
+   * from, so "what does the guest still owe, and what is the portal still to
+   * send" had to be inferred from the booking's status. Recording the payer at
+   * insert time makes that split a fact instead: the same detection the matcher
+   * already runs on the sender and title, kept rather than thrown away.
+   *
+   * Null on rows that predate it.
+   */
+  source: mysqlEnum("source", ["portal", "guest", "manual"]),
   amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
   senderName: varchar("senderName", { length: 256 }).notNull(),
   transferTitle: varchar("transferTitle", { length: 512 }).notNull(),

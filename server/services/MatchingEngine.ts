@@ -66,7 +66,7 @@ function expectedPayoutDate(channel: string, candidate: CandidateBooking): Date 
 }
 
 /** Which portal, if any, this transfer came from. */
-function payoutSource(transfer: ParsedBankData): string | null {
+export function payoutSource(transfer: ParsedBankData): string | null {
   const text = `${transfer.senderName ?? ""} ${transfer.transferTitle ?? ""}`.toUpperCase();
   if (text.includes("SLOWHOP")) return "slowhop";
   if (text.includes("ALOHACAMP")) return "alohacamp";

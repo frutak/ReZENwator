@@ -24,6 +24,7 @@ function at(day: Date, hour: number) {
 function emptyData(overrides: Record<string, any> = {}) {
   return {
     stalePending: [],
+    unreconciled: [],
     upcomingUnpaid: [],
     upcomingPendingDeposits: [],
     depositsToReturn: [],

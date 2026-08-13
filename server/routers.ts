@@ -460,6 +460,7 @@ const bookingRouter = router({
       const { inserted, duplicateOf } = await BankTransferRepository.insertTransfer({
         externalId: `manual-${contentKey.slice(0, 32)}`,
         contentKey,
+        source: "manual",
         amount: String(parsed.amount),
         senderName: parsed.senderName,
         transferTitle: parsed.transferTitle,

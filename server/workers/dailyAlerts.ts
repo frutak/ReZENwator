@@ -3,6 +3,7 @@ import { getTransporter, GMAIL_USER, sendAlertEmail, sendGuestEmail, getRecipien
 import { processGuestEmails, GuestEmailSummary } from "./guestEmailWorker";
 import { Logger } from "../_core/logger";
 import { BookingRepository } from "../repositories/BookingRepository";
+import { BankTransferRepository } from "../repositories/BankTransferRepository";
 import { SyncRepository } from "../repositories/SyncRepository";
 import { GuestEmailRepository } from "../repositories/GuestEmailRepository";
 import { PortalRepository } from "../repositories/PortalRepository";
@@ -14,6 +15,13 @@ import fs from "fs/promises";
 import path from "path";
 
 const execAsync = promisify(exec);
+
+/**
+ * First day a bank transfer was recorded. Bookings older than this legitimately
+ * carry money with no transfer row behind it, so the reconciliation check does
+ * not look at them — see BankTransferRepository.findUnreconciled.
+ */
+const TRANSFERS_RECORDED_SINCE = new Date("2026-05-01T00:00:00Z");
 
 /**
  * Perform a database backup and cleanup old ones.
@@ -110,6 +118,7 @@ export async function runDailyMaintenance() {
   let failedSyncs: any[] = [];
   let failedGuestEmails: any[] = [];
   let arrivalNotes: any[] = [];
+  let unreconciled: any[] = [];
   let latestSyncs: any[] = [];
   let portalStats: Array<{ page: string, count: number }> = [];
 
@@ -217,6 +226,11 @@ export async function runDailyMaintenance() {
 
       // Today and tomorrow, so an arrangement for a morning arrival is read the
       // evening before rather than on the way to the property.
+      // Two records of the same money: what the booking says it received, and
+      // what the transfers matched to it add up to. Only bookings born after
+      // transfers started being recorded — see findUnreconciled.
+      unreconciled = await BankTransferRepository.findUnreconciled(TRANSFERS_RECORDED_SINCE);
+
       arrivalNotes = await BookingRepository.findArrivalsWithNotes(
         startOfDay(now),
         endOfDay(addDays(now, 1))
@@ -237,6 +251,7 @@ export async function runDailyMaintenance() {
     try {
       emailSent = await sendConsolidatedAlertEmail({
         stalePending,
+        unreconciled,
         upcomingUnpaid,
         upcomingPendingDeposits,
         depositsToReturn,
@@ -289,6 +304,7 @@ export async function runDailyMaintenance() {
 /** Exported for tests: the arrival-notes block is worth asserting on directly. */
 export async function sendConsolidatedAlertEmail(data: {
   stalePending: any[];
+  unreconciled: any[];
   upcomingUnpaid: any[];
   upcomingPendingDeposits: any[];
   depositsToReturn: any[];
@@ -462,6 +478,24 @@ export async function sendConsolidatedAlertEmail(data: {
     `;
   }
 
+  if (data.unreconciled.length > 0) {
+    html += `
+      <h4 style="color:#9f1239;margin-bottom:8px">🔴 Saldo nie zgadza się z przelewami</h4>
+      <p style="font-size:13px;margin:0 0 8px;color:#555">
+        Kwota zapisana na rezerwacji różni się od sumy dopasowanych do niej przelewów.
+        Albo coś zaksięgowano dwa razy, albo wpłata nie ma pokrycia w przelewie.
+      </p>
+      <ul style="font-size:14px;margin-top:0">
+        ${data.unreconciled.map(b => `<li>
+          <strong>${b.property}</strong>: ${getGuestName(b)} (${fmtDate(b.checkIn)}) —
+          na rezerwacji <strong>${b.amountPaid} zł</strong>,
+          w przelewach <strong>${b.transfersTotal} zł</strong> (${b.transferCount})
+          → różnica <strong style="color:#9f1239">${b.discrepancy} zł</strong>
+        </li>`).join("")}
+      </ul>
+    `;
+  }
+
   if (data.stalePending.length > 0) {
     html += `
       <h4 style="color:#9f1239;margin-bottom:8px">⚠️ Stale Pending Bookings (> 48h)</h4>
@@ -508,7 +542,7 @@ export async function sendConsolidatedAlertEmail(data: {
     `;
   }
 
-  if (data.stalePending.length === 0 && data.upcomingUnpaid.length === 0 && data.upcomingPendingDeposits.length === 0 && data.depositsToReturn.length === 0 && data.stalePortalPaid.length === 0) {
+  if (data.stalePending.length === 0 && data.upcomingUnpaid.length === 0 && data.upcomingPendingDeposits.length === 0 && data.depositsToReturn.length === 0 && data.stalePortalPaid.length === 0 && data.unreconciled.length === 0) {
     html += `<p style="font-size:14px">No manual tasks today! 🎉</p>`;
   }
 
@@ -521,16 +555,19 @@ export async function sendConsolidatedAlertEmail(data: {
     </div>
   `;
 
-  const totalItems = data.stalePending.length + data.upcomingUnpaid.length + data.upcomingPendingDeposits.length + data.depositsToReturn.length + data.stalePortalPaid.length + data.bookingsMissingData.length;
+  const totalItems = data.stalePending.length + data.upcomingUnpaid.length + data.upcomingPendingDeposits.length + data.depositsToReturn.length + data.stalePortalPaid.length + data.bookingsMissingData.length + data.unreconciled.length;
   const totalErrors = data.failedSyncs.length + data.failedGuestEmails.length;
   // Called out in the subject: it is the one item that is worthless if read late.
   const notesFlag = data.arrivalNotes.length > 0 ? `📝 ${data.arrivalNotes.length} notatki do przyjazdów — ` : "";
+  // Same reasoning as the arrival notes: a balance that does not match its
+  // transfers is worth seeing before the mail is opened.
+  const moneyFlag = data.unreconciled.length > 0 ? `🔴 ${data.unreconciled.length} rezerwacji z niezgodnym saldem — ` : "";
 
   try {
     await transporter.sendMail({
       from: `"ReZENwator" <${GMAIL_USER}>`,
       to: adminEmail,
-      subject: `${notesFlag}📅 Daily Report: ${totalErrors} errors, ${data.guestEmailSummary.sentCount} emails sent, ${totalItems} tasks`,
+      subject: `${moneyFlag}${notesFlag}📅 Daily Report: ${totalErrors} errors, ${data.guestEmailSummary.sentCount} emails sent, ${totalItems} tasks`,
       html,
     });
     console.log(`[DailyAlerts] Consolidated email sent to ${adminEmail}`);

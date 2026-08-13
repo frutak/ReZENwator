@@ -2,7 +2,7 @@ import { ENV } from "../_core/env";
 import Imap from "imap";
 import { simpleParser } from "mailparser";
 import { BookingRepository } from "../repositories/BookingRepository";
-import { BankTransferRepository, transferContentKey } from "../repositories/BankTransferRepository";
+import { BankTransferRepository, transferContentKey, classifyTransferSource } from "../repositories/BankTransferRepository";
 import { qualifyEmail, QualifiedEmail, ParsedBookingData, ParsedBankData } from "./emailParsers";
 import { findMatchingBookings, applyTransferMatch } from "./bookingMatcher";
 import { extractDisplayName, extractEmailAddress, matchBookingForEmail } from "./guestReplyMatcher";
@@ -433,6 +433,8 @@ export async function handleBankTransfer(data: ParsedBankData | null, email: any
         // Identifies the payment rather than the message that carried it, so a
         // second notification of the same transfer cannot be applied again.
         contentKey: transferContentKey(data),
+        // Portal forward or the guest paying directly — read from the sender.
+        source: classifyTransferSource(data),
         amount: String(data.amount),
         senderName: data.senderName,
         transferTitle: data.transferTitle,
