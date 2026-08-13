@@ -3,6 +3,7 @@ import { enUS } from "date-fns/locale";
 import type { Booking } from "../../drizzle/schema";
 import { predictFirstName, getGuestName } from "../_core/utils";
 import { ENV } from "../_core/env";
+import { calculateAmountsDue } from "@shared/utils";
 
 export type GuestEmailType =
   | "booking_pending"
@@ -41,11 +42,13 @@ export class EmailTemplateService {
     const arrivalTimeEN = isEarlyArrival ? "from the morning" : "from 4 PM";
 
     const needsPaymentInfo = !["airbnb", "booking"].includes(booking.channel);
-    const totalPrice = parseFloat(String(booking.totalPrice || "0"));
-    const amountPaid = parseFloat(String(booking.amountPaid || "0"));
-    const remaining = totalPrice - amountPaid;
+    // What the GUEST still owes — never the account balance. On a portal booking
+    // the two differ by the forward the portal has yet to send, and `amountPaid`
+    // excludes the zaliczka the guest already paid the portal. Quoting
+    // totalPrice − amountPaid asked Maria Satsiuk (#172) for 1238.30 zł when she
+    // owed 980, and the owner had to correct it by hand.
+    const { guestStayDue: remaining, depositDue } = calculateAmountsDue(booking);
     const deposit = parseFloat(String(booking.depositAmount || "500"));
-    const includeDepositInRemaining = booking.depositStatus !== "paid" && booking.depositStatus !== "returned";
 
     // Pet fee goes to every channel, not just Booking.com.
     //
@@ -68,7 +71,7 @@ export class EmailTemplateService {
     let paymentHtml = "";
     if (needsPaymentInfo) {
       const isBalanceMissing = remaining > 0;
-      const isDepositMissing = includeDepositInRemaining;
+      const isDepositMissing = depositDue > 0;
       const deadline = isSadoles 
         ? (isPL ? "najlepiej tak na 5 dni przed Waszym przyjazdem" : "preferably 5 days before your arrival")
         : (isPL ? "tak najpóźniej tydzień przed Waszym przyjazdem" : "at the latest one week before your arrival");

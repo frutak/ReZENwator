@@ -193,4 +193,107 @@ describe("MatchingEngine", () => {
       expect(results[0].score).toBeGreaterThanOrEqual(80);
     });
   });
+
+  // Each portal pays on its own clock, and the transfer date is evidence in its
+  // own right: Slowhop forwards the zaliczka within days of the booking, Airbnb
+  // pays on the second day of the stay, Booking.com about 5 business days after
+  // checkout. Judging those by their distance from check-in — the generic rule —
+  // scores a Slowhop forward sent months ahead at 5 points out of 100.
+  describe("payout timing", () => {
+    const hacjenda = (over: Partial<CandidateBooking>): CandidateBooking => ({
+      id: 900,
+      guestName: "Maria Satsiuk",
+      companyName: null,
+      checkIn: new Date("2026-08-23T14:00:00Z"),
+      checkOut: new Date("2026-08-24T08:00:00Z"),
+      createdAt: new Date("2026-07-20T19:30:00Z"),
+      channel: "slowhop",
+      property: "Hacjenda",
+      totalPrice: "1400.00",
+      amountPaid: "0.00",
+      hostRevenue: "1141.70",
+      commission: "258.30",
+      reservationFee: "420.00",
+      depositAmount: "500.00",
+      icalUid: "uid-172",
+      icalSummary: "Maria - 1345090",
+      status: "confirmed",
+      ...over,
+    });
+
+    it("credits a Slowhop forward that lands days after the booking", () => {
+      // Booking made 20.07, forward on the account 21.07 — a month before the
+      // stay, so proximity to check-in says almost nothing.
+      const transfer = {
+        amount: 161.7,
+        senderName: "SLOWHOP SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+        transferTitle: "Slowhop przedplaty id: 1345090",
+        transferDate: new Date("2026-07-21T12:00:00Z"),
+        currency: "PLN",
+        accountNumber: "123",
+      } as ParsedBankData;
+
+      const [best] = MatchingEngine.scoreCandidates(transfer, [hacjenda({})], false);
+      expect(best.reasons.some((r) => r.includes("when slowhop pays"))).toBe(true);
+      expect(best.score).toBeGreaterThanOrEqual(80);
+    });
+
+    it("does not credit the timing of a forward that arrives months late", () => {
+      const transfer = {
+        amount: 161.7,
+        senderName: "SLOWHOP SPÓŁKA Z OGRANICZONĄ ODPOWIEDZIALNOŚCIĄ",
+        transferTitle: "Slowhop przedplaty id: 1345090",
+        transferDate: new Date("2026-08-22T12:00:00Z"),
+        currency: "PLN",
+        accountNumber: "123",
+      } as ParsedBankData;
+
+      const [best] = MatchingEngine.scoreCandidates(transfer, [hacjenda({})], false);
+      expect(best.reasons.some((r) => r.includes("slowhop pays"))).toBe(false);
+    });
+
+    it("leaves a guest's own transfer judged by the arrival date", () => {
+      // The timing rule is for portal payouts only — a guest paying shortly
+      // before check-in must not be scored against the portal's clock.
+      const transfer = {
+        amount: 980,
+        senderName: "MARIA SATSIUK",
+        transferTitle: "Hacjenda 23.08",
+        transferDate: new Date("2026-08-18T12:00:00Z"),
+        currency: "PLN",
+        accountNumber: "123",
+      } as ParsedBankData;
+
+      const [best] = MatchingEngine.scoreCandidates(transfer, [hacjenda({})], false);
+      expect(best.reasons.some((r) => r.includes("pays"))).toBe(false);
+      expect(best.score).toBeGreaterThanOrEqual(80);
+    });
+
+    it("breaks a tie between identically priced Booking.com stays on the payout date", () => {
+      // Two stays at the same price: only the payout clock separates them, and
+      // Booking.com pays about 5 business days after checkout.
+      const base: CandidateBooking = hacjenda({
+        channel: "booking",
+        status: "portal_paid",
+        reservationFee: null,
+        hostRevenue: "1003.20",
+        totalPrice: "1200.00",
+      });
+      const earlier = { ...base, id: 801, checkIn: new Date("2026-04-02T14:00:00Z"), checkOut: new Date("2026-04-03T08:00:00Z") };
+      const later = { ...base, id: 802, checkIn: new Date("2026-06-10T14:00:00Z"), checkOut: new Date("2026-06-11T08:00:00Z") };
+
+      const transfer = {
+        amount: 1003.2,
+        senderName: "BOOKING.COM B.V",
+        transferTitle: "NO.RWDHLYJFKNMSCLDS/13416371",
+        transferDate: new Date("2026-06-17T12:00:00Z"),
+        currency: "PLN",
+        accountNumber: "123",
+      } as ParsedBankData;
+
+      const results = MatchingEngine.scoreCandidates(transfer, [earlier, later], true);
+      // The old tie-break took the earliest check-in and would have picked #801.
+      expect(results[0].bookingId).toBe(802);
+    });
+  });
 });

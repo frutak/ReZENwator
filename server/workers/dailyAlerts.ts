@@ -7,7 +7,7 @@ import { SyncRepository } from "../repositories/SyncRepository";
 import { GuestEmailRepository } from "../repositories/GuestEmailRepository";
 import { PortalRepository } from "../repositories/PortalRepository";
 import { getGuestName } from "../_core/utils/booking";
-import { calculateBalanceDue } from "@shared/utils";
+import { calculateAmountsDue } from "@shared/utils";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -208,7 +208,7 @@ export async function runDailyMaintenance() {
     // ─── 4. Identify alerts and errors ──────────────────────────────────────────
     try {
       stalePending = await BookingRepository.findStalePending(twoDaysAgo, fiveDaysAgo);
-      upcomingUnpaid = (await BookingRepository.findUpcomingUnpaid(oneWeekFromNow, now)).filter(b => calculateBalanceDue(b as any, false) > 1.0);
+      upcomingUnpaid = (await BookingRepository.findUpcomingUnpaid(oneWeekFromNow, now)).filter(b => calculateAmountsDue(b as any).stayDue > 1.0);
       upcomingPendingDeposits = await BookingRepository.findUpcomingPendingDeposits(oneWeekFromNow, now);
       depositsToReturn = await BookingRepository.findDepositsToReturn();
 

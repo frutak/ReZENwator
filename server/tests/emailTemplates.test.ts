@@ -268,4 +268,70 @@ describe("Email Template Dynamic Population", () => {
 
     expect(sendMailMock.mock.calls[0][0].html).toContain("nie mamy zgłoszonego żadnego zwierzaka");
   });
+
+  // A portal guest owes the owner the stay minus the zaliczka they already paid
+  // the portal — never totalPrice minus what the owner's account has received.
+  // The two differ by the portal's forward, and quoting the second is how
+  // booking #172 asked Maria Satsiuk for 1238.30 zł when she owed 980.
+  it("asks a Slowhop guest for the balance the portal itself states", async () => {
+    const satsiuk = {
+      ...mockBooking,
+      channel: "slowhop" as const,
+      property: "Hacjenda" as const,
+      totalPrice: "1400.00",
+      reservationFee: "420.00",
+      commission: "258.30",
+      hostRevenue: "1141.70",
+      amountPaid: "161.70", // the portal's forward, already received
+      depositStatus: "pending" as const,
+    };
+
+    await sendGuestEmail("arrival_reminder", satsiuk, { isEarlyArrival: false });
+
+    const sentHtml = sendMailMock.mock.calls[0][0].html;
+    // "Pozostała kwota do zapłaty: 980 pln", exactly as the Slowhop mail says.
+    expect(sentHtml).toContain("980 zł oraz 500 zł depozytu");
+    expect(sentHtml).not.toContain("1238.3");
+  });
+
+  it("leaves the portal's own forward out of what it asks an Alohacamp guest for", async () => {
+    // Booking #181 before anything has arrived: the account is waiting for
+    // 2701.85, of which 176.85 is Alohacamp's to send, not the guest's.
+    const kozachenko = {
+      ...mockBooking,
+      channel: "alohacamp" as const,
+      status: "pending" as const,
+      totalPrice: "2700.00",
+      reservationFee: "675.00",
+      commission: "498.15",
+      hostRevenue: "2201.85",
+      amountPaid: "0.00",
+      depositStatus: "pending" as const,
+    };
+
+    await sendGuestEmail("arrival_reminder", kozachenko, { isEarlyArrival: false });
+
+    const sentHtml = sendMailMock.mock.calls[0][0].html;
+    expect(sentHtml).toContain("2025 zł oraz 500 zł depozytu");
+    expect(sentHtml).not.toContain("2700 zł oraz");
+  });
+
+  it("asks only for the kaucja once the stay itself is settled", async () => {
+    const settled = {
+      ...mockBooking,
+      channel: "slowhop" as const,
+      status: "paid" as const,
+      totalPrice: "1400.00",
+      reservationFee: "420.00",
+      hostRevenue: "1141.70",
+      amountPaid: "1141.70",
+      depositStatus: "pending" as const,
+    };
+
+    await sendGuestEmail("arrival_reminder", settled, { isEarlyArrival: false });
+
+    const sentHtml = sendMailMock.mock.calls[0][0].html;
+    expect(sentHtml).toContain("przelew depozytu 500 zł");
+    expect(sentHtml).not.toContain("reszty kwoty");
+  });
 });

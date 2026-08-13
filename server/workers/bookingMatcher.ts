@@ -18,7 +18,7 @@ import { Logger } from "../_core/logger";
 import { ENV } from "../_core/env";
 import { type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
 import { MatchingEngine, type MatchResult } from "../services/MatchingEngine";
-import { calculateBalanceDue } from "@shared/utils";
+import { calculateBalanceDue, calculateAmountsDue } from "@shared/utils";
 
 /**
  * Scores how well a bank transfer matches a candidate booking.
@@ -270,27 +270,43 @@ export async function revertTransferMatch(
   let newStatus = b.status;
   let newDepositStatus = b.depositStatus;
 
-  const totalPrice = parseFloat(String(b.totalPrice || "0"));
   const depositReq = parseFloat(String(b.depositAmount || "500.00"));
+
+  // Revert deposit status if the removed amount matches deposit. This runs
+  // first: whether the kaucja is still held decides how much of `newPaid`
+  // counts towards the stay below.
+  if (Math.abs(transferAmount - depositReq) < 1.0) {
+    newDepositStatus = "pending";
+  }
 
   if (b.channel === "airbnb" || b.channel === "booking") {
     // If it was paid but now we removed the transfer, it goes back to portal_paid
     if (b.status === "paid") {
       newStatus = "portal_paid";
     }
-  } else if (b.channel === "slowhop") {
-    if (newPaid < 10) { // Practically zero
-      newStatus = "confirmed";
-    }
-  } else if (b.channel === "direct") {
-    if (newPaid < 10) {
-      newStatus = "confirmed";
-    }
-  }
+  } else {
+    // slowhop, alohacamp and direct all settle onto the owner's own account, so
+    // `paid` holds only while the money for the stay is still sitting there.
+    //
+    // Alohacamp used to fall through this chain entirely — reverting a match
+    // took the money off the booking and left it marked `paid`. Slowhop and
+    // direct only recovered when the booking was emptied to under 10 zł, so
+    // pulling the guest's balance off a Slowhop stay left it `paid` on the
+    // strength of the portal's 161.70 forward alone.
+    const stillOwed = calculateAmountsDue({
+      channel: b.channel,
+      status: b.status,
+      totalPrice: b.totalPrice,
+      hostRevenue: b.hostRevenue,
+      reservationFee: b.reservationFee,
+      amountPaid: String(newPaid),
+      depositAmount: b.depositAmount,
+      depositStatus: newDepositStatus,
+    }).stayDue;
 
-  // Revert deposit status if the removed amount matches deposit
-  if (Math.abs(transferAmount - depositReq) < 1.0) {
-    newDepositStatus = "pending";
+    if (stillOwed > 1.0 && b.status === "paid") {
+      newStatus = "confirmed";
+    }
   }
 
   await BookingRepository.updateBookingPayment(bookingId, {

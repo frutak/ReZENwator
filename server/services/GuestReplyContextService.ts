@@ -6,6 +6,7 @@ import type { Booking } from "../../drizzle/schema";
 import { ENV } from "../_core/env";
 import { getGuestName } from "../_core/utils/booking";
 import type { Property } from "@shared/config";
+import { calculateAmountsDue } from "@shared/utils";
 
 const KNOWLEDGE_DIR = path.resolve(process.cwd(), "knowledge");
 
@@ -90,7 +91,12 @@ export function buildFactSheet(booking: Booking, options: FactSheetOptions = {})
   const paid = money(booking.amountPaid) ?? 0;
   const deposit = money(booking.depositAmount);
   const currency = booking.currency ?? "PLN";
-  const remaining = total === null ? null : Math.max(total - paid, 0);
+  // What the guest still owes, which on a portal booking is not the account
+  // balance: `amountPaid` counts only money that reached the owner and excludes
+  // the zaliczka the guest paid the portal, while part of what is still due may
+  // be the portal's forward rather than the guest's to send.
+  const due = calculateAmountsDue(booking);
+  const prepaidToPortal = money(booking.reservationFee) ?? 0;
 
   const stayPhase =
     checkOut < now ? "pobyt zakończony" : checkIn > now ? "pobyt jeszcze przed nami" : "gość jest teraz na miejscu";
@@ -121,8 +127,18 @@ export function buildFactSheet(booking: Booking, options: FactSheetOptions = {})
     `- Zwierzęta zgłoszone przy rezerwacji: ${booking.animalsCount ?? 0}`,
     "",
     `- Kwota całkowita: ${total === null ? "brak danych" : `${total.toFixed(2)} ${currency}`}`,
-    `- Wpłacono do tej pory: ${paid.toFixed(2)} ${currency}`,
-    `- Pozostało do zapłaty: ${remaining === null ? "brak danych" : `${remaining.toFixed(2)} ${currency}`}`,
+    prepaidToPortal > 0
+      ? `- Zaliczka zapłacona portalowi: ${prepaidToPortal.toFixed(2)} ${currency} — gość ma ją już z głowy, na nasze konto trafia pomniejszona o prowizję`
+      : null,
+    `- Wpłynęło na nasze konto: ${paid.toFixed(2)} ${currency}` +
+      (prepaidToPortal > 0 ? " (łącznie z przelewem portalu — to NIE jest to, co wpłacił gość)" : ""),
+    `- Pozostało do zapłaty przez gościa: ${total === null ? "brak danych" : `${due.guestStayDue.toFixed(2)} ${currency}`}`,
+    total !== null && due.depositDue > 0
+      ? `- Razem z depozytem gość ma do zapłaty: ${due.guestDue.toFixed(2)} ${currency}`
+      : null,
+    due.portalDue > 0
+      ? `- Czekamy jeszcze na przelew od portalu: ${due.portalDue.toFixed(2)} ${currency} — tego NIE żądamy od gościa`
+      : null,
     `- Depozyt: ${deposit === null ? "brak danych" : `${deposit.toFixed(2)} ${currency}`}, status: ${booking.depositStatus}`,
     `- Numer konta do wpłat: ${ENV.bankAccountNumber}`,
     `- Nazwisko do przelewu: ${ENV.ownerName}`,

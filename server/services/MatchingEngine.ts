@@ -7,6 +7,8 @@ export interface CandidateBooking {
   companyName: string | null;
   checkIn: Date;
   checkOut: Date;
+  /** When the booking entered the system — the anchor for a portal's forward. */
+  createdAt?: Date | string | null;
   channel: string;
   property: string;
   totalPrice: string | null;
@@ -25,6 +27,81 @@ export interface MatchResult {
   score: number;
   booking: CandidateBooking;
   reasons: string[];
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * When each channel's money is actually due to land.
+ *
+ *   Slowhop / Alohacamp — the forward of the zaliczka goes out at most 2 days
+ *     after the reservation is made, plus a business day to arrive (Slowhop runs
+ *     payouts around Mon/Wed/Fri). It lands within days of the booking, normally
+ *     months before check-in.
+ *   Airbnb — the payout is sent on the second day of the stay (check-in + 1) and
+ *     is usually credited the next day.
+ *   Booking.com — pays the whole stay about 5 business days after checkout; the
+ *     transfers originate in NL/LU, so their holidays shift it a day or two.
+ *
+ * Scoring a portal payout by its distance from check-in — the generic rule —
+ * gets all three wrong: a Slowhop forward can precede check-in by months (5
+ * points, "very far in range") and a Booking.com payout follows checkout by a
+ * week. Anchoring each to the date its own channel pays on turns a near-useless
+ * date signal into a decisive one.
+ */
+function expectedPayoutDate(channel: string, candidate: CandidateBooking): Date | null {
+  switch (channel) {
+    case "slowhop":
+    case "alohacamp": {
+      if (!candidate.createdAt) return null;
+      return new Date(new Date(candidate.createdAt).getTime() + 2 * DAY_MS);
+    }
+    case "airbnb":
+      return new Date(new Date(candidate.checkIn).getTime() + DAY_MS);
+    case "booking":
+      return new Date(new Date(candidate.checkOut).getTime() + 6 * DAY_MS);
+    default:
+      return null;
+  }
+}
+
+/** Which portal, if any, this transfer came from. */
+function payoutSource(transfer: ParsedBankData): string | null {
+  const text = `${transfer.senderName ?? ""} ${transfer.transferTitle ?? ""}`.toUpperCase();
+  if (text.includes("SLOWHOP")) return "slowhop";
+  if (text.includes("ALOHACAMP")) return "alohacamp";
+  if (text.includes("AIRBNB") || text.includes("PAYONEER")) return "airbnb";
+  if (text.includes("BOOKING.COM")) return "booking";
+  return null;
+}
+
+/**
+ * How well a transfer's date fits the payout clock of the channel it came from.
+ * Returns 0 for anything that is not a portal payout — a guest's own transfer is
+ * still judged by its proximity to check-in.
+ */
+function payoutTimingScore(
+  transfer: ParsedBankData,
+  candidate: CandidateBooking
+): { score: number; reason?: string } {
+  const source = payoutSource(transfer);
+  if (!source || source !== candidate.channel || !transfer.transferDate) return { score: 0 };
+
+  const expected = expectedPayoutDate(source, candidate);
+  if (!expected) return { score: 0 };
+
+  const diffDays = Math.abs(transfer.transferDate.getTime() - expected.getTime()) / DAY_MS;
+  const label =
+    source === "slowhop" || source === "alohacamp"
+      ? "just after the booking was made"
+      : source === "airbnb"
+        ? "on the second day of the stay"
+        : "days after checkout";
+
+  // Slack: bank holidays and the portals' own payout days move the date around.
+  if (diffDays <= 4) return { score: 100, reason: `Payout landed when ${source} pays — ${label}` };
+  if (diffDays <= 10) return { score: 70, reason: `Payout landed near ${source}'s usual date — ${label}` };
+  return { score: 0 };
 }
 
 export class MatchingEngine {
@@ -49,10 +126,17 @@ export class MatchingEngine {
           const revB = parseFloat(String(b.hostRevenue || "0"));
           const diffA = Math.abs(transfer.amount - revA);
           const diffB = Math.abs(transfer.amount - revB);
-          
-          // If the difference in amount is negligible (less than 0.01 PLN), 
-          // use the earliest check-in date as a tie-breaker.
+
+          // If the difference in amount is negligible (less than 0.01 PLN), the
+          // payout clock decides: Airbnb pays on day 2 of the stay and
+          // Booking.com about 5 business days after checkout, so the booking
+          // whose own payout date sits closest to this transfer wins. Two stays
+          // priced identically are otherwise indistinguishable, and the old
+          // tie-break — earliest check-in — picked by nothing but age.
           if (Math.abs(diffA - diffB) < 0.01) {
+            const timingA = payoutTimingScore(transfer, a).score;
+            const timingB = payoutTimingScore(transfer, b).score;
+            if (timingA !== timingB) return timingB - timingA;
             return a.checkIn.getTime() - b.checkIn.getTime();
           }
           return diffA - diffB;
@@ -388,7 +472,11 @@ export class MatchingEngine {
       amountScore = 40;
     }
 
-    const finalDateScore = Math.max(dateScore, titleDateMatch);
+    // A portal payout is dated by its own clock, not by the guest's arrival.
+    const timing = payoutTimingScore(transfer, candidate);
+    if (timing.reason) reasons.push(timing.reason);
+
+    const finalDateScore = Math.max(dateScore, titleDateMatch, timing.score);
     let score = Math.round(finalNameScore * 0.4 + finalDateScore * 0.1 + amountScore * 0.5) + bonus;
 
     if (reasons.some(r => r.includes("Shared surname")) && amountScore === 100) {

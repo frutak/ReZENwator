@@ -55,50 +55,105 @@ export function normalizeDecimalFields<T extends Record<string, any>>(details: T
   return normalized;
 }
 
-/**
- * Calculates the balance due for a booking.
- *
- * `amountPaid` is always money that reached the owner's account — never what a
- * guest has paid a portal. So the balance is what the owner is still owed, from
- * every source combined: on a 2700 zł Alohacamp stay with a 675 zł zaliczka that
- * is 176.85 (the portal's forward of the zaliczka less its commission) + 2025
- * (the guest's balance, paid to the owner directly) + 500 (kaucja) = 2701.85,
- * dropping as each of those lands.
- *
- * Logic:
- * - hostRevenue - amountPaid, falling back to totalPrice when no net revenue is
- *   known (direct bookings, where the two are the same)
- * - Optional: include deposit if not returned
- */
-export function calculateBalanceDue(booking: {
+/** The shape every "what is still owed" question is answered from. */
+export interface BookingAmounts {
   channel: string;
+  status?: string | null;
   totalPrice: string | number | null;
   hostRevenue: string | number | null;
   amountPaid: string | number | null;
+  reservationFee?: string | number | null;
   depositAmount?: string | number | null;
   depositStatus?: string | null;
-}, includeDeposit = false): number {
-  const channel = booking.channel;
+}
+
+/**
+ * What is still owed on a booking, split by who owes it.
+ *
+ * One number cannot answer both questions the app asks. "How much is still to
+ * reach the account" and "how much should we ask the guest for" differ whenever
+ * a portal's forward is in flight: on Alohacamp #181 the account is waiting for
+ * 2701.85 while the guest owes 2525, because 176.85 is Alohacamp's to send. Ask
+ * the guest for the account figure and the mail overcharges them.
+ *
+ * The kaucja enters in two distinct roles, and conflating them is what made the
+ * old boolean flag wrong: while `pending` it is a debt still to be collected;
+ * once `paid` it is money sitting inside `amountPaid`, which has to be added
+ * back before comparing against `hostRevenue` — otherwise a received kaucja
+ * silently nets off an outstanding payout. Both roles are named here, so the
+ * answer no longer depends on whether the kaucja has landed.
+ */
+export interface AmountsDue {
+  /** The guest's own share of the stay, still to be transferred to the owner. */
+  guestStayDue: number;
+  /** The portal's forward (or payout), still to arrive. */
+  portalDue: number;
+  /** The kaucja, if it is still to be collected. */
+  depositDue: number;
+  /** guestStayDue + portalDue — everything still owed for the stay itself. */
+  stayDue: number;
+  /** stayDue + depositDue — what the account is still waiting for. */
+  accountDue: number;
+  /** guestStayDue + depositDue — what to ask the guest for. */
+  guestDue: number;
+}
+
+export function calculateAmountsDue(booking: BookingAmounts): AmountsDue {
   const totalPrice = parseFloat(String(booking.totalPrice || "0"));
   const hostRevenue = parseFloat(String(booking.hostRevenue || "0"));
   const amountPaid = parseFloat(String(booking.amountPaid || "0"));
+  const reservationFee = parseFloat(String(booking.reservationFee || "0"));
   const depositAmount = parseFloat(String(booking.depositAmount || "500.00"));
 
-  // The "base amount" we expect to receive is the hostRevenue if defined,
-  // otherwise it's the totalPrice. This handles all channels:
-  // - Direct: hostRevenue usually equals totalPrice (or is null, falling back to totalPrice)
-  // - Airbnb/Booking: hostRevenue is price minus commission
-  // - Slowhop/Alohacamp: hostRevenue is what the portal and the guest together
-  //   still have to transfer to the owner
-  const baseAmount = (hostRevenue > 0) ? hostRevenue : totalPrice;
+  // What we expect to receive in total is hostRevenue where it is known,
+  // otherwise totalPrice — direct bookings, where the two are the same.
+  const baseAmount = hostRevenue > 0 ? hostRevenue : totalPrice;
 
-  let balance = baseAmount - amountPaid;
+  const depositHeld = booking.depositStatus === "paid" ? depositAmount : 0;
+  const depositDue = booking.depositStatus === "pending" ? depositAmount : 0;
 
-  if (includeDeposit) {
-    if (booking.depositStatus === "pending" || booking.depositStatus === "paid") {
-      balance += depositAmount;
-    }
-  }
+  const stayDue = Math.max(0, baseAmount + depositHeld - amountPaid);
 
-  return Math.max(0, balance);
+  // Slowhop and Alohacamp settle in two steps, so part of what is still due may
+  // be the portal's, not the guest's. Airbnb and Booking.com collect the whole
+  // stay themselves — their guest owes the owner nothing.
+  const twoStepPortal =
+    (booking.channel === "slowhop" || booking.channel === "alohacamp") && reservationFee > 0;
+  const guestSettlesWithPortal = booking.channel === "airbnb" || booking.channel === "booking";
+  const staySettled = booking.status === "paid" || booking.status === "finished";
+
+  // `amountPaid` is a single figure that does not record who paid it, so the
+  // guest's share is read from what they were asked for and whether the booking
+  // has been marked settled — which the matcher does exactly when their balance
+  // lands. Tagging inflows by sender would make this exact rather than derived.
+  const guestStayDue =
+    staySettled || guestSettlesWithPortal
+      ? 0
+      : twoStepPortal
+        ? Math.max(0, totalPrice - reservationFee)
+        : stayDue;
+
+  const portalDue = Math.max(0, stayDue - guestStayDue);
+
+  return {
+    guestStayDue,
+    portalDue,
+    depositDue,
+    stayDue,
+    accountDue: stayDue + depositDue,
+    guestDue: guestStayDue + depositDue,
+  };
+}
+
+/**
+ * Balance due, in the older two-value form.
+ *
+ * `includeDeposit` picks between the two totals of {@link calculateAmountsDue}:
+ * the stay alone, or the stay plus a kaucja still to collect. Prefer calling
+ * `calculateAmountsDue` directly — a caller that means "what should the guest
+ * pay" wants `guestDue`, which neither of these two answers.
+ */
+export function calculateBalanceDue(booking: BookingAmounts, includeDeposit = false): number {
+  const due = calculateAmountsDue(booking);
+  return includeDeposit ? due.accountDue : due.stayDue;
 }

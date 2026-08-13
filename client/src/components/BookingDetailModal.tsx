@@ -47,7 +47,7 @@ import { format, addDays, setHours, setMinutes } from "date-fns";
 import { Booking } from "@shared/types";
 import { StatusBadge, DepositBadge } from "@/components/ui/badges";
 import { cn } from "@/lib/utils";
-import { calculateBalanceDue } from "@shared/utils";
+import { calculateAmountsDue } from "@shared/utils";
 
 // ─── Activity Item Component ───────────────────────────────────────────────────
 
@@ -241,15 +241,19 @@ export default function BookingDetailModal({
   );
 
   const toBePaid = useMemo(() => {
-    return calculateBalanceDue({
+    return calculateAmountsDue({
       channel: form.channel,
+      status: form.status,
       totalPrice: form.totalPrice,
       hostRevenue: form.hostRevenue,
       amountPaid: form.amountPaid,
       depositAmount: form.depositAmount,
       depositStatus: form.depositStatus,
-    }, true).toFixed(2);
-  }, [form.hostRevenue, form.totalPrice, form.amountPaid, form.depositAmount, form.depositStatus, form.channel]);
+      // `accountDue` — what the account is still waiting for, from every source.
+      // Not what to ask the guest for: that is `guestDue`, which the guest mails
+      // use and which excludes a portal forward still in flight.
+    }).accountDue.toFixed(2);
+  }, [form.hostRevenue, form.totalPrice, form.amountPaid, form.depositAmount, form.depositStatus, form.channel, form.status]);
 
   const handleSave = () => {
     const parseDateTime = (dateStr: string, timeStr: string) => {
