@@ -296,4 +296,72 @@ describe("MatchingEngine", () => {
       expect(results[0].bookingId).toBe(802);
     });
   });
+
+  // The Airbnb payout of 24.05.2026 went to the wrong stay, and the reason was
+  // not the scoring but the filter in front of it: booking #77 had been marked
+  // paid by hand, which at the time wrote the amount onto the booking and left
+  // no transfer row. A booking that already looks paid is skipped so a payout
+  // cannot land twice — but "paid" with nothing behind it is a claim, and
+  // skipping it left #76 as the only Hacjenda stay at the same price.
+  describe("a balance with no transfer behind it", () => {
+    const hacjenda = (over: Partial<CandidateBooking>): CandidateBooking => ({
+      id: 0,
+      guestName: null,
+      companyName: null,
+      checkIn: new Date("2026-05-22T14:00:00Z"),
+      checkOut: new Date("2026-05-23T08:00:00Z"),
+      createdAt: new Date("2026-04-21T11:00:00Z"),
+      channel: "airbnb",
+      property: "Hacjenda",
+      totalPrice: "1600.00",
+      amountPaid: "0.00",
+      hostRevenue: "1352.00",
+      commission: "0.00",
+      reservationFee: null,
+      depositAmount: "500.00",
+      icalUid: null,
+      icalSummary: null,
+      status: "portal_paid",
+      ...over,
+    });
+
+    const payout = {
+      amount: 1352,
+      senderName: "Airbnb 888 Brannan St. 94103 San Fr",
+      transferTitle: "/ref/281475509872576/Airbnb Payments Luxembourg S.A.",
+      transferDate: new Date("2026-05-24T12:00:00Z"),
+      currency: "PLN",
+      accountNumber: "123",
+    } as ParsedBankData;
+
+    /** #77 Maćkowiak, 22–23.05 — paid by hand, no transfer recorded. */
+    const claimedPaid = hacjenda({ id: 77, guestName: "Katarzyna Maćkowiak", amountPaid: "1352.00", matchedTransferCount: 0 });
+    /** #76 Kuś, 13–14.06 — same price, its own payout still weeks away. */
+    const neighbour = hacjenda({
+      id: 76,
+      guestName: "Natalia Kuś",
+      checkIn: new Date("2026-06-13T14:00:00Z"),
+      checkOut: new Date("2026-06-14T08:00:00Z"),
+      matchedTransferCount: 0,
+    });
+
+    it("still considers the booking, and the payout date picks it", () => {
+      const results = MatchingEngine.scoreCandidates(payout, [claimedPaid, neighbour], true);
+      // Airbnb pays on day 2: 23.05 for #77, 14.06 for #76.
+      expect(results[0].bookingId).toBe(77);
+    });
+
+    it("keeps skipping one whose balance a real transfer already backs", () => {
+      const settled = { ...claimedPaid, matchedTransferCount: 1 };
+      const results = MatchingEngine.scoreCandidates(payout, [settled, neighbour], true);
+      // Its money is accounted for, so the payout must not be applied again.
+      expect(results.every((r) => r.bookingId !== 77)).toBe(true);
+    });
+
+    it("treats an unstated count as backed, so other callers keep their behaviour", () => {
+      const { matchedTransferCount, ...withoutCount } = claimedPaid;
+      const results = MatchingEngine.scoreCandidates(payout, [withoutCount as CandidateBooking, neighbour], true);
+      expect(results.every((r) => r.bookingId !== 77)).toBe(true);
+    });
+  });
 });

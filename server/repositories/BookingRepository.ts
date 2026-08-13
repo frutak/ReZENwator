@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte, ne, inArray, or, sql, isNull, isNotNull, lt, notInArray } from "drizzle-orm";
+import { and, desc, eq, gte, lte, ne, inArray, or, sql, isNull, isNotNull, lt, notInArray, getTableColumns } from "drizzle-orm";
 import { format, startOfDay, differenceInCalendarMonths, startOfMonth, addMonths, differenceInCalendarDays, eachWeekendOfInterval, isAfter, startOfYear, endOfYear } from "date-fns";
 import { getDb, type DbExecutor } from "../db";
 import { bookings, bookingActivities, expenses, monthlyAdjustments } from "../../drizzle/schema";
@@ -224,10 +224,28 @@ export class BookingRepository {
     };
   }
 
+  /**
+   * Candidates for a portal payout, each carrying how many transfers already
+   * back its balance.
+   *
+   * The scorer skips a booking that already looks fully paid, so it cannot be
+   * paid twice. But "paid" on a booking whose money was typed in by hand is a
+   * claim with nothing behind it, and skipping those is how the Airbnb payout of
+   * 24.05.2026 landed on booking #76: #77 had been marked paid by hand, went
+   * invisible, and #76 was the only stay left at the same price. Counting the
+   * transfers lets the scorer tell a balance it has seen the money for from one
+   * it has only been told about.
+   */
   static async findPortalPayoutCandidates(channel: Channel, windowStart: Date, windowEnd: Date, testMode = false) {
     const db = await getDb();
     if (!db) return [];
-    return db.select().from(bookings).where(
+    return db.select({
+      ...getTableColumns(bookings),
+      matchedTransferCount: sql<number>`(
+        SELECT COUNT(*) FROM bank_transfers bt
+         WHERE bt.matchedBookingId = ${bookings.id} AND bt.status = 'matched'
+      )`,
+    }).from(bookings).where(
       and(
         eq(bookings.channel, channel),
         testMode ? undefined : inArray(bookings.status, ["portal_paid", "confirmed", "finished"]),

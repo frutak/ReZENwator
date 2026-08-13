@@ -9,6 +9,12 @@ export interface CandidateBooking {
   checkOut: Date;
   /** When the booking entered the system — the anchor for a portal's forward. */
   createdAt?: Date | string | null;
+  /**
+   * How many matched transfers already stand behind this booking's balance.
+   * Absent means unknown, which is treated as "backed" — the conservative
+   * reading for callers that do not supply it.
+   */
+  matchedTransferCount?: number;
   channel: string;
   property: string;
   totalPrice: string | null;
@@ -114,10 +120,19 @@ export class MatchingEngine {
         .filter(c => {
           const cRevenue = parseFloat(String(c.hostRevenue || "0"));
           const cPaid = parseFloat(String(c.amountPaid || "0"));
-          
-          // Skip if already fully paid (within 1 PLN margin) for portal payouts.
-          // This prevents duplicate matching when a booking was already marked paid (e.g. via email parser).
-          if (cRevenue > 0 && cPaid >= cRevenue - 1.0) return false;
+
+          // Skip a booking that is already fully paid, so a payout cannot be
+          // applied to it twice — but only when the money is actually there.
+          //
+          // A balance typed in by hand is a claim with no transfer behind it,
+          // and skipping those is how the Airbnb payout of 24.05.2026 ended up
+          // on the wrong stay: booking #77 had been marked paid manually, so it
+          // vanished from the candidates, leaving #76 as the only Hacjenda stay
+          // at the same price. Both were 1352 zł; nothing else could tell them
+          // apart. A booking whose balance has no transfer under it is exactly
+          // the one this payout is likely to belong to.
+          const isBacked = (c.matchedTransferCount ?? 1) > 0;
+          if (cRevenue > 0 && cPaid >= cRevenue - 1.0 && isBacked) return false;
 
           return cRevenue > 0 && Math.abs(transfer.amount - cRevenue) / cRevenue < 0.01;
         })
