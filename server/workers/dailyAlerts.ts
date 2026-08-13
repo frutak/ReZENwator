@@ -48,11 +48,40 @@ async function performDatabaseBackup() {
     const fileName = `backup_${database}_${timestamp}.sql`;
     const filePath = path.join(backupDir, fileName);
 
-    // 3. Run mysqldump
-    // We use -u, -p (no space), -h, -P and redirect to file
-    const command = `mysqldump -u${user} -p'${password}' -h${host} -P${port} ${database} > ${filePath}`;
-    await execAsync(command);
+    // 3. Run mysqldump.
+    //
+    // The password goes through the environment, not the command line: a full
+    // command line is readable by every user on the machine through `ps` for as
+    // long as the dump runs.
+    const command = `mysqldump -u${user} -h${host} -P${port} ${database} > ${filePath}`;
+    await execAsync(command, { env: { ...process.env, MYSQL_PWD: password } });
     console.log(`[DailyAlerts] Database backup created: ${fileName}`);
+
+    // 3a. Copy it off this machine.
+    //
+    // Ten dumps on the same disk as the database they came from protect against
+    // a bad query and nothing else — one disk failure takes the database and
+    // every backup of it together. Configure BACKUP_REMOTE (an rclone remote,
+    // e.g. `gdrive:rezenwator-backups`) and each dump is copied there as well.
+    //
+    // A failure here is worth an email: an off-site copy that quietly stopped
+    // working is indistinguishable from one that never ran, right up until the
+    // day it is needed.
+    const remote = process.env.BACKUP_REMOTE;
+    if (remote) {
+      try {
+        await execAsync(`rclone copy ${JSON.stringify(filePath)} ${JSON.stringify(remote)} --no-traverse`);
+        console.log(`[DailyAlerts] Backup copied to ${remote}`);
+      } catch (uploadErr) {
+        console.error(`[DailyAlerts] Off-site backup copy failed:`, uploadErr);
+        await sendAlertEmail(
+          "⚠️ Kopia backupu poza maszynę nie powiodła się",
+          `Zrzut bazy powstał lokalnie (${fileName}), ale nie udało się skopiować go do ${remote}.\n\n` +
+            `Błąd: ${String(uploadErr)}\n\n` +
+            `Lokalne kopie nadal działają, ale do czasu naprawy nie ma kopii poza tą maszyną.`
+        );
+      }
+    }
 
     // 4. Cleanup: keep only 10 most recent files
     const files = await fs.readdir(backupDir);

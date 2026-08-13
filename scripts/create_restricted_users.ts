@@ -2,13 +2,9 @@
 import { getDb } from "../server/db";
 import { users } from "../drizzle/schema";
 import { eq } from "drizzle-orm";
-import crypto from "crypto";
+import { hashPassword } from "../server/_core/password";
 
-function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16).toString("hex");
-  const hash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
-  return `${salt}:${hash}`;
-}
+
 
 async function main() {
   const db = await getDb();

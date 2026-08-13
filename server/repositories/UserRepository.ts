@@ -52,6 +52,18 @@ export class UserRepository {
     return result.length > 0 ? result[0] : undefined;
   }
 
+  /**
+   * Replaces a stored password hash.
+   *
+   * Used by the login path to upgrade a legacy hash at the only moment the
+   * plaintext is available — see _core/password.ts.
+   */
+  static async updatePasswordHash(id: number, passwordHash: string) {
+    const db = await getDb();
+    if (!db) return;
+    await db.update(users).set({ passwordHash }).where(eq(users.id, id));
+  }
+
   static async updateUserLanguage(id: number, language: "PL" | "EN") {
     const db = await getDb();
     if (!db) return;

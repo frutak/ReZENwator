@@ -41,19 +41,31 @@ import {
 import crypto from "crypto";
 import { ONE_YEAR_MS } from "@shared/const";
 import { sdk } from "./_core/sdk";
+import { verifyPassword, hashPassword, needsRehash } from "./_core/password";
+import { hit as rateLimitHit, clear as rateLimitClear } from "./_core/rateLimit";
+
+/**
+ * Failed logins are counted per account and per address, and both have to stay
+ * under the limit. Counting the account alone lets one attacker lock a user out;
+ * counting the address alone lets a botnet spread the guessing.
+ */
+const LOGIN_LIMIT = { max: 5, windowMs: 15 * 60 * 1000, blockMs: 15 * 60 * 1000 };
+
+/**
+ * A booking from the public form holds its dates until it is paid or expires
+ * after five days — that window is deliberate, since a bank transfer sent on a
+ * Friday can land on Monday. It also means one visitor could otherwise fill the
+ * calendar, so the form itself is capped.
+ */
+const SUBMIT_LIMIT = { max: 5, windowMs: 60 * 60 * 1000, blockMs: 60 * 60 * 1000 };
+
+/** The address a request came from, with the proxy header already trusted. */
+function clientIp(req: any): string {
+  return req?.ip || req?.socket?.remoteAddress || "unknown";
+}
 
 const AIRBNB_CUTOFF = new Date("2024-04-01");
 
-function verifyPassword(password: string, storedHash: string): boolean {
-  try {
-    const [salt, hash] = storedHash.split(":");
-    if (!salt || !hash) return false;
-    const verifyHash = crypto.pbkdf2Sync(password, salt, 1000, 64, "sha512").toString("hex");
-    return hash === verifyHash;
-  } catch (e) {
-    return false;
-  }
-}
 
 // ─── Guest reply router ───────────────────────────────────────────────────────
 
@@ -686,7 +698,18 @@ const publicPortalRouter = router({
 
   submitBooking: publicProcedure
     .input(submitBookingSchema)
-    .mutation(async ({ input }) => {
+    .mutation(async ({ input, ctx }) => {
+      // A pending booking holds its dates for five days, so an unlimited form is
+      // an unlimited way to take the calendar off the market. The daily run
+      // cancels what goes unpaid, but a day of blocked dates is a day of lost
+      // enquiries.
+      const gate = rateLimitHit("portal:submit", clientIp(ctx.req), SUBMIT_LIMIT);
+      if (!gate.allowed) {
+        throw new TRPCError({
+          code: "TOO_MANY_REQUESTS",
+          message: "Wysłano zbyt wiele rezerwacji z tego adresu. Napisz do nas mailem, a zajmiemy się tym od ręki.",
+        });
+      }
       return BookingService.createBooking(input as any); // using 'any' safely since Zod schema is strictly matching
     }),
 });
@@ -1058,10 +1081,38 @@ export const appRouter = router({
     login: publicProcedure
       .input(z.object({ username: z.string(), password: z.string() }))
       .mutation(async ({ input, ctx }) => {
+        const ip = clientIp(ctx.req);
+        const byAccount = rateLimitHit("login:user", input.username.toLowerCase(), LOGIN_LIMIT);
+        const byAddress = rateLimitHit("login:ip", ip, LOGIN_LIMIT);
+        const blocked = !byAccount.allowed ? byAccount : !byAddress.allowed ? byAddress : null;
+        if (blocked) {
+          const minutes = Math.ceil(blocked.retryAfterSec / 60);
+          throw new TRPCError({
+            code: "TOO_MANY_REQUESTS",
+            message: `Za dużo nieudanych prób logowania. Spróbuj ponownie za ${minutes} min.`,
+          });
+        }
+
         const user = await UserRepository.getUserByUsername(input.username);
-        
+
         if (!user || !user.passwordHash || !verifyPassword(input.password, user.passwordHash)) {
           throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid username or password" });
+        }
+
+        // Past this line the password was right, so the failures that came
+        // before it were this person mistyping, not someone guessing.
+        rateLimitClear("login:user", input.username.toLowerCase());
+        rateLimitClear("login:ip", ip);
+
+        // The one moment the plaintext exists: upgrade a legacy hash in place.
+        if (needsRehash(user.passwordHash)) {
+          try {
+            await UserRepository.updatePasswordHash(user.id, hashPassword(input.password));
+            console.log(`[Auth] Rehashed password for user ${user.username} (scrypt)`);
+          } catch (err) {
+            // A failed upgrade must not cost the user their login.
+            console.error("[Auth] Password rehash failed:", err);
+          }
         }
 
         const sessionToken = await sdk.createSessionToken(user.username!, {
