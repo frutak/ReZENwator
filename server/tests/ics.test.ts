@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { generateIcalString } from "../_core/ics";
-import { Booking } from "../../shared/schema";
 
 describe("generateIcalString", () => {
   it("generates a basic iCal string", () => {

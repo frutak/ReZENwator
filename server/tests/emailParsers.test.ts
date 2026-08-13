@@ -260,4 +260,60 @@ View earningsView earnings`;
       expect(data.guestName).toBe("John Doe");
     });
   });
+
+  // Seven of the forty real Airbnb mails in the fixtures put the guest's profile
+  // link on the line before "Identity verified" in angle brackets rather than
+  // square ones. The name cleaner stripped only the square form, so the line
+  // matched as the name and, once the URL was removed from it, the guest was
+  // recorded as a lone "<".
+  describe("Airbnb (A1) — guest name", () => {
+    const bodyWith = (nameBlock: string) => `
+NEW BOOKING CONFIRMED!
+
+${nameBlock}
+
+Identity verified · 20 reviews
+
+Check-in    Checkout
+Fri 3 Apr   Sun 5 Apr
+
+CONFIRMATION CODE
+HMTPNR499W
+
+TOTAL (PLN)   1,600.00 ZŁ
+Hacjenda Kiekrz
+`;
+
+    it("takes the full name from the subject over a first name in the body", () => {
+      const result = parseEmail(
+        "\"Airbnb\" <automated@airbnb.com>",
+        "Reservation confirmed - Juliana Marroquin arrives 3 Apr",
+        bodyWith("Juliana\n<https://www.airbnb.co.uk/hosting/reservations/details/HMB4BWSSK2?isPending=true>")
+      );
+      // A surname is what lets a bank transfer be matched to this booking later.
+      expect(result?.data.guestName).toBe("Juliana Marroquin");
+    });
+
+    it("reads the name from the body when the subject carries none", () => {
+      // This is what the angle-bracket stripping is for: with no usable subject,
+      // the body line is the only source, and it must not resolve to "<".
+      const result = parseEmail(
+        "\"Airbnb\" <automated@airbnb.com>",
+        "Booking confirmed - arrives 3 Apr",
+        bodyWith("Stanislaw Zarzycki\n<https://www.airbnb.co.uk/hosting/reservations/details/HMB4BWSSK2>")
+      );
+      expect(result?.data.guestName).toBe("Stanislaw Zarzycki");
+    });
+
+    it("never returns punctuation left over from a stripped link", () => {
+      const result = parseEmail(
+        "\"Airbnb\" <automated@airbnb.com>",
+        "Booking confirmed - arrives 3 Apr",
+        bodyWith("<https://www.airbnb.co.uk/users/show/123456>")
+      );
+      const name = result?.data.guestName;
+      expect(name === undefined || /\p{L}/u.test(name)).toBe(true);
+    });
+  });
+
 });

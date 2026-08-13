@@ -1,0 +1,1 @@
+ALTER TABLE `bank_transfers` ADD `source` enum('portal','guest','manual');

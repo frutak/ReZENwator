@@ -9,6 +9,7 @@ describe("MatchingEngine", () => {
       guestName: "Jan Kowalski",
       companyName: null,
       checkIn: new Date("2026-05-10T16:00:00Z"),
+      checkOut: new Date("2026-05-12T10:00:00Z"),
       channel: "direct",
       property: "Sadoles",
       totalPrice: "1000.00",
@@ -26,6 +27,7 @@ describe("MatchingEngine", () => {
       guestName: "Anna Nowak",
       companyName: "Nowak Corp",
       checkIn: new Date("2026-05-15T16:00:00Z"),
+      checkOut: new Date("2026-05-18T10:00:00Z"),
       channel: "slowhop",
       property: "Hacjenda",
       totalPrice: "2000.00",
@@ -42,13 +44,12 @@ describe("MatchingEngine", () => {
 
   it("should match by exact name and amount", () => {
     const transfer: ParsedBankData = {
-      type: "bank",
-      bank: "nestbank",
       amount: 1000.00,
       senderName: "Jan Kowalski",
       transferTitle: "Zapłata za pobyt",
       transferDate: new Date("2026-05-08T12:00:00Z"),
-      rawText: ""
+      currency: "PLN",
+      accountNumber: "11187010452078106769980001",
     };
 
     const results = MatchingEngine.scoreCandidates(transfer, mockCandidates, false);
@@ -59,13 +60,12 @@ describe("MatchingEngine", () => {
 
   it("should match by company name", () => {
     const transfer: ParsedBankData = {
-      type: "bank",
-      bank: "nestbank",
       amount: 2000.00,
       senderName: "Nowak Corp",
       transferTitle: "Faktura 123",
       transferDate: new Date("2026-05-12T12:00:00Z"),
-      rawText: ""
+      currency: "PLN",
+      accountNumber: "11187010452078106769980001",
     };
 
     const results = MatchingEngine.scoreCandidates(transfer, mockCandidates, false);
@@ -76,13 +76,12 @@ describe("MatchingEngine", () => {
 
   it("should handle portal payouts via host revenue match", () => {
     const transfer: ParsedBankData = {
-      type: "bank",
-      bank: "nestbank",
       amount: 1800.00,
       senderName: "Slowhop",
       transferTitle: "Payout for Anna Nowak",
       transferDate: new Date("2026-05-16T12:00:00Z"),
-      rawText: ""
+      currency: "PLN",
+      accountNumber: "11187010452078106769980001",
     };
 
     const results = MatchingEngine.scoreCandidates(transfer, mockCandidates, true);
@@ -94,13 +93,12 @@ describe("MatchingEngine", () => {
 
   it("should give high score for matching name and date", () => {
     const transfer: ParsedBankData = {
-      type: "bank",
-      bank: "nestbank",
       amount: 50.00, // different amount
       senderName: "Jan Kowalski",
       transferTitle: "Rezerwacja",
       transferDate: new Date("2026-05-09T12:00:00Z"),
-      rawText: ""
+      currency: "PLN",
+      accountNumber: "11187010452078106769980001",
     };
 
     const results = MatchingEngine.scoreCandidates(transfer, mockCandidates, false);
@@ -111,13 +109,12 @@ describe("MatchingEngine", () => {
 
   it("should handle deposit keyword bonus", () => {
     const transfer: ParsedBankData = {
-      type: "bank",
-      bank: "nestbank",
       amount: 500.00,
       senderName: "Jan Kowalski",
       transferTitle: "Kaucja Sadoles",
       transferDate: new Date("2026-05-08T12:00:00Z"),
-      rawText: ""
+      currency: "PLN",
+      accountNumber: "11187010452078106769980001",
     };
 
     const results = MatchingEngine.scoreCandidates(transfer, mockCandidates, false);
@@ -133,6 +130,7 @@ describe("MatchingEngine", () => {
       id: 181,
       guestName: "Serhii Kozachenko",
       companyName: null,
+      checkOut: new Date("2026-10-04T08:00:00Z"),
       checkIn: new Date("2026-10-02T16:00:00Z"),
       channel: "alohacamp",
       property: "Sadoles",

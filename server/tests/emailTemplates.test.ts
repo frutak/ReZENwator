@@ -188,6 +188,12 @@ describe("Email Template Dynamic Population", () => {
     notes: null,
     createdAt: new Date(),
     updatedAt: new Date(),
+    type: "normal",
+    depositReturnedAt: null,
+    invoiceIssued: 0,
+    invoiceMonth: null,
+    cleaningDate: null,
+    cleaningStaff: null,
   };
 
   it("should match Sadoles Arrival Reminder (PL) with hardcoded ground truth", async () => {

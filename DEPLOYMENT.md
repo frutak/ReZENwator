@@ -274,3 +274,34 @@ npx tsx scripts/run_backup_now.ts
 
 Same code path as the nightly run, without the rest of the maintenance (which
 sends mail to guests).
+
+
+---
+
+## Schema changes
+
+`pnpm db:push` (`drizzle-kit generate && drizzle-kit migrate`) works and is the
+normal route for a schema change.
+
+It did not for most of 2026. The `__drizzle_migrations` table existed but was
+empty, so the migrator believed nothing had been applied, replayed from 0000 and
+died on `Table 'users' already exists`; every change in between went in by hand.
+The database was never wrong — only drizzle's record of it, which is just a list
+of sha256 hashes of the migration files.
+`scripts/repair_migration_journal.ts` wrote the already-applied ones in on
+2026-08-13, after checking that every table the schema declares exists. Nothing
+but `__drizzle_migrations` was touched and no migration SQL ran.
+
+Two things to keep in mind:
+
+- **Never `drizzle-kit push`.** It rewrites columns to match the schema and will
+  take live data with it. `generate` + `migrate` only ever adds what the
+  migration files say.
+- **Data corrections are not migrations.** Those go through a one-off guarded
+  script — dry run, guarded on the current value, transactional, logged to
+  `booking_activities` — as in `scripts/fix_commission_gross.ts`.
+
+If a generated migration contains statements for objects that already exist
+(the generator did this once, before the journal was repaired), trim the file to
+what is genuinely new and say so in a comment. The recorded hash is of whatever
+the file says, so a trimmed file stays consistent.

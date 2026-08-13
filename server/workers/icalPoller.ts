@@ -369,10 +369,35 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
             
             console.log(`[iCal] Booking #${b.id} marked as CANCELLED (removed from future calendar: ${feed.label})`);
             
-            // Notify host
+            // Notify host.
+            //
+            // Money first: cancelling does not touch `amountPaid`, so a booking
+            // that had already been paid for goes quiet with the guest's money
+            // still on the account. The mail named the guest, the property and
+            // the dates but never the amount, which is the one thing that needs
+            // a decision — the dates take care of themselves.
             const checkInStr = new Date(b.checkIn).toLocaleDateString();
             const checkOutStr = new Date(b.checkOut).toLocaleDateString();
-            const subject = `❌ Booking CANCELLED: ${b.guestName || "Unknown"} (${b.property})`;
+            const paid = parseFloat(String(b.amountPaid || "0"));
+            const depositHeld = b.depositStatus === "paid"
+              ? parseFloat(String(b.depositAmount || "500"))
+              : 0;
+
+            const subject = paid > 0
+              ? `❌ Rezerwacja ANULOWANA z wpłatą ${paid.toFixed(2)} zł: ${b.guestName || "Unknown"} (${b.property})`
+              : `❌ Booking CANCELLED: ${b.guestName || "Unknown"} (${b.property})`;
+
+            const moneyBlock = paid > 0
+              ? `
+              DO ZWROTU: na koncie jest ${paid.toFixed(2)} zł z tej rezerwacji.${depositHeld > 0 ? `
+              W tym kaucja ${depositHeld.toFixed(2)} zł.` : ""}
+              Anulowanie nie rusza tej kwoty — decyzja o zwrocie należy do Ciebie.
+              Jeśli zwracasz, odnotuj to w rezerwacji, żeby raporty się zgadzały.
+              `
+              : `
+              Na tę rezerwację nic nie wpłynęło — nie ma czego zwracać.
+              `;
+
             const text = `
               The following booking has been removed from the ${feed.channel} iCal feed and marked as CANCELLED.
               
@@ -380,6 +405,7 @@ export async function pollICalFeed(feed: ICalFeed): Promise<{
               Property: ${b.property}
               Channel: ${b.channel}
               Dates: ${checkInStr} - ${checkOutStr}
+              ${moneyBlock.trim()}
               
               The dates are now available for new bookings.
             `.trim();

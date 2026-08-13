@@ -442,10 +442,15 @@ export function parseAirbnbA1(subject: string, body: string): ParsedBookingData 
   const revenueData = revenueMatch ? parsePrice(revenueMatch[1]!) : null;
 
   const idMatch = body.match(/Confirmation code\s*[\n\r\t\s]+([A-Z0-9]+)/i);
-  // Plain-text renderings of the email sometimes insert a standalone reference-style
-  // link line (e.g. "[https://...]") for the guest's profile hyperlink right before
-  // "Identity verified". Strip those out first so they aren't mistaken for the name line.
-  const bodyForName = body.replace(/^[ \t]*\[https?:\/\/[^\]]*\][ \t]*$/gim, "");
+  // Plain-text renderings of the email insert a standalone link line for the
+  // guest's profile right before "Identity verified", and they use both
+  // bracket styles: "[https://...]" and "<https://...>". Only the first was
+  // stripped, so for every mail using the second the name line matched the link
+  // instead — and after the URL was removed from it, the guest's name came out
+  // as a lone "<". Seven of the forty real emails in the fixtures parse that way.
+  const bodyForName = body
+    .replace(/^[ \t]*\[https?:\/\/[^\]]*\][ \t]*$/gim, "")
+    .replace(/^[ \t]*<https?:\/\/[^>]*>[ \t]*$/gim, "");
   const bodyNameMatch = bodyForName.match(/([^\n\r]+)[\n\r\s]+Identity verified/i);
 
   let property: Property | undefined;
@@ -454,11 +459,23 @@ export function parseAirbnbA1(subject: string, body: string): ParsedBookingData 
 
   // The name line can also share a line with a preceding link URL (e.g. "https://...   Paulina Tajdel"),
   // so strip any inline URLs from the captured candidate before using it.
+  const subjectName = nameMatch ? nameMatch[1].trim() : undefined;
   let guestName = bodyNameMatch ? bodyNameMatch[1].replace(/https?:\/\/\S+/g, "").trim() : undefined;
-  if (!guestName) guestName = nameMatch ? nameMatch[1].trim() : undefined;
+
+  // What survives stripping a URL is often punctuation — a stray angle bracket,
+  // a bullet — which is not a name however non-empty it is. Anything without a
+  // letter in it is rejected, so the subject can take over.
+  if (guestName && !/\p{L}/u.test(guestName)) guestName = undefined;
   if (guestName && (guestName.startsWith("http") || guestName.includes("www."))) {
     console.warn(`[AirbnbParser] Suspicious guest name found: ${guestName}. Falling back to subject match.`);
-    guestName = nameMatch ? nameMatch[1].trim() : undefined;
+    guestName = undefined;
+  }
+
+  // The body's name line is sometimes only the first name ("Juliana") while the
+  // subject carries the full one ("Juliana Marroquin"). Prefer the fuller form:
+  // a surname is what lets a bank transfer be matched to this booking later.
+  if (subjectName && (!guestName || subjectName.toLowerCase().startsWith(guestName.toLowerCase()))) {
+    guestName = subjectName;
   }
 
   return {

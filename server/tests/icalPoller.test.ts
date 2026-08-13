@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { pollICalFeed } from "../workers/icalPoller";
 import { BookingRepository } from "../repositories/BookingRepository";
+import { sendAlertEmail } from "../_core/email";
 import axios from "axios";
 import ical from "node-ical";
 
@@ -173,4 +174,68 @@ describe("iCalPoller", () => {
       channel: "slowhop"
     }));
   });
+
+  // A portal cancelling a stay does not touch `amountPaid`, so a booking that
+  // had already been paid for goes quiet with the guest's money still sitting on
+  // the account. The alert named the guest, the property and the dates — but not
+  // the amount, which is the only part that needs a decision.
+  describe("cancellation alert", () => {
+    const futureFeed: any = {
+      label: "Hacjenda / Airbnb",
+      url: "http://example.com/ical",
+      property: "Hacjenda",
+      channel: "airbnb",
+    };
+
+    const cancelledBooking = (over: Record<string, any> = {}) => ({
+      id: 91,
+      guestName: "Anna Nowak",
+      property: "Hacjenda",
+      channel: "airbnb",
+      // Far enough ahead that disappearing from the feed counts as a cancellation.
+      checkIn: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      checkOut: new Date(Date.now() + 33 * 24 * 60 * 60 * 1000),
+      amountPaid: "0.00",
+      depositAmount: "500.00",
+      depositStatus: "not_applicable",
+      ...over,
+    });
+
+    const runWithMissing = async (booking: any) => {
+      (axios.get as any).mockResolvedValue({ data: "dummy-ics" });
+      (ical.async.parseICS as any).mockResolvedValue({});
+      (BookingRepository.findMissingBookings as any).mockResolvedValue([booking]);
+      (BookingRepository.countActiveBookings as any).mockResolvedValue(10);
+      await pollICalFeed(futureFeed);
+      return (sendAlertEmail as any).mock.calls.at(-1);
+    };
+
+    it("states the amount still held when the stay was paid for", async () => {
+      const [subject, text] = await runWithMissing(
+        cancelledBooking({ amountPaid: "1352.00" })
+      );
+
+      expect(subject).toContain("1352.00");
+      expect(text).toContain("DO ZWROTU");
+      expect(text).toContain("1352.00");
+    });
+
+    it("calls out a kaucja held on top of the stay", async () => {
+      const [, text] = await runWithMissing(
+        cancelledBooking({ amountPaid: "1852.00", depositStatus: "paid" })
+      );
+
+      expect(text).toContain("1852.00");
+      expect(text).toContain("kaucja 500.00");
+    });
+
+    it("says plainly when there is nothing to refund", async () => {
+      const [subject, text] = await runWithMissing(cancelledBooking());
+
+      expect(subject).not.toContain("zł");
+      expect(text).toContain("nic nie wpłynęło");
+      expect(text).not.toContain("DO ZWROTU");
+    });
+  });
+
 });
