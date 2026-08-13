@@ -542,6 +542,19 @@ export const bankTransfers = mysqlTable("bank_transfers", {
   id: int("id").autoincrement().primaryKey(),
   /** Unique ID from email (Message-ID) to prevent duplicate processing */
   externalId: varchar("externalId", { length: 512 }).notNull().unique(),
+  /**
+   * Fingerprint of the payment itself — sha256 over amount, currency, sender,
+   * title, date and account.
+   *
+   * `externalId` identifies the *email*; this identifies the *money*. The two
+   * come apart when the same bank notification reaches the mailbox as a second
+   * message: a new Message-ID passes both the `processed_emails` gate and the
+   * `externalId` one, and the payment lands on the booking twice. Keyed on the
+   * content, the second copy collides no matter which message carried it.
+   *
+   * Nullable for the rows that predate it; every new insert sets it.
+   */
+  contentKey: varchar("contentKey", { length: 64 }).unique(),
   amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
   senderName: varchar("senderName", { length: 256 }).notNull(),
   transferTitle: varchar("transferTitle", { length: 512 }).notNull(),

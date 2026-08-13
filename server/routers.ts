@@ -25,7 +25,7 @@ import { getICalFeeds } from "./workers/icalConfig";
 import { Logger } from "./_core/logger";
 import { PricingService } from "./services/PricingService";
 import { BookingService } from "./services/BookingService";
-import { BankTransferRepository, CASHFLOW_START_MONTH } from "./repositories/BankTransferRepository";
+import { BankTransferRepository, CASHFLOW_START_MONTH, transferContentKey } from "./repositories/BankTransferRepository";
 import { MatchingEngine } from "./services/MatchingEngine";
 import { MonthlyAdjustmentRepository } from "./repositories/MonthlyAdjustmentRepository";
 import { type ParsedBankData } from "./workers/emailParsers";
@@ -440,17 +440,47 @@ const bookingRouter = router({
       })
     )
     .mutation(async ({ input }) => {
+      const parsed = {
+        amount: input.transferAmount ?? 0,
+        currency: "PLN",
+        senderName: input.transferSender ?? "",
+        transferTitle: input.transferTitle ?? "",
+        transferDate: input.transferDate ?? new Date(),
+        accountNumber: "",
+      };
+
+      // Record the payment as a transfer of its own before applying it. Two
+      // reasons: money entered by hand was invisible to the cashflow view, which
+      // reads `bank_transfers`; and with no row to key on there was nothing to
+      // stop a second click adding the same amount again. The content key makes
+      // the repeat collide — with itself, or with the bank's own notification of
+      // the same payment if that arrives later.
+      const contentKey = transferContentKey(parsed);
+      const { inserted, duplicateOf } = await BankTransferRepository.insertTransfer({
+        externalId: `manual-${contentKey.slice(0, 32)}`,
+        contentKey,
+        amount: String(parsed.amount),
+        senderName: parsed.senderName,
+        transferTitle: parsed.transferTitle,
+        transferDate: parsed.transferDate,
+        accountNumber: parsed.accountNumber,
+        currency: parsed.currency,
+        status: "pending",
+      });
+
+      if (!inserted) {
+        // Already recorded — do not apply it a second time. The owner sees which
+        // transfer it collided with and can decide whether this really is a
+        // separate payment.
+        return { success: false, duplicate: true, duplicateOfTransferId: duplicateOf?.id ?? null };
+      }
+
+      const [recorded] = await BankTransferRepository.findByContentKey(contentKey);
       await applyTransferMatch(
         input.bookingId,
-        {
-          amount: input.transferAmount ?? 0,
-          currency: "PLN",
-          senderName: input.transferSender ?? "",
-          transferTitle: input.transferTitle ?? "",
-          transferDate: input.transferDate ?? new Date(),
-          accountNumber: "",
-        },
-        input.score
+        parsed,
+        input.score,
+        recorded ? { transferId: recorded.id } : undefined
       );
       return { success: true };
     }),
@@ -893,9 +923,23 @@ const transferRouter = router({
       const transfer = await BankTransferRepository.getTransferById(input.transferId);
       if (!transfer) throw new Error('Transfer not found');
 
-      // If already matched, revert the previous booking's payment
-      if (transfer.status === 'matched' && transfer.matchedBookingId) {
-        await revertTransferMatch(transfer.matchedBookingId, parseFloat(transfer.amount));
+      const previousBookingId =
+        transfer.status === 'matched' && transfer.matchedBookingId ? transfer.matchedBookingId : null;
+
+      // Claim the transfer for this booking before touching any money. Two of
+      // these running at once — a double-click, or a client retry — would
+      // otherwise both read the transfer as unmatched, both skip the revert
+      // below and both add the amount to the booking. The claim is a single
+      // conditional UPDATE, so MySQL serialises them and the loser stops here.
+      const claimed = await BankTransferRepository.claimMatch(input.transferId, input.bookingId);
+      if (!claimed) {
+        return { success: true, alreadyApplied: true };
+      }
+
+      // Only now, and only if this pairing is new: give the previous booking its
+      // money back.
+      if (previousBookingId && previousBookingId !== input.bookingId) {
+        await revertTransferMatch(previousBookingId, parseFloat(transfer.amount));
       }
 
       const parsed: ParsedBankData = {

@@ -2,7 +2,7 @@ import { ENV } from "../_core/env";
 import Imap from "imap";
 import { simpleParser } from "mailparser";
 import { BookingRepository } from "../repositories/BookingRepository";
-import { BankTransferRepository } from "../repositories/BankTransferRepository";
+import { BankTransferRepository, transferContentKey } from "../repositories/BankTransferRepository";
 import { qualifyEmail, QualifiedEmail, ParsedBookingData, ParsedBankData } from "./emailParsers";
 import { findMatchingBookings, applyTransferMatch } from "./bookingMatcher";
 import { extractDisplayName, extractEmailAddress, matchBookingForEmail } from "./guestReplyMatcher";
@@ -411,8 +411,10 @@ async function handleSlowhopS2(data: ParsedBookingData, testMode: boolean): Prom
 
 /**
  * Handle Bank Transfer (Template 1).
+ *
+ * Exported for the tests, which drive it directly rather than through IMAP.
  */
-async function handleBankTransfer(data: ParsedBankData | null, email: any, testMode: boolean): Promise<boolean> {
+export async function handleBankTransfer(data: ParsedBankData | null, email: any, testMode: boolean): Promise<boolean> {
   if (!data) {
     console.error(`[EmailPoller] Failed to parse bank transfer data for email: ${email.subject}`);
     return false;
@@ -424,9 +426,13 @@ async function handleBankTransfer(data: ParsedBankData | null, email: any, testM
   // payment must not be applied to the booking a second time.
   if (!testMode) {
     let inserted: boolean;
+    let duplicateOf: { id: number; externalId: string; transferDate: Date } | undefined;
     try {
-      ({ inserted } = await BankTransferRepository.insertTransfer({
+      ({ inserted, duplicateOf } = await BankTransferRepository.insertTransfer({
         externalId: email.messageId,
+        // Identifies the payment rather than the message that carried it, so a
+        // second notification of the same transfer cannot be applied again.
+        contentKey: transferContentKey(data),
         amount: String(data.amount),
         senderName: data.senderName,
         transferTitle: data.transferTitle,
@@ -452,7 +458,30 @@ async function handleBankTransfer(data: ParsedBankData | null, email: any, testM
     }
 
     if (!inserted) {
-      console.log(`[EmailPoller] Bank transfer already processed (${email.messageId}), skipping.`);
+      if (duplicateOf) {
+        // Same money, different message. Almost always the same notification
+        // reaching the mailbox twice — but it could be a genuine second payment
+        // of the identical amount, with the identical title, on the same day,
+        // and nothing in the mail distinguishes the two. Refuse to apply it and
+        // put the question to the owner, rather than silently doubling a
+        // booking's balance or silently dropping real money.
+        console.warn(
+          `[EmailPoller] Suspected duplicate payment (${data.amount} ${data.currency} from ${data.senderName}); ` +
+            `already recorded as transfer #${duplicateOf.id}. Not applied.`
+        );
+        await sendAlertEmail(
+          `⚠️ Podejrzany duplikat wpłaty: ${data.senderName} (${data.amount} ${data.currency})`,
+          `Ten sam przelew przyszedł drugi raz, w innej wiadomości — nie zaksięgowałem go ponownie.\n\n` +
+            `Kwota: ${data.amount} ${data.currency}\nNadawca: ${data.senderName}\n` +
+            `Tytuł: ${data.transferTitle}\nData: ${data.transferDate?.toISOString().slice(0, 10)}\n\n` +
+            `Już zapisany jako przelew #${duplicateOf.id} (Message-ID: ${duplicateOf.externalId}).\n` +
+            `Ta wiadomość: ${email.messageId}\n\n` +
+            `Jeśli to naprawdę DRUGA wpłata o tej samej kwocie, tego samego dnia i z tym samym tytułem, ` +
+            `dodaj ją ręcznie w aplikacji. Jeśli to tylko powtórzone powiadomienie — nic nie trzeba robić.`
+        );
+      } else {
+        console.log(`[EmailPoller] Bank transfer already processed (${email.messageId}), skipping.`);
+      }
       return true;
     }
   }
