@@ -25,8 +25,12 @@ const TRANSFERS_RECORDED_SINCE = new Date("2026-05-01T00:00:00Z");
 
 /**
  * Perform a database backup and cleanup old ones.
+ *
+ * Exported so it can be run on demand — before a risky migration, or to check
+ * that the off-site copy still works — without triggering the rest of the daily
+ * maintenance, which sends mail to guests.
  */
-async function performDatabaseBackup() {
+export async function performDatabaseBackup() {
   const backupDir = path.join(process.cwd(), "backups");
   
   try {

@@ -218,3 +218,59 @@ pnpm install --frozen-lockfile
 pnpm build
 sudo systemctl restart rezenwator
 ```
+
+---
+
+## Database backups
+
+The daily maintenance run (08:00) dumps the database to `backups/` with
+`mysqldump` and keeps the ten most recent files. The password is passed through
+`MYSQL_PWD` rather than the command line, where `ps` would show it to every user
+on the machine.
+
+### Off-site copy
+
+Ten dumps on the same disk as the database they came from protect against a bad
+query and nothing else — one disk failure takes the database and every backup of
+it together. Set `BACKUP_REMOTE` in `.env` to an rclone remote and each dump is
+copied there as well:
+
+```
+BACKUP_REMOTE=gdrive:rezenwator-backups
+```
+
+A failed copy sends an alert email. An off-site backup that has quietly stopped
+working is indistinguishable from one that never ran, right up until the day it
+is needed.
+
+**Setting up the Google Drive remote.** rclone no longer accepts a blank client
+ID for Drive, so it needs an OAuth client of its own. This installation reuses
+the one from `task_manager` — same Google Cloud project, with the Drive API
+enabled alongside Calendar. The client must be of type **Desktop**, and the
+consent screen must be **published to production**: while it sits in *Testing*,
+Google expires the refresh token after seven days and the copies stop without a
+word.
+
+On a headless machine the browser step needs a hand. `rclone config reconnect
+gdrive:` prints a link to `http://127.0.0.1:53682/auth?state=…`, which only
+resolves on the machine rclone runs on. Either forward the port
+(`ssh -L 53682:localhost:53682 …`) and open the link locally, or fetch it on the
+server with `curl -D -` to read the `Location` header, open *that* Google URL in
+any browser, and feed the resulting `?code=…` redirect back with a second
+`curl` to `http://127.0.0.1:53682/`. Use `rclone config reconnect`, not `rclone
+authorize`: the first writes the token into `rclone.conf`, the second only
+prints it.
+
+Never pass the client secret on the command line — `ps` and shell history both
+keep it.
+
+### Running a backup on demand
+
+Before a risky migration, or to check the off-site copy still works:
+
+```bash
+npx tsx scripts/run_backup_now.ts
+```
+
+Same code path as the nightly run, without the rest of the maintenance (which
+sends mail to guests).
