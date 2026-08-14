@@ -20,3 +20,17 @@ export type CleaningStaff = typeof CLEANING_STAFF[number];
 
 export const BOOKING_TYPES = ["normal", "block", "internal"] as const;
 export type BookingType = typeof BOOKING_TYPES[number];
+
+/**
+ * Party size the price audit quotes for.
+ *
+ * A portal price only means something next to the number of guests it covers —
+ * Booking prices an entire-place listing in occupancy tiers and lists them all at
+ * once, so an audit that asks for one size and reads the price of another compares
+ * nothing. This is the size the auditor puts in every portal URL and the size the
+ * internal benchmark is calculated for; the two must not drift apart.
+ */
+export const AUDIT_OCCUPANCY: Record<Property, number> = {
+  Sadoles: 11,
+  Hacjenda: 4,
+};

@@ -71,6 +71,20 @@ export class PricingAuditRepository {
   static readonly MAX_AUDIT_AGE_DAYS = 60;
 
   /**
+   * Readings taken before this are not comparable, however recent they are.
+   *
+   * Until the Airbnb currency parse was fixed (4a5c3f4, 27 Jul 2026, in effect from the
+   * 28 Jul run) the scraper read no Airbnb price at all and recorded SOLD_OUT on every
+   * probe. The dashboard rightly treats "one channel sold out while another sells" as a
+   * fault — so every one of those rows shows up red, blaming Airbnb for a bug in our own
+   * reader. 314 of the 323 such rows in the table sit on the wrong side of this date.
+   *
+   * Move this forward whenever a scraper change invalidates what is already stored,
+   * rather than widening the age window to sweep it out by accident.
+   */
+  static readonly AUDIT_EPOCH = new Date("2026-07-28T00:00:00");
+
+  /**
    * Current audit picture for a property: the newest observation of each stay whose
    * check-in falls in the requested range, ignoring readings that have aged out.
    */
@@ -78,8 +92,11 @@ export class PricingAuditRepository {
     const db = await getDb();
     if (!db) return [];
 
-    const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - PricingAuditRepository.MAX_AUDIT_AGE_DAYS);
+    const byAge = new Date();
+    byAge.setDate(byAge.getDate() - PricingAuditRepository.MAX_AUDIT_AGE_DAYS);
+    const cutoff = new Date(
+      Math.max(byAge.getTime(), PricingAuditRepository.AUDIT_EPOCH.getTime())
+    );
 
     const rows = await db
       .select()

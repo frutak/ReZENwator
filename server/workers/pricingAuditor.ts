@@ -5,6 +5,7 @@ import { PricingAuditRepository } from "../repositories/PricingAuditRepository";
 import { Logger } from "../_core/logger";
 import { PricingService } from "../services/PricingService";
 import { addDays, format, isAfter, isBefore, startOfDay } from "date-fns";
+import { AUDIT_OCCUPANCY } from "@shared/config";
 
 const execAsync = promisify(exec);
 
@@ -25,17 +26,20 @@ interface ScrapeResult {
   error?: string;
 }
 
+// The guest count is a parameter rather than a literal so that every portal URL and
+// the internal benchmark quote the same party size — see AUDIT_OCCUPANCY. The scraper
+// reads it back off the URL to pick the matching occupancy tier on Booking.
 const PORTAL_URLS = {
   Sadoles: {
-    booking: (start: string, end: string) => `https://www.booking.com/hotel/pl/sadoles-66.html?checkin=${start}&checkout=${end}&group_adults=11`,
-    airbnb: (start: string, end: string) => `https://www.airbnb.com/rooms/39273784?check_in=${start}&check_out=${end}&adults=11`,
-    slowhop: (start: string, end: string) => `https://slowhop.com/pl/miejsca/2256-sadoles-66.html?adults=11&start_date=${start}&end_date=${end}`,
-    alohacamp: (start: string, end: string) => `https://alohacamp.com/pl/property/sadoles-66-4436?adults_count=11&start=${start}&end=${end}`,
+    booking: (start: string, end: string, guests: number) => `https://www.booking.com/hotel/pl/sadoles-66.html?checkin=${start}&checkout=${end}&group_adults=${guests}`,
+    airbnb: (start: string, end: string, guests: number) => `https://www.airbnb.com/rooms/39273784?check_in=${start}&check_out=${end}&adults=${guests}`,
+    slowhop: (start: string, end: string, guests: number) => `https://slowhop.com/pl/miejsca/2256-sadoles-66.html?adults=${guests}&start_date=${start}&end_date=${end}`,
+    alohacamp: (start: string, end: string, guests: number) => `https://alohacamp.com/pl/property/sadoles-66-4436?adults_count=${guests}&start=${start}&end=${end}`,
   },
   Hacjenda: {
-    booking: (start: string, end: string) => `https://www.booking.com/hotel/pl/hacienda-kiekrz.html?checkin=${start}&checkout=${end}&group_adults=4`,
-    airbnb: (start: string, end: string) => `https://www.airbnb.com/rooms/1327633659929514853?check_in=${start}&check_out=${end}&adults=4`,
-    slowhop: (start: string, end: string) => `https://slowhop.com/pl/miejsca/4575-hacjenda-kiekrz.html?adults=4&start_date=${start}&end_date=${end}`,
+    booking: (start: string, end: string, guests: number) => `https://www.booking.com/hotel/pl/hacienda-kiekrz.html?checkin=${start}&checkout=${end}&group_adults=${guests}`,
+    airbnb: (start: string, end: string, guests: number) => `https://www.airbnb.com/rooms/1327633659929514853?check_in=${start}&check_out=${end}&adults=${guests}`,
+    slowhop: (start: string, end: string, guests: number) => `https://slowhop.com/pl/miejsca/4575-hacjenda-kiekrz.html?adults=${guests}&start_date=${start}&end_date=${end}`,
   },
 };
 
@@ -72,8 +76,10 @@ export class PricingAuditor {
     const start = Date.now();
 
     try {
-      const benchmark = await PricingService.getBenchmarkPrice(property, checkIn, checkOut);
-      
+      // A stay we do not sell has no benchmark, but its portal prices are still worth
+      // recording — that is the whole point of probing one by hand.
+      const benchmark = await PricingService.getBenchmarkPrice(property, checkIn, checkOut).catch(() => undefined);
+
       const auditData: any = {
         property,
         checkIn,
@@ -86,7 +92,7 @@ export class PricingAuditor {
       const nights = Math.max(1, Math.round((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24)));
 
       for (const channel of channels) {
-        const url = (PORTAL_URLS[property] as any)[channel](format(checkIn, "yyyy-MM-dd"), format(checkOut, "yyyy-MM-dd"));
+        const url = (PORTAL_URLS[property] as any)[channel](format(checkIn, "yyyy-MM-dd"), format(checkOut, "yyyy-MM-dd"), AUDIT_OCCUPANCY[property]);
         const result = await this.scrapeWithPlaywright(property, channel, url, nights, benchmark);
         
         auditData[`${channel}Price`] = result.price ? String(result.price) : null;
@@ -181,15 +187,21 @@ export class PricingAuditor {
           const recentAudit = await PricingAuditRepository.getRecentAudit(property, checkIn, checkOut);
           if (recentAudit) continue;
 
-          let benchmark: number;
-          try {
-            benchmark = await PricingService.getBenchmarkPrice(property, checkIn, checkOut);
-          } catch (e) {
-            // Skip candidate if pricing is missing
-            continue;
+          // A min-stay test asks whether the portals refuse a one-night stay. It needs no
+          // benchmark — there is no price to compare, and demanding one would drop exactly
+          // those dates whose minimum we most want tested, since our own pricing declines
+          // to quote them.
+          let benchmark: number | undefined;
+          if (!isMinStayTest) {
+            try {
+              benchmark = await PricingService.getBenchmarkPrice(property, checkIn, checkOut);
+            } catch (e) {
+              // Nothing to compare a portal price against — skip rather than invent one.
+              continue;
+            }
           }
 
-          console.log(`[PricingAuditor] Probing ${property}: ${format(checkIn, "yyyy-MM-dd")} to ${format(checkOut, "yyyy-MM-dd")} (Benchmark: ${benchmark}, MinStayTest: ${isMinStayTest})`);
+          console.log(`[PricingAuditor] Probing ${property}: ${format(checkIn, "yyyy-MM-dd")} to ${format(checkOut, "yyyy-MM-dd")} (Benchmark: ${benchmark ?? "n/a"}, MinStayTest: ${isMinStayTest})`);
           
           const auditData: any = {
             property,
@@ -204,7 +216,7 @@ export class PricingAuditor {
 
           // Run channels sequentially to avoid being blocked or having dynamic content fail to load
           for (const channel of channels) {
-            const url = (PORTAL_URLS[property] as any)[channel](format(checkIn, "yyyy-MM-dd"), format(checkOut, "yyyy-MM-dd"));
+            const url = (PORTAL_URLS[property] as any)[channel](format(checkIn, "yyyy-MM-dd"), format(checkOut, "yyyy-MM-dd"), AUDIT_OCCUPANCY[property]);
             const result = await this.scrapeWithPlaywright(property, channel, url, nights, benchmark);
             
             auditData[`${channel}Price`] = result.price ? String(result.price) : null;

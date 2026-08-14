@@ -1,7 +1,7 @@
 import { format } from "date-fns";
 import { BookingRepository } from "../repositories/BookingRepository";
 import { PropertyRepository } from "../repositories/PropertyRepository";
-import { type Property } from "@shared/config";
+import { AUDIT_OCCUPANCY, type Property } from "@shared/config";
 
 export interface PricingResult {
   valid: boolean;
@@ -170,8 +170,6 @@ export class PricingService {
    * Logic: (calculated price for max occupancy) + 200 offset.
    */
   static async getAuditPricing(property: Property, checkIn: Date, checkOut: Date): Promise<{ portalPrice: number, benchmarkPrice: number, offset: number }> {
-    const maxGuests = property === "Sadoles" ? 11 : 4;
-
     // Normalize to standard hours (16:00 check-in, 10:00 check-out) for audit comparison
     const cin = new Date(checkIn);
     cin.setHours(16, 0, 0, 0);
@@ -182,10 +180,19 @@ export class PricingService {
       property,
       checkIn: cin,
       checkOut: cout,
-      guestCount: maxGuests,
+      guestCount: AUDIT_OCCUPANCY[property],
       animalsCount: 0
     });
-    
+
+    // `calculatePrice` reports a stay it will not sell — one that violates the minimum
+    // or collides with a booking — as `valid: false` with `totalPrice: 0`. Read as a
+    // price, that became a benchmark of 200 zl, against which every real portal price
+    // deviates by hundreds of percent; a fifth of the audit table was red for that
+    // reason alone. There is no benchmark for a stay we do not sell, so say so.
+    if (!pricing.valid) {
+      throw new Error(`No internal price to benchmark against: ${pricing.error ?? "stay is not sellable"}`);
+    }
+
     const offset = 200;
     return {
       portalPrice: pricing.totalPrice,

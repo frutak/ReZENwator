@@ -778,17 +778,29 @@ const pricingAuditRouter = router({
       const audits = await PricingAuditRepository.getAudits(input.property, input.from, input.to);
 
       const enrichedAudits = await Promise.all(audits.map(async (audit: any) => {
+        const channels = ["booking", "airbnb", "slowhop", "alohacamp"] as const;
+
+        // Detect scraper breakage: a channel reporting SOLD_OUT while another channel
+        // sells the same dates means the scrape failed, not that the property is booked.
+        // Computed before the benchmark because it does not need one — a stay we do not
+        // sell has no internal price, and that must not silence the check.
+        const statuses = channels.map(c => audit[`${c}Status` as keyof typeof audit] as string | null);
+        const anyOk = statuses.some(s => s === "OK");
+        const suspiciousChannels = anyOk
+          ? channels.filter(c => (audit[`${c}Status` as keyof typeof audit] as string | null) === "SOLD_OUT")
+          : [];
+        const hasChannelAnomaly = suspiciousChannels.length > 0;
+
         try {
           const checkIn = new Date(audit.checkIn);
           const checkOut = new Date(audit.checkOut);
-          
+
           const pricing = await PricingService.getAuditPricing(input.property, checkIn, checkOut);
           const { benchmarkPrice, portalPrice, offset: offsetPrice } = pricing;
 
           // Deviation calculation
           const deviations: Record<string, number> = {};
           const triggers: number[] = [];
-          const channels = ["booking", "airbnb", "slowhop", "alohacamp"] as const;
 
           for (const channel of channels) {
             const price = audit[`${channel}Price` as keyof typeof audit] as string | null;
@@ -818,15 +830,6 @@ const pricingAuditRouter = router({
             ? Math.max(...triggers)
             : 0;
 
-          // Detect scraper breakage: a channel reporting SOLD_OUT while another channel
-          // sells the same dates means the scrape failed, not that the property is booked.
-          const statuses = channels.map(c => audit[`${c}Status` as keyof typeof audit] as string | null);
-          const anyOk = statuses.some(s => s === "OK");
-          const suspiciousChannels = anyOk
-            ? channels.filter(c => (audit[`${c}Status` as keyof typeof audit] as string | null) === "SOLD_OUT")
-            : [];
-          const hasChannelAnomaly = suspiciousChannels.length > 0;
-
           return {
             ...audit,
             internalPrice: benchmarkPrice,
@@ -839,7 +842,17 @@ const pricingAuditRouter = router({
             hasChannelAnomaly,
           };
         } catch (e) {
-          return { ...audit, internalValid: false, internalError: (e as Error).message, deviations: {}, maxDeviation: 0, suspiciousChannels: [], hasChannelAnomaly: false };
+          // No internal price for this stay — report the portals without a comparison
+          // rather than colouring the day against a benchmark that does not exist.
+          return {
+            ...audit,
+            internalValid: false,
+            internalError: (e as Error).message,
+            deviations: {},
+            maxDeviation: 0,
+            suspiciousChannels,
+            hasChannelAnomaly,
+          };
         }
       }));
 

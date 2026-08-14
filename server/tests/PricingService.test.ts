@@ -166,5 +166,27 @@ describe("PricingService", () => {
     // discountAmount = 130 (based on test feedback)
     expect(result.discountAmount).toBe(130);
   });
+
+  describe("getAuditPricing", () => {
+    it("refuses to benchmark a stay the property will not sell", async () => {
+      // calculatePrice reports a min-stay violation as valid:false with totalPrice 0.
+      // Read as a price that produced a benchmark of 0 + 200, and every real portal
+      // price then deviated from 200 zl by hundreds of percent.
+      const twoNightMinimum = mockNights.map(n => ({ ...n, minStay: 2 }));
+      setupMockDb(mockSettings, [], twoNightMinimum);
+
+      await expect(
+        PricingService.getAuditPricing("Sadoles", new Date("2026-05-01"), new Date("2026-05-02"))
+      ).rejects.toThrow(/No internal price to benchmark against/);
+    });
+
+    it("refuses to benchmark dates that are already booked", async () => {
+      setupMockDb(mockSettings, [{ checkIn: "2026-05-01T16:00:00", checkOut: "2026-05-03T10:00:00" }], mockNights);
+
+      await expect(
+        PricingService.getAuditPricing("Sadoles", new Date("2026-05-01"), new Date("2026-05-03"))
+      ).rejects.toThrow(/No internal price to benchmark against/);
+    });
+  });
 });
 
