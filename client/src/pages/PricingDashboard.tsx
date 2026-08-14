@@ -3,7 +3,7 @@ import DashboardLayout from "@/components/DashboardLayout";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { ChevronLeft, ChevronRight, Home, Tag, Loader2, Settings, Plus, Trash2, AlertTriangle, Info, RefreshCw } from "lucide-react";
-import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, isSameDay, addMonths, subMonths, startOfDay, addDays } from "date-fns";
+import { format, startOfMonth, endOfMonth, eachDayOfInterval, getDay, isSameDay, addMonths, subMonths, startOfDay, addDays, differenceInCalendarDays } from "date-fns";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
@@ -610,6 +610,20 @@ function AuditorCalendar({
                                   );
                                 })}
                               </div>
+                              {audit.dateScraped && (() => {
+                                const scraped = new Date(audit.dateScraped);
+                                const age = differenceInCalendarDays(new Date(), scraped);
+                                const stale = age > PROBE_STALE_AFTER_DAYS;
+                                return (
+                                  <div className={cn(
+                                    "text-[10px] pt-1 border-t mt-1 flex justify-between items-center",
+                                    stale ? "text-amber-600 font-medium" : "text-muted-foreground"
+                                  )}>
+                                    <span>Sonda: {format(scraped, "dd.MM.yyyy HH:mm")}</span>
+                                    <span>{probeAgeLabel(age)}{stale && " ⚠"}</span>
+                                  </div>
+                                );
+                              })()}
                             </div>
                           </TooltipContent>
                         </Tooltip>
@@ -688,6 +702,20 @@ const STATUS_LABELS: Record<string, string> = {
   NO_PRICE: "nie odczytano ceny",
   ERROR: "błąd pobrania",
 };
+
+/**
+ * A reading is skipped for a fortnight after it is taken and kept on screen for
+ * sixty days, so what is shown can be weeks old — and stale is the difference
+ * between "the portals disagree" and "the portals disagreed in July".
+ */
+const PROBE_STALE_AFTER_DAYS = 14;
+
+/** How long ago the probe ran, in words. */
+function probeAgeLabel(days: number): string {
+  if (days <= 0) return "dziś";
+  if (days === 1) return "wczoraj";
+  return `${days} dni temu`;
+}
 
 /** What the scraper reported for this channel, if anything was recorded. */
 function scrapeErrorFor(audit: any, channel: string): string | null {
