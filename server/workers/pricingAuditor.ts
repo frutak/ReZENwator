@@ -132,14 +132,18 @@ export class PricingAuditor {
     try {
       const properties: ("Sadoles" | "Hacjenda")[] = ["Sadoles", "Hacjenda"];
       const MAX_PROBES = 10;
-      const today = startOfDay(new Date());
 
-      // Get all recent audits to find "red" ones to re-probe
-      const recentAuditEntries = await PricingAuditRepository.getRecentAuditEntries(14);
-      
+      // Every range this run has already written, as `property|checkIn|checkOut`.
+      // `getRecentAudit` reads what is committed, so it cannot see a probe made
+      // moments ago in this same run — two candidate sources landing on one range
+      // used to probe it twice and store two identical rows.
+      const probedThisRun = new Set<string>();
+      const rangeKey = (property: string, checkIn: Date, checkOut: Date) =>
+        `${property}|${format(checkIn, "yyyy-MM-dd")}|${format(checkOut, "yyyy-MM-dd")}`;
+
       // Shuffle properties to avoid bias if we hit total limit
       const shuffledProperties = [...properties].sort(() => Math.random() - 0.5);
-      
+
       for (const property of shuffledProperties) {
         let propertyProbes = 0;
         // We want roughly 5 per property, but can go up to 10 if needed to hit the total
@@ -154,63 +158,34 @@ export class PricingAuditor {
           });
         };
 
-        // Generate standard candidates (these already use isAvailable internally)
-        const standardCandidates = await this.generateCandidateDates(property);
-        
-        // Find "red" audits for this property to prioritize
-        const redAuditsForProperty = [];
-        const processedRanges = new Set<string>();
+        // Candidates are generated fresh each run (these already use isAvailable internally).
+        //
+        // Re-probing whatever last came back "red" used to take priority over them, on the
+        // theory that a red result is worth confirming. In practice a range goes red for
+        // reasons a re-probe cannot settle — a portal genuinely priced differently, a channel
+        // that does not enforce our minimum stay — so the same handful of ranges were re-probed
+        // every night and never cleared, crowding new dates out of a ten-probe budget. Coverage
+        // is worth more than confirmation here: probe each range once, then move on and let the
+        // dashboard show the colour.
+        const candidates = await this.generateCandidateDates(property);
 
-        for (const audit of recentAuditEntries) {
-          if (audit.property !== property) continue;
-          const rangeKey = `${format(audit.checkIn, "yyyy-MM-dd")}_${format(audit.checkOut, "yyyy-MM-dd")}`;
-          if (processedRanges.has(rangeKey)) continue;
-          processedRanges.add(rangeKey);
-
-          // SKIP if now booked
-          if (!isAvailable(audit.checkIn, audit.checkOut)) continue;
-
-          // SKIP dates that have passed. Entries are selected by dateScraped, not checkIn, so
-          // a stale red audit stays in this pool as its dates slip into the past — where every
-          // channel reports SOLD_OUT forever and the probe can never go green.
-          if (!isAfter(startOfDay(new Date(audit.checkIn)), today)) continue;
-
-          try {
-            const benchmark = await PricingService.getBenchmarkPrice(property, audit.checkIn, audit.checkOut);
-            if (!this.isGreenAudit(audit, benchmark)) {
-              redAuditsForProperty.push({
-                checkIn: audit.checkIn,
-                checkOut: audit.checkOut,
-                isMinStayTest: !!audit.isMinStayTest
-              });
-            }
-          } catch (e) {
-            // If we can't calculate benchmark for old audit (e.g. price missing now), just skip it
-            console.warn(`[PricingAuditor] Could not calculate benchmark for historical audit ${property} ${rangeKey}:`, (e as Error).message);
-          }
-        }
-
-        // Prioritize up to 3 red audits, then follow with standard candidates
-        const prioritisedReds = redAuditsForProperty.slice(0, 3);
-        const candidates = [...prioritisedReds, ...standardCandidates];
-        
         for (const { checkIn, checkOut, isMinStayTest } of candidates) {
           if (probesCount >= MAX_PROBES) break;
           if (propertyProbes >= MAX_PER_PROPERTY) break;
 
+          const key = rangeKey(property, checkIn, checkOut);
+          if (probedThisRun.has(key)) continue;
+
+          // Anything probed in the last fortnight is skipped regardless of its result, so the
+          // budget keeps rotating onto ranges that have no recent reading at all.
           const recentAudit = await PricingAuditRepository.getRecentAudit(property, checkIn, checkOut);
-          
+          if (recentAudit) continue;
+
           let benchmark: number;
           try {
             benchmark = await PricingService.getBenchmarkPrice(property, checkIn, checkOut);
           } catch (e) {
             // Skip candidate if pricing is missing
-            continue;
-          }
-
-          // If this was a prioritized RED audit, we definitely want to probe it again.
-          // Otherwise, we check if the most recent audit is already "green".
-          if (recentAudit && this.isGreenAudit(recentAudit, benchmark)) {
             continue;
           }
 
@@ -240,9 +215,10 @@ export class PricingAuditor {
           }
 
           await PricingAuditRepository.saveAudit(auditData);
+          probedThisRun.add(key);
           probesCount++;
           propertyProbes++;
-          
+
           // Longer delay between probes (different dates)
           await new Promise(resolve => setTimeout(resolve, 10000));
         }
@@ -266,62 +242,6 @@ export class PricingAuditor {
     } finally {
       this.isRunning = false;
     }
-  }
-
-  private static isGreenAudit(audit: any, benchmark: number): boolean {
-    const channels = ["booking", "airbnb", "slowhop", "alohacamp"];
-    let anyOk = false;
-
-    for (const chan of channels) {
-      const priceStr = audit[`${chan}Price` as keyof typeof audit];
-      const status = audit[`${chan}Status` as keyof typeof audit];
-      if (status === "OK" && priceStr) {
-        anyOk = true;
-        const price = parseFloat(String(priceStr));
-        const deviation = Math.abs((price - benchmark) / benchmark);
-        if (deviation > 0.15) return false; // Red status if any channel deviates > 15%
-      }
-    }
-
-    // A single channel reporting SOLD_OUT while others sell for the same dates means the
-    // scraper broke for that channel (a genuinely booked property is sold out everywhere).
-    // Treat it as red so the auditor keeps re-probing instead of silently ignoring it.
-    // This still applies to min-stay tests: a channel selling a 1-night stay while the others
-    // refuse it means that channel is not enforcing the minimum, which is worth surfacing.
-    if (anyOk && this.hasSoldOutAnomaly(audit)) return false;
-
-    // A min-stay test probes a 1-night stay expecting to be refused. Every channel reporting
-    // SOLD_OUT is the test PASSING — the minimum is enforced — not a scraper failure. Without
-    // this it can never go green, so it stays in the re-probe queue and burns the daily probe
-    // budget forever. ERROR statuses do not count: those are failures, not a passing test.
-    if (!anyOk && audit.isMinStayTest && this.allChannelsSoldOut(audit)) return true;
-
-    return anyOk; // Only skip if we have at least one valid probe AND all were within 15%
-  }
-
-  /** True when every tracked channel reported SOLD_OUT (and at least one reported it). */
-  private static allChannelsSoldOut(audit: any): boolean {
-    const channels = ["booking", "airbnb", "slowhop", "alohacamp"];
-    const statuses = channels
-      .map(chan => audit[`${chan}Status` as keyof typeof audit] as string | null)
-      .filter((s): s is string => !!s);
-    return statuses.length > 0 && statuses.every(s => s === "SOLD_OUT");
-  }
-
-  /**
-   * True when at least one channel reports SOLD_OUT while at least one other channel
-   * reports OK for the same dates — a mismatch that indicates a scraper failure rather
-   * than genuine unavailability. Null statuses (channel not tracked for the property,
-   * e.g. AlohaCamp on Hacjenda) are ignored.
-   */
-  private static hasSoldOutAnomaly(audit: any): boolean {
-    const channels = ["booking", "airbnb", "slowhop", "alohacamp"];
-    const statuses = channels
-      .map(chan => audit[`${chan}Status` as keyof typeof audit] as string | null)
-      .filter((s): s is string => !!s);
-    const anyOk = statuses.some(s => s === "OK");
-    const anySoldOut = statuses.some(s => s === "SOLD_OUT");
-    return anyOk && anySoldOut;
   }
 
   /**
