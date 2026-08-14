@@ -38,6 +38,83 @@ def extract_best_price(text, min_p):
     # Return the LAST valid value found, as it's typically the final total or the new price after a discount
     return valid_values[-1] if valid_values else None
 
+
+def guests_from_url(url):
+    """The guest count the audit asked for, read back off the URL it built.
+
+    Every portal carries it under a different key, and the auditor is the only
+    caller, so the URL is the single source of truth — no extra argument to keep
+    in sync with `PORTAL_URLS`.
+    """
+    for key in ("group_adults", "adults_count", "adults"):
+        m = re.search(r'[?&]' + key + r'=(\d+)', url)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+# Booking encodes each offer as `room_rateplan_maxOccupancy_meal_discount`.
+def block_occupancy(row):
+    """Max guests an offer row is priced for, or 0 when it cannot be determined."""
+    parts = (row.get("id") or "").split("_")
+    if len(parts) > 2 and parts[2].isdigit():
+        occ = int(parts[2])
+        if occ:
+            return occ
+
+    # Some rows carry `0` in the block id (an offer with no occupancy cap of its
+    # own). Those still render the real ceiling in the "Liczba gości" column, so
+    # fall back to it. The room description cell never uses this phrasing, so the
+    # match cannot pick up the searched-for occupancy by mistake.
+    nums = re.findall(r'(?:maksymalna liczba os[oó]b|max(?:imum)? (?:people|occupancy|guests))\s*:?\s*(\d+)',
+                      row.get("text") or "", re.IGNORECASE)
+    return max(int(n) for n in nums) if nums else 0
+
+
+async def booking_price_for_guests(page, min_price, guests):
+    """Cheapest Booking offer a party of `guests` can actually book.
+
+    Booking lists every occupancy tier as a separate row and does not filter them
+    to the searched party size, so reading "some price off the page" picks an
+    arbitrary tier — for Sadoles that meant recording the 9-guest rate against an
+    11-guest benchmark. Match the tier to what was asked for instead: the smallest
+    tier that still fits the party, and within it the lowest rate, which is what a
+    guest sees as the price of the stay.
+    """
+    rows = await page.evaluate("""() => {
+      const out = [];
+      document.querySelectorAll('#hprt-table tr[data-block-id]').forEach(tr => {
+        const priceEl = tr.querySelector('.prco-valign-middle-helper, [data-testid="price-and-discounted-price"]');
+        if (!priceEl) return;
+        out.push({
+          id: tr.getAttribute('data-block-id') || '',
+          price: priceEl.innerText || '',
+          text: tr.innerText || ''
+        });
+      });
+      return out;
+    }""")
+
+    priced = []
+    for row in rows:
+        value = extract_best_price(row.get("price"), min_price)
+        if value is None:
+            continue
+        priced.append((block_occupancy(row), value))
+
+    if not priced:
+        return None
+
+    fits = [p for p in priced if guests and p[0] >= guests]
+    if not fits:
+        # Nothing advertised for a party this size — compare against the largest
+        # tier on offer rather than silently falling back to the cheapest one.
+        largest = max(occ for occ, _ in priced)
+        fits = [p for p in priced if p[0] == largest]
+
+    return min(value for _, value in fits)
+
+
 async def scrape_audit(platform, url, min_price, benchmark=None, nights=1):
     pw = None
     browser = None
@@ -97,13 +174,18 @@ async def scrape_audit(platform, url, min_price, benchmark=None, nights=1):
             found_price = None
             
             if platform == "booking":
-                selectors = [".prco-valign-middle-helper", "[data-testid='price-and-pos-availability']", ".bui-price-display__value"]
-                for sel in selectors:
-                    elements = page.locator(sel)
-                    if await elements.count() > 0:
-                        combined_text = " ".join(await elements.all_inner_texts())
-                        found_price = extract_best_price(combined_text, min_price)
-                        if found_price: break
+                found_price = await booking_price_for_guests(page, min_price, guests_from_url(url))
+
+                if not found_price:
+                    # The offer table did not render (layout change, partial load).
+                    # Sweep the page as before rather than reporting a false SOLD_OUT.
+                    selectors = [".prco-valign-middle-helper", "[data-testid='price-and-pos-availability']", ".bui-price-display__value"]
+                    for sel in selectors:
+                        elements = page.locator(sel)
+                        if await elements.count() > 0:
+                            combined_text = " ".join(await elements.all_inner_texts())
+                            found_price = extract_best_price(combined_text, min_price)
+                            if found_price: break
 
             elif platform == "airbnb":
                 # Extended selectors for mobile and desktop versions
