@@ -593,10 +593,22 @@ function AuditorCalendar({
                                 </div>
                               ))}
                               <div className="text-[10px] italic text-muted-foreground pt-1 border-t mt-1">
-                                {audit.bookingStatus !== "OK" && <div className={cn((audit.suspiciousChannels || []).includes("booking") && "text-red-500 font-semibold not-italic")}>Booking: {audit.bookingStatus}{(audit.suspiciousChannels || []).includes("booking") && " ⚠ scrape suspect"}</div>}
-                                {audit.airbnbStatus !== "OK" && <div className={cn((audit.suspiciousChannels || []).includes("airbnb") && "text-red-500 font-semibold not-italic")}>Airbnb: {audit.airbnbStatus}{(audit.suspiciousChannels || []).includes("airbnb") && " ⚠ scrape suspect"}</div>}
-                                {audit.slowhopStatus !== "OK" && <div className={cn((audit.suspiciousChannels || []).includes("slowhop") && "text-red-500 font-semibold not-italic")}>Slowhop: {audit.slowhopStatus}{(audit.suspiciousChannels || []).includes("slowhop") && " ⚠ scrape suspect"}</div>}
-                                {audit.alohacampStatus !== "OK" && audit.alohacampStatus && <div className={cn((audit.suspiciousChannels || []).includes("alohacamp") && "text-red-500 font-semibold not-italic")}>Alohacamp: {audit.alohacampStatus}{(audit.suspiciousChannels || []).includes("alohacamp") && " ⚠ scrape suspect"}</div>}
+                                {CHANNEL_LABELS.map(({ key, label }) => {
+                                  const status = (audit as any)[`${key}Status`];
+                                  if (!status || status === "OK") return null;
+
+                                  const suspect = (audit.suspiciousChannels || []).includes(key);
+                                  const unread = (audit.unreadChannels || []).includes(key);
+                                  const reason = scrapeErrorFor(audit, key);
+
+                                  return (
+                                    <div key={key} className={cn((suspect || unread) && "text-red-500 font-semibold not-italic")}>
+                                      {label}: {STATUS_LABELS[status] ?? status}
+                                      {suspect && " ⚠ scrape suspect"}
+                                      {reason && <span className="font-normal italic"> — {reason}</span>}
+                                    </div>
+                                  );
+                                })}
                               </div>
                             </div>
                           </TooltipContent>
@@ -657,6 +669,37 @@ function AuditorLegend() {
 }
 
 // ─── Main Pricing Page ────────────────────────────────────────────────────────
+
+/** Channels in the order the tooltip lists them. */
+const CHANNEL_LABELS = [
+  { key: "booking", label: "Booking" },
+  { key: "airbnb", label: "Airbnb" },
+  { key: "slowhop", label: "Slowhop" },
+  { key: "alohacamp", label: "Alohacamp" },
+] as const;
+
+/**
+ * NO_PRICE is not a claim about availability — it means the scraper loaded the page
+ * and could not read a price. Spelling that out keeps it from being read as "booked",
+ * which is exactly how a broken parser used to pass for a full calendar.
+ */
+const STATUS_LABELS: Record<string, string> = {
+  SOLD_OUT: "termin zajęty",
+  NO_PRICE: "nie odczytano ceny",
+  ERROR: "błąd pobrania",
+};
+
+/** What the scraper reported for this channel, if anything was recorded. */
+function scrapeErrorFor(audit: any, channel: string): string | null {
+  if (!audit.scrapeErrors) return null;
+  try {
+    const parsed = typeof audit.scrapeErrors === "string" ? JSON.parse(audit.scrapeErrors) : audit.scrapeErrors;
+    const reason = parsed?.[channel];
+    return typeof reason === "string" ? reason.slice(0, 120) : null;
+  } catch {
+    return null;
+  }
+}
 
 export default function PricingDashboard() {
   const { user } = useAuth();

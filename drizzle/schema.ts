@@ -500,6 +500,13 @@ export const priceAudits = mysqlTable("price_audits", {
 
   /** Whether this probe was specifically intended to test a minimum stay violation */
   isMinStayTest: int("isMinStayTest").default(0).notNull(),
+
+  /**
+   * Why a channel gave no price, as JSON keyed by channel — `{"airbnb":"timeout: ..."}`.
+   * The status column says a probe failed; this says what failed, which is the difference
+   * between diagnosing a bad night from the data and going back through journalctl.
+   */
+  scrapeErrors: text("scrapeErrors"),
 }, (table) => [
   index("idx_audit_property_dates").on(table.property, table.checkIn, table.checkOut),
   index("idx_audit_date_scraped").on(table.dateScraped),

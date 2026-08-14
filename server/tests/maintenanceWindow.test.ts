@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isNetworkMaintenanceWindow } from "../workers/scheduler";
+import { isNetworkMaintenanceWindow } from "../_core/maintenanceWindow";
 
 /**
  * The nightly router/mesh window (02:50–03:20 Europe/Warsaw).

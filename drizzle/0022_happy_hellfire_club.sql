@@ -1,0 +1,1 @@
+ALTER TABLE `price_audits` ADD `scrapeErrors` text;

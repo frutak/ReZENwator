@@ -6,6 +6,7 @@ import { Logger } from "../_core/logger";
 import { PricingService } from "../services/PricingService";
 import { addDays, format, isAfter, isBefore, startOfDay } from "date-fns";
 import { AUDIT_OCCUPANCY } from "@shared/config";
+import { isNetworkMaintenanceWindow } from "../_core/maintenanceWindow";
 
 const execAsync = promisify(exec);
 
@@ -39,26 +40,31 @@ interface ScrapeResult {
 interface RunStats {
   calls: number;
   resolved: number;
+  noPrice: number;
   failed: number;
   attempts: number;
-  byChannel: Record<string, { calls: number; failed: number; attempts: number }>;
+  byChannel: Record<string, { calls: number; resolved: number; attempts: number }>;
 }
 
-const emptyRunStats = (): RunStats => ({ calls: 0, resolved: 0, failed: 0, attempts: 0, byChannel: {} });
+/** A call answered the question only if the portal said yes or said no. */
+const RESOLVED = new Set(["OK", "SOLD_OUT"]);
+
+const emptyRunStats = (): RunStats => ({ calls: 0, resolved: 0, noPrice: 0, failed: 0, attempts: 0, byChannel: {} });
 
 function recordCall(stats: RunStats, channel: string, result: ScrapeResult): void {
   const attempts = result.attempts ?? 1;
-  const failed = result.status === "ERROR";
+  const resolved = RESOLVED.has(result.status);
 
   stats.calls++;
   stats.attempts += attempts;
-  if (failed) stats.failed++;
-  else stats.resolved++;
+  if (resolved) stats.resolved++;
+  else if (result.status === "NO_PRICE") stats.noPrice++;
+  else stats.failed++;
 
-  const per = (stats.byChannel[channel] ??= { calls: 0, failed: 0, attempts: 0 });
+  const per = (stats.byChannel[channel] ??= { calls: 0, resolved: 0, attempts: 0 });
   per.calls++;
   per.attempts += attempts;
-  if (failed) per.failed++;
+  if (resolved) per.resolved++;
 }
 
 /** One line summarising a run's call health, for the sync log and the console. */
@@ -66,14 +72,33 @@ function summariseRun(stats: RunStats): string {
   if (stats.calls === 0) return "no portal calls made";
 
   const rate = ((stats.resolved / stats.calls) * 100).toFixed(1);
+  const loadsPerCall = (stats.attempts / stats.calls).toFixed(2);
   const perChannel = Object.entries(stats.byChannel)
-    .map(([channel, s]) => `${channel} ${s.calls - s.failed}/${s.calls}`)
+    .map(([channel, s]) => `${channel} ${s.resolved}/${s.calls}`)
     .join(", ");
 
   return (
-    `${stats.resolved}/${stats.calls} portal calls resolved (${rate}%), ${stats.failed} failed; ` +
-    `${stats.attempts} page loads for ${stats.calls} calls; ${perChannel}`
+    `${stats.resolved}/${stats.calls} portal calls resolved (${rate}%), ` +
+    `${stats.noPrice} no price, ${stats.failed} failed; ` +
+    `${stats.attempts} page loads for ${stats.calls} calls (${loadsPerCall}/call); ${perChannel}`
   );
+}
+
+/** Writes one probe's channel results onto the row being saved, and counts them. */
+function applyResults(auditData: any, results: Record<string, ScrapeResult>, stats: RunStats): void {
+  const errors: Record<string, string> = {};
+
+  for (const [channel, result] of Object.entries(results)) {
+    recordCall(stats, channel, result);
+    auditData[`${channel}Price`] = result.price ? String(result.price) : null;
+    auditData[`${channel}Status`] = result.status;
+    if (result.error) errors[channel] = result.error;
+  }
+
+  // Why a channel produced no price, stored beside the row that lacks one. Until now
+  // the reason existed only as a console line, so diagnosing a bad night meant reading
+  // journalctl and hoping it had not rotated away.
+  auditData.scrapeErrors = Object.keys(errors).length > 0 ? JSON.stringify(errors) : null;
 }
 
 // The guest count is a parameter rather than a literal so that every portal URL and
@@ -127,10 +152,6 @@ export class PricingAuditor {
     const stats = emptyRunStats();
 
     try {
-      // A stay we do not sell has no benchmark, but its portal prices are still worth
-      // recording — that is the whole point of probing one by hand.
-      const benchmark = await PricingService.getBenchmarkPrice(property, checkIn, checkOut).catch(() => undefined);
-
       const auditData: any = {
         property,
         checkIn,
@@ -139,19 +160,11 @@ export class PricingAuditor {
         dateScraped: new Date(),
       };
 
-      const channels = Object.keys(PORTAL_URLS[property]);
       const nights = Math.max(1, Math.round((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24)));
+      const targets = this.portalTargets(property, checkIn, checkOut);
+      const results = await this.scrapeChannels(property, targets, nights);
 
-      for (const channel of channels) {
-        const url = (PORTAL_URLS[property] as any)[channel](format(checkIn, "yyyy-MM-dd"), format(checkOut, "yyyy-MM-dd"), AUDIT_OCCUPANCY[property]);
-        const result = await this.scrapeWithPlaywright(property, channel, url, nights, benchmark);
-        recordCall(stats, channel, result);
-
-        auditData[`${channel}Price`] = result.price ? String(result.price) : null;
-        auditData[`${channel}Status`] = result.status;
-        
-        await new Promise(resolve => setTimeout(resolve, 2000));
-      }
+      applyResults(auditData, results, stats);
 
       await PricingAuditRepository.saveAudit(auditData);
       
@@ -181,6 +194,23 @@ export class PricingAuditor {
       console.warn("[PricingAuditor] Audit already in progress, skipping daily trigger.");
       return;
     }
+
+    // The one night this auditor recorded nothing but errors — 12 Aug 2026, 37 failed
+    // calls — was the last run scheduled at 03:00, inside the window where the router
+    // renews its lease and the mesh is down. It has since moved to 04:00, but nothing
+    // stopped a future reschedule from putting it back, so refuse rather than spend ten
+    // minutes retrying against a dead route.
+    if (isNetworkMaintenanceWindow()) {
+      console.warn("[PricingAuditor] Skipping: inside the router/mesh maintenance window.");
+      await Logger.system("ical", {
+        source: "Pricing Auditor",
+        success: false,
+        durationMs: 0,
+        errorMessage: "Skipped: started inside the router/mesh maintenance window (02:50–03:20)",
+      });
+      return;
+    }
+
     this.isRunning = true;
 
     console.log("[PricingAuditor] Starting daily audit...");
@@ -264,21 +294,11 @@ export class PricingAuditor {
             dateScraped: new Date(),
           };
 
-          const channels = Object.keys(PORTAL_URLS[property]);
           const nights = Math.max(1, Math.round((checkOut.getTime() - checkIn.getTime()) / (1000 * 60 * 60 * 24)));
+          const targets = this.portalTargets(property, checkIn, checkOut);
+          const results = await this.scrapeChannels(property, targets, nights);
 
-          // Run channels sequentially to avoid being blocked or having dynamic content fail to load
-          for (const channel of channels) {
-            const url = (PORTAL_URLS[property] as any)[channel](format(checkIn, "yyyy-MM-dd"), format(checkOut, "yyyy-MM-dd"), AUDIT_OCCUPANCY[property]);
-            const result = await this.scrapeWithPlaywright(property, channel, url, nights, benchmark);
-            recordCall(stats, channel, result);
-
-            auditData[`${channel}Price`] = result.price ? String(result.price) : null;
-            auditData[`${channel}Status`] = result.status;
-
-            // Short delay between channels for same date
-            await new Promise(resolve => setTimeout(resolve, 2000));
-          }
+          applyResults(auditData, results, stats);
 
           await PricingAuditRepository.saveAudit(auditData);
           probedThisRun.add(key);
@@ -311,62 +331,119 @@ export class PricingAuditor {
     }
   }
 
+  /** Every portal URL for one stay, at the audited party size. */
+  private static portalTargets(property: "Sadoles" | "Hacjenda", checkIn: Date, checkOut: Date) {
+    const start = format(checkIn, "yyyy-MM-dd");
+    const end = format(checkOut, "yyyy-MM-dd");
+    return Object.keys(PORTAL_URLS[property]).map(channel => ({
+      channel,
+      url: (PORTAL_URLS[property] as any)[channel](start, end, AUDIT_OCCUPANCY[property]),
+    }));
+  }
+
   /**
-   * Scrape a channel, retrying when the probe comes back SOLD_OUT or ERROR.
+   * Scrape every channel of one probe, retrying the ones that did not answer.
    *
-   * A single Playwright probe is unreliable — roughly half of Airbnb probes fail to render
-   * the booking panel in time (bot detection / slow load) and fall through to SOLD_OUT, which
-   * is indistinguishable from genuine unavailability once written to the DB. Retrying and
-   * only accepting SOLD_OUT when it is consistent across every attempt removes that noise.
+   * A single page load is unreliable: the booking panel may not render in time, or a
+   * portal may serve a challenge. Only unanswered channels are re-tried. Both a price
+   * and an explicit SOLD_OUT are answers and are taken as they come — a page that failed
+   * to render now reports NO_PRICE rather than passing itself off as unavailability, so
+   * there is nothing left for a second opinion on SOLD_OUT to protect against, and the
+   * min-stay tests stop spending three page loads per channel to confirm a refusal.
    *
-   * The first OK wins immediately, so the extra cost is paid only by dates that really are
-   * unavailable (notably min-stay tests, which are sold out on every channel by design).
+   * The whole batch shares one browser per attempt. Launching Chromium once per channel
+   * meant forty-odd launches a night, each one both a delay and a chance to fail.
    */
-  private static async scrapeWithPlaywright(property: string, channel: string, url: string, nights: number, benchmark?: number): Promise<ScrapeResult> {
-    let lastResult: ScrapeResult = { price: null, status: "ERROR", error: "No attempt made" };
-    let sawError = false;
+  private static async scrapeChannels(
+    property: string,
+    targets: { channel: string; url: string }[],
+    nights: number
+  ): Promise<Record<string, ScrapeResult>> {
+    const results: Record<string, ScrapeResult> = {};
+    const attemptsUsed: Record<string, number> = {};
+    const sawUnresolved: Record<string, boolean> = {};
 
-    let attemptsUsed = 0;
+    let pending = targets;
 
-    for (let attempt = 1; attempt <= SCRAPE_ATTEMPTS; attempt++) {
-      const result = await this.scrapeOnce(property, channel, url, nights, benchmark);
-      attemptsUsed = attempt;
+    for (let attempt = 1; attempt <= SCRAPE_ATTEMPTS && pending.length > 0; attempt++) {
+      const batch = await this.scrapeBatchOnce(property, pending, nights);
+      const retry: { channel: string; url: string }[] = [];
 
-      // A price is definitive — no reason to probe again.
-      if (result.status === "OK" && result.price) return { ...result, attempts: attemptsUsed };
+      for (const target of pending) {
+        const result = batch[target.channel] ?? {
+          price: null,
+          status: "ERROR",
+          error: "channel missing from batch response",
+        };
 
-      if (result.status !== "SOLD_OUT") sawError = true;
-      lastResult = result;
+        attemptsUsed[target.channel] = attempt;
+        results[target.channel] = result;
 
-      if (attempt < SCRAPE_ATTEMPTS) {
-        console.warn(`[PricingAuditor] ${channel} returned ${result.status} (attempt ${attempt}/${SCRAPE_ATTEMPTS}), retrying...`);
+        if (result.status === "OK" && result.price) continue;
+        if (result.status === "SOLD_OUT") continue;
+
+        sawUnresolved[target.channel] = true;
+        retry.push(target);
+      }
+
+      pending = retry;
+
+      if (pending.length > 0 && attempt < SCRAPE_ATTEMPTS) {
+        console.warn(
+          `[PricingAuditor] retrying ${pending.map(t => `${t.channel}=${results[t.channel].status}`).join(", ")} ` +
+          `(attempt ${attempt}/${SCRAPE_ATTEMPTS})`
+        );
         await new Promise(resolve => setTimeout(resolve, SCRAPE_RETRY_DELAY_MS));
       }
     }
 
-    // Only report SOLD_OUT when every attempt agreed. A mix of SOLD_OUT and ERROR means the
-    // scraper was unhealthy, so surface that instead of asserting the dates are unavailable.
-    if (sawError && lastResult.status === "SOLD_OUT") {
-      return { price: null, status: "ERROR", error: "Inconsistent probes (SOLD_OUT/ERROR)", attempts: attemptsUsed };
+    for (const target of targets) {
+      const channel = target.channel;
+      const result = results[channel];
+
+      // Only report SOLD_OUT when every attempt agreed. A run that saw an error or an
+      // unreadable page in between was unhealthy, and saying "these dates are taken" on
+      // that basis is the claim that made a broken parser look like a full calendar.
+      if (result.status === "SOLD_OUT" && sawUnresolved[channel]) {
+        results[channel] = {
+          price: null,
+          status: "ERROR",
+          error: "inconsistent probes (SOLD_OUT mixed with an unresolved attempt)",
+        };
+      }
+
+      results[channel] = { ...results[channel], attempts: attemptsUsed[channel] ?? 0 };
     }
 
-    return { ...lastResult, attempts: attemptsUsed };
+    return results;
   }
 
-  private static async scrapeOnce(property: string, channel: string, url: string, nights: number, benchmark?: number): Promise<ScrapeResult> {
+  /** One browser, every pending channel. Never throws — failures come back per channel. */
+  private static async scrapeBatchOnce(
+    property: string,
+    targets: { channel: string; url: string }[],
+    nights: number
+  ): Promise<Record<string, ScrapeResult>> {
+    // Heuristic: Min price for a house must be at least the cleaning fee + some nightly rate.
+    // Sadoles cleaning: 900, Hacjenda: 700.
+    const cleaningFee = property === "Sadoles" ? 900 : 700;
+    const minNightly = property === "Sadoles" ? 500 : 300;
+    const minPrice = cleaningFee + (minNightly * nights);
+
+    const job = Buffer.from(JSON.stringify({ minPrice, nights, targets })).toString("base64");
+
     try {
-      // Heuristic: Min price for a house must be at least the cleaning fee + some nightly rate.
-      // Sadoles cleaning: 900, Hacjenda: 700.
-      const cleaningFee = property === "Sadoles" ? 900 : 700;
-      const minNightly = property === "Sadoles" ? 500 : 300;
-      const minPrice = cleaningFee + (minNightly * nights);
-      
-      const benchmarkArg = benchmark ? ` "${benchmark}"` : "";
-      const { stdout } = await execAsync(`${PYTHON_VENV_PATH} ${HELPER_SCRIPT_PATH} "${channel}" "${url}" "${minPrice}"${benchmarkArg} "${nights}"`);
+      const { stdout } = await execAsync(
+        `${PYTHON_VENV_PATH} ${HELPER_SCRIPT_PATH} --batch ${job}`,
+        { maxBuffer: 8 * 1024 * 1024 }
+      );
       return JSON.parse(stdout);
     } catch (err) {
-      console.error(`[PricingAuditor] Scrape failed for ${channel}:`, (err as Error).message);
-      return { price: null, status: "ERROR", error: (err as Error).message };
+      const message = (err as Error).message;
+      console.error(`[PricingAuditor] Batch scrape failed for ${property}:`, message);
+      return Object.fromEntries(
+        targets.map(t => [t.channel, { price: null, status: "ERROR", error: message.slice(0, 200) }])
+      );
     }
   }
 

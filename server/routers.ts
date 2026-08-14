@@ -784,12 +784,19 @@ const pricingAuditRouter = router({
         // sells the same dates means the scrape failed, not that the property is booked.
         // Computed before the benchmark because it does not need one — a stay we do not
         // sell has no internal price, and that must not silence the check.
+        //
+        // NO_PRICE is deliberately not suspicious. It already says the scraper could not
+        // read the page, so it needs no inference; treating it as a claim of
+        // unavailability is exactly the confusion the status was added to end.
         const statuses = channels.map(c => audit[`${c}Status` as keyof typeof audit] as string | null);
         const anyOk = statuses.some(s => s === "OK");
         const suspiciousChannels = anyOk
           ? channels.filter(c => (audit[`${c}Status` as keyof typeof audit] as string | null) === "SOLD_OUT")
           : [];
         const hasChannelAnomaly = suspiciousChannels.length > 0;
+        const unreadChannels = channels.filter(
+          c => (audit[`${c}Status` as keyof typeof audit] as string | null) === "NO_PRICE"
+        );
 
         try {
           const checkIn = new Date(audit.checkIn);
@@ -840,6 +847,7 @@ const pricingAuditRouter = router({
             maxDeviation,
             suspiciousChannels,
             hasChannelAnomaly,
+            unreadChannels,
           };
         } catch (e) {
           // No internal price for this stay — report the portals without a comparison
@@ -852,6 +860,7 @@ const pricingAuditRouter = router({
             maxDeviation: 0,
             suspiciousChannels,
             hasChannelAnomaly,
+            unreadChannels,
           };
         }
       }));

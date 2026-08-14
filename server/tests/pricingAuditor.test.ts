@@ -4,91 +4,136 @@ import { PricingAuditRepository } from "../repositories/PricingAuditRepository";
 import { BookingRepository } from "../repositories/BookingRepository";
 import { PricingService } from "../services/PricingService";
 import { Logger } from "../_core/logger";
+import { isNetworkMaintenanceWindow } from "../_core/maintenanceWindow";
 
 vi.mock("../db", () => ({ getDb: vi.fn() }));
 vi.mock("../_core/logger", () => ({ Logger: { system: vi.fn() } }));
 
-// scrapeWithPlaywright and generateCandidateDates are private; reach them the way the worker does.
+// Pinned false by default: the guard reads the real clock, and a suite that happened
+// to run at 03:00 Warsaw would otherwise skip every audit and fail at random.
+vi.mock("../_core/maintenanceWindow", () => ({ isNetworkMaintenanceWindow: vi.fn(() => false) }));
+
+// scrapeChannels, scrapeBatchOnce and generateCandidateDates are private; reach them
+// the way the worker does.
 const auditor = PricingAuditor as any;
 
-describe("PricingAuditor.scrapeWithPlaywright retries", () => {
-  let attempts: any[];
+const OK = { price: 3402, status: "OK" };
+const SOLD_OUT = { price: null, status: "SOLD_OUT" };
+const NO_PRICE = { price: null, status: "NO_PRICE", error: "no availability marker and no readable price" };
+const ERROR = { price: null, status: "ERROR", error: "boom" };
 
-  const stubProbe = (results: any[]) => {
-    attempts = [];
-    vi.spyOn(auditor, "scrapeOnce").mockImplementation(async () => {
-      const r = results[attempts.length] ?? results[results.length - 1];
-      attempts.push(r);
-      return r;
+describe("PricingAuditor.scrapeChannels retries", () => {
+  let batches: string[][];
+
+  /** Serve a scripted result per attempt; the last entry repeats. */
+  const stubBatches = (perAttempt: Record<string, any>[]) => {
+    batches = [];
+    vi.spyOn(auditor, "scrapeBatchOnce").mockImplementation(async (...args: any[]) => {
+      const targets = args[1] as { channel: string }[];
+      const scripted = perAttempt[batches.length] ?? perAttempt[perAttempt.length - 1];
+      batches.push(targets.map(t => t.channel));
+      return Object.fromEntries(targets.map(t => [t.channel, scripted[t.channel]]));
     });
   };
 
-  const OK = { price: 3402, status: "OK" };
-  const SOLD_OUT = { price: null, status: "SOLD_OUT" };
-  const ERROR = { price: null, status: "ERROR", error: "boom" };
-
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
+  beforeEach(() => vi.useFakeTimers());
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
-  // Drive the retry backoff with fake timers so the test does not wait out the real delay.
-  const run = async () => {
-    const pending = auditor.scrapeWithPlaywright("Sadoles", "airbnb", "http://x", 3, 3000);
+  const run = async (channels = ["booking", "airbnb"]) => {
+    const targets = channels.map(channel => ({ channel, url: `http://x/${channel}` }));
+    const pending = auditor.scrapeChannels("Sadoles", targets, 3);
     await vi.runAllTimersAsync();
     return pending;
   };
 
-  it("returns the first OK without further probes", async () => {
-    stubProbe([OK, SOLD_OUT, SOLD_OUT]);
-    await expect(run()).resolves.toEqual({ ...OK, attempts: 1 });
-    expect(attempts).toHaveLength(1);
+  it("returns a price without probing again", async () => {
+    stubBatches([{ booking: OK, airbnb: OK }]);
+    const results = await run();
+    expect(results.booking).toEqual({ ...OK, attempts: 1 });
+    expect(batches).toHaveLength(1);
   });
 
-  it("recovers a flaky SOLD_OUT when a later attempt finds a price", async () => {
-    stubProbe([SOLD_OUT, OK]);
-    await expect(run()).resolves.toEqual({ ...OK, attempts: 2 });
-    expect(attempts).toHaveLength(2);
+  it("retries only the channels that did not answer", async () => {
+    stubBatches([
+      { booking: OK, airbnb: NO_PRICE },
+      { airbnb: OK },
+    ]);
+
+    const results = await run();
+
+    expect(batches).toEqual([["booking", "airbnb"], ["airbnb"]]);
+    expect(results.booking).toEqual({ ...OK, attempts: 1 });
+    expect(results.airbnb).toEqual({ ...OK, attempts: 2 });
   });
 
-  it("reports SOLD_OUT only when every attempt agrees", async () => {
-    stubProbe([SOLD_OUT, SOLD_OUT, SOLD_OUT]);
-    await expect(run()).resolves.toEqual({ ...SOLD_OUT, attempts: 3 });
-    expect(attempts).toHaveLength(3);
+  it("takes an explicit SOLD_OUT at face value, without re-probing", async () => {
+    // The page said the dates are unavailable. That is an answer; a page that merely
+    // failed to render says NO_PRICE instead, so there is nothing to second-guess.
+    stubBatches([{ booking: SOLD_OUT, airbnb: SOLD_OUT }]);
+    const results = await run();
+    expect(results.booking).toEqual({ ...SOLD_OUT, attempts: 1 });
+    expect(batches).toHaveLength(1);
   });
 
-  it("reports ERROR rather than SOLD_OUT when the probes disagreed", async () => {
-    stubProbe([ERROR, SOLD_OUT, SOLD_OUT]);
-    const result = await run();
-    expect(result.status).toBe("ERROR");
-    expect(result.price).toBeNull();
+  it("will not call a stay sold out when an attempt failed to read the page", async () => {
+    // The claim "these dates are taken" must not rest on a run that was partly blind.
+    stubBatches([
+      { booking: NO_PRICE, airbnb: OK },
+      { booking: SOLD_OUT },
+    ]);
+
+    const results = await run();
+
+    expect(results.booking.status).toBe("ERROR");
+    expect(results.booking.error).toMatch(/inconsistent probes/);
   });
 
   it("propagates a consistent ERROR", async () => {
-    stubProbe([ERROR, ERROR, ERROR]);
-    const result = await run();
-    expect(result.status).toBe("ERROR");
+    stubBatches([{ booking: ERROR, airbnb: ERROR }]);
+    const results = await run();
+    expect(results.booking.status).toBe("ERROR");
+    expect(results.booking.attempts).toBe(3);
+  });
+
+  it("keeps NO_PRICE distinct from SOLD_OUT when every attempt agrees", async () => {
+    stubBatches([{ booking: NO_PRICE, airbnb: NO_PRICE }]);
+    const results = await run();
+    expect(results.booking.status).toBe("NO_PRICE");
   });
 });
 
-describe("PricingAuditor.runDailyAudit probe selection", () => {
-  const range = (checkIn: string, checkOut: string, isMinStayTest = false) => ({
+describe("PricingAuditor.runDailyAudit", () => {
+  const range = (checkIn: string, checkOut: string) => ({
     checkIn: new Date(`${checkIn}T16:00:00`),
     checkOut: new Date(`${checkOut}T10:00:00`),
-    isMinStayTest,
+    isMinStayTest: false,
     priority: 1,
   });
 
   let saved: any[];
+  let logged: string[];
 
-  const arrange = (candidates: any[], recentFor: string[] = []) => {
+  const arrange = (opts: {
+    candidates?: any[];
+    perChannel?: Record<string, any>;
+    recentFor?: string[];
+  } = {}) => {
     saved = [];
+    logged = [];
+    const candidates = opts.candidates ?? [range("2026-12-24", "2026-12-27")];
+    const perChannel = opts.perChannel ?? {};
+    const recentFor = opts.recentFor ?? [];
+
     vi.spyOn(auditor, "generateCandidateDates").mockResolvedValue(candidates);
-    vi.spyOn(auditor, "scrapeWithPlaywright").mockResolvedValue({ price: 3000, status: "OK" });
+    vi.spyOn(auditor, "scrapeBatchOnce").mockImplementation(async (...args: any[]) => {
+      const targets = args[1] as { channel: string }[];
+      return Object.fromEntries(
+        targets.map(t => [t.channel, perChannel[t.channel] ?? { price: 3000, status: "OK" }])
+      );
+    });
     vi.spyOn(BookingRepository, "getAvailability").mockResolvedValue([] as any);
     vi.spyOn(PricingService, "getBenchmarkPrice").mockResolvedValue(3000);
     vi.spyOn(PricingAuditRepository, "saveAudit").mockImplementation(async (a: any) => {
@@ -98,92 +143,16 @@ describe("PricingAuditor.runDailyAudit probe selection", () => {
     vi.spyOn(PricingAuditRepository, "getRecentAudit").mockImplementation(async (_p, cIn) =>
       recentFor.includes(cIn.toISOString()) ? ({ id: 1 } as any) : null
     );
-  };
-
-  const probedRanges = () =>
-    saved.map(a => `${a.property}|${a.checkIn.toISOString()}|${a.checkOut.toISOString()}`);
-
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.restoreAllMocks();
-    (PricingAuditor as any).isRunning = false;
-  });
-
-  const run = async () => {
-    const pending = PricingAuditor.runDailyAudit();
-    await vi.runAllTimersAsync();
-    return pending;
-  };
-
-  it("probes a range once even when two candidates name the same dates", async () => {
-    // The holiday rule and a wildcard can land on the same stay; before the dedupe
-    // both were probed and two identical rows were written.
-    arrange([
-      range("2026-12-24", "2026-12-27"),
-      range("2026-12-24", "2026-12-27"),
-      range("2026-12-31", "2027-01-03"),
-    ]);
-
-    await run();
-
-    expect(probedRanges()).toHaveLength(new Set(probedRanges()).size);
-    const christmas = saved.filter(a => a.checkIn.toISOString().startsWith("2026-12-24"));
-    expect(christmas).toHaveLength(2); // once per property, never twice for one
-    expect(new Set(christmas.map(a => a.property)).size).toBe(2);
-  });
-
-  it("skips a range already probed in the last fortnight, whatever its result was", async () => {
-    const stale = range("2026-12-24", "2026-12-27");
-    arrange([stale, range("2026-12-31", "2027-01-03")], [stale.checkIn.toISOString()]);
-
-    await run();
-
-    expect(saved.every(a => !a.checkIn.toISOString().startsWith("2026-12-24"))).toBe(true);
-    expect(saved.some(a => a.checkIn.toISOString().startsWith("2026-12-31"))).toBe(true);
-  });
-
-  it("honours the ten-probe ceiling", async () => {
-    arrange(Array.from({ length: 20 }, (_, i) =>
-      range(`2026-09-${String(i + 1).padStart(2, "0")}`, `2026-09-${String(i + 2).padStart(2, "0")}`)
-    ));
-
-    await run();
-
-    expect(saved).toHaveLength(10);
-  });
-});
-
-describe("PricingAuditor run health accounting", () => {
-  // The counters live on the module, not the class; drive them through a real run.
-  const range = (checkIn: string, checkOut: string) => ({
-    checkIn: new Date(`${checkIn}T16:00:00`),
-    checkOut: new Date(`${checkOut}T10:00:00`),
-    isMinStayTest: false,
-    priority: 1,
-  });
-
-  let logged: string[];
-
-  const arrange = (perChannel: Record<string, any>) => {
-    logged = [];
-    vi.spyOn(auditor, "generateCandidateDates").mockResolvedValue([range("2026-12-24", "2026-12-27")]);
-    vi.spyOn(auditor, "scrapeWithPlaywright").mockImplementation(async (...args: any[]) =>
-      perChannel[args[1] as string] ?? { price: 3000, status: "OK", attempts: 1 }
-    );
-    vi.spyOn(BookingRepository, "getAvailability").mockResolvedValue([] as any);
-    vi.spyOn(PricingService, "getBenchmarkPrice").mockResolvedValue(3000);
-    vi.spyOn(PricingAuditRepository, "saveAudit").mockResolvedValue(undefined as any);
-    vi.spyOn(PricingAuditRepository, "getRecentAudit").mockResolvedValue(null);
-    vi.spyOn(Logger, "system").mockImplementation(async (_t: any, entry: any) => {
-      logged.push(entry.errorMessage);
+    vi.mocked(Logger.system).mockImplementation(async (...args: any[]) => {
+      logged.push(args[1]?.errorMessage);
     });
   };
 
-  beforeEach(() => vi.useFakeTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(isNetworkMaintenanceWindow).mockReturnValue(false);
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -197,27 +166,109 @@ describe("PricingAuditor run health accounting", () => {
     return logged.join("\n");
   };
 
-  it("counts a clean run as fully resolved", async () => {
-    arrange({});
-    const summary = await run();
-    // Sadoles has four channels, Hacjenda three: seven calls over the two properties.
-    expect(summary).toContain("7/7 portal calls resolved (100.0%), 0 failed");
-    expect(summary).toContain("7 page loads for 7 calls");
+  describe("probe selection", () => {
+    it("probes a range once even when two candidates name the same dates", async () => {
+      arrange({
+        candidates: [
+          range("2026-12-24", "2026-12-27"),
+          range("2026-12-24", "2026-12-27"),
+          range("2026-12-31", "2027-01-03"),
+        ],
+      });
+
+      await run();
+
+      const keys = saved.map(a => `${a.property}|${a.checkIn.toISOString()}`);
+      expect(keys).toHaveLength(new Set(keys).size);
+    });
+
+    it("skips a range already probed in the last fortnight, whatever its result was", async () => {
+      const stale = range("2026-12-24", "2026-12-27");
+      arrange({
+        candidates: [stale, range("2026-12-31", "2027-01-03")],
+        recentFor: [stale.checkIn.toISOString()],
+      });
+
+      await run();
+
+      expect(saved.every(a => !a.checkIn.toISOString().startsWith("2026-12-24"))).toBe(true);
+      expect(saved.some(a => a.checkIn.toISOString().startsWith("2026-12-31"))).toBe(true);
+    });
+
+    it("honours the ten-probe ceiling", async () => {
+      arrange({
+        candidates: Array.from({ length: 20 }, (_, i) =>
+          range(`2026-09-${String(i + 1).padStart(2, "0")}`, `2026-09-${String(i + 2).padStart(2, "0")}`)
+        ),
+      });
+
+      await run();
+
+      expect(saved).toHaveLength(10);
+    });
   });
 
-  it("counts an errored channel as unresolved and reports it per channel", async () => {
-    arrange({ airbnb: { price: null, status: "ERROR", error: "timeout", attempts: 3 } });
-    const summary = await run();
-    expect(summary).toContain("5/7 portal calls resolved (71.4%), 2 failed");
-    expect(summary).toContain("airbnb 0/2");
-    expect(summary).toContain("booking 2/2");
+  describe("maintenance window", () => {
+    it("does not start inside the router/mesh window", async () => {
+      arrange();
+      vi.mocked(isNetworkMaintenanceWindow).mockReturnValue(true);
+
+      const summary = await run();
+
+      expect(saved).toHaveLength(0);
+      expect(summary).toMatch(/maintenance window/);
+    });
   });
 
-  it("counts SOLD_OUT as an answer, not a failure", async () => {
-    arrange({ slowhop: { price: null, status: "SOLD_OUT", attempts: 3 } });
-    const summary = await run();
-    expect(summary).toContain("7/7 portal calls resolved (100.0%), 0 failed");
-    // Retries still show up as page loads, which is how instability stays visible.
-    expect(summary).toContain("11 page loads for 7 calls");
+  describe("run health accounting", () => {
+    it("counts a clean run as fully resolved", async () => {
+      arrange();
+      const summary = await run();
+      // Sadoles has four channels, Hacjenda three: seven calls over the two properties.
+      expect(summary).toContain("7/7 portal calls resolved (100.0%)");
+      expect(summary).toContain("0 no price, 0 failed");
+      expect(summary).toContain("(1.00/call)");
+    });
+
+    it("counts an errored channel as unresolved and reports it per channel", async () => {
+      arrange({ perChannel: { airbnb: ERROR } });
+      const summary = await run();
+      expect(summary).toContain("5/7 portal calls resolved (71.4%)");
+      expect(summary).toContain("0 no price, 2 failed");
+      expect(summary).toContain("airbnb 0/2");
+      expect(summary).toContain("booking 2/2");
+    });
+
+    it("counts NO_PRICE as unresolved, separately from an outright failure", async () => {
+      arrange({ perChannel: { slowhop: NO_PRICE } });
+      const summary = await run();
+      expect(summary).toContain("5/7 portal calls resolved (71.4%)");
+      expect(summary).toContain("2 no price, 0 failed");
+    });
+
+    it("counts SOLD_OUT as an answer, not a failure", async () => {
+      arrange({ perChannel: { slowhop: SOLD_OUT } });
+      const summary = await run();
+      expect(summary).toContain("7/7 portal calls resolved (100.0%)");
+      // Retries still show up as page loads, which is how instability stays visible.
+      expect(summary).toContain("page loads for 7 calls");
+    });
+  });
+
+  describe("what gets stored", () => {
+    it("keeps the reason a channel gave no price", async () => {
+      arrange({ perChannel: { airbnb: ERROR } });
+
+      await run();
+
+      const errors = JSON.parse(saved[0].scrapeErrors);
+      expect(errors.airbnb).toBe("boom");
+    });
+
+    it("stores nothing when every channel answered", async () => {
+      arrange();
+      await run();
+      expect(saved[0].scrapeErrors).toBeNull();
+    });
   });
 });
