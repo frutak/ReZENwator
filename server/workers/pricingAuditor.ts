@@ -24,6 +24,56 @@ interface ScrapeResult {
   price: number | null;
   status: string;
   error?: string;
+  /** Page loads spent reaching this result, 1..SCRAPE_ATTEMPTS. */
+  attempts?: number;
+}
+
+/**
+ * Health of one run's calls to the portals, as opposed to what those calls found.
+ *
+ * A call that comes back OK or SOLD_OUT answered the question; one that comes back
+ * ERROR did not, and is a fault on our side of the wire — a timeout, a navigation
+ * failure, a bot wall. Tracking the split makes the scraper's reliability a number
+ * that moves rather than something noticed when the table looks wrong.
+ */
+interface RunStats {
+  calls: number;
+  resolved: number;
+  failed: number;
+  attempts: number;
+  byChannel: Record<string, { calls: number; failed: number; attempts: number }>;
+}
+
+const emptyRunStats = (): RunStats => ({ calls: 0, resolved: 0, failed: 0, attempts: 0, byChannel: {} });
+
+function recordCall(stats: RunStats, channel: string, result: ScrapeResult): void {
+  const attempts = result.attempts ?? 1;
+  const failed = result.status === "ERROR";
+
+  stats.calls++;
+  stats.attempts += attempts;
+  if (failed) stats.failed++;
+  else stats.resolved++;
+
+  const per = (stats.byChannel[channel] ??= { calls: 0, failed: 0, attempts: 0 });
+  per.calls++;
+  per.attempts += attempts;
+  if (failed) per.failed++;
+}
+
+/** One line summarising a run's call health, for the sync log and the console. */
+function summariseRun(stats: RunStats): string {
+  if (stats.calls === 0) return "no portal calls made";
+
+  const rate = ((stats.resolved / stats.calls) * 100).toFixed(1);
+  const perChannel = Object.entries(stats.byChannel)
+    .map(([channel, s]) => `${channel} ${s.calls - s.failed}/${s.calls}`)
+    .join(", ");
+
+  return (
+    `${stats.resolved}/${stats.calls} portal calls resolved (${rate}%), ${stats.failed} failed; ` +
+    `${stats.attempts} page loads for ${stats.calls} calls; ${perChannel}`
+  );
 }
 
 // The guest count is a parameter rather than a literal so that every portal URL and
@@ -74,6 +124,7 @@ export class PricingAuditor {
     this.isRunning = true;
     console.log(`[PricingAuditor] Starting manual audit for ${property}: ${format(checkIn, "yyyy-MM-dd")} to ${format(checkOut, "yyyy-MM-dd")}...`);
     const start = Date.now();
+    const stats = emptyRunStats();
 
     try {
       // A stay we do not sell has no benchmark, but its portal prices are still worth
@@ -94,7 +145,8 @@ export class PricingAuditor {
       for (const channel of channels) {
         const url = (PORTAL_URLS[property] as any)[channel](format(checkIn, "yyyy-MM-dd"), format(checkOut, "yyyy-MM-dd"), AUDIT_OCCUPANCY[property]);
         const result = await this.scrapeWithPlaywright(property, channel, url, nights, benchmark);
-        
+        recordCall(stats, channel, result);
+
         auditData[`${channel}Price`] = result.price ? String(result.price) : null;
         auditData[`${channel}Status`] = result.status;
         
@@ -107,7 +159,7 @@ export class PricingAuditor {
         source: "Pricing Auditor",
         success: true,
         durationMs: Date.now() - start,
-        errorMessage: `Manual probe completed for ${property}`,
+        errorMessage: `Manual probe completed for ${property}; ${summariseRun(stats)}`,
       });
       
     } catch (error) {
@@ -134,6 +186,7 @@ export class PricingAuditor {
     console.log("[PricingAuditor] Starting daily audit...");
     const start = Date.now();
     let probesCount = 0;
+    const stats = emptyRunStats();
 
     try {
       const properties: ("Sadoles" | "Hacjenda")[] = ["Sadoles", "Hacjenda"];
@@ -218,10 +271,11 @@ export class PricingAuditor {
           for (const channel of channels) {
             const url = (PORTAL_URLS[property] as any)[channel](format(checkIn, "yyyy-MM-dd"), format(checkOut, "yyyy-MM-dd"), AUDIT_OCCUPANCY[property]);
             const result = await this.scrapeWithPlaywright(property, channel, url, nights, benchmark);
-            
+            recordCall(stats, channel, result);
+
             auditData[`${channel}Price`] = result.price ? String(result.price) : null;
             auditData[`${channel}Status`] = result.status;
-            
+
             // Short delay between channels for same date
             await new Promise(resolve => setTimeout(resolve, 2000));
           }
@@ -240,9 +294,10 @@ export class PricingAuditor {
         source: "Pricing Auditor",
         success: true,
         durationMs: Date.now() - start,
-        errorMessage: `Completed ${probesCount} probes`,
+        errorMessage: `Completed ${probesCount} probes; ${summariseRun(stats)}`,
       });
-      
+      console.log(`[PricingAuditor] Run health: ${summariseRun(stats)}`);
+
     } catch (error) {
       console.error("[PricingAuditor] Audit failed:", error);
       await Logger.system("ical", {
@@ -271,11 +326,14 @@ export class PricingAuditor {
     let lastResult: ScrapeResult = { price: null, status: "ERROR", error: "No attempt made" };
     let sawError = false;
 
+    let attemptsUsed = 0;
+
     for (let attempt = 1; attempt <= SCRAPE_ATTEMPTS; attempt++) {
       const result = await this.scrapeOnce(property, channel, url, nights, benchmark);
+      attemptsUsed = attempt;
 
       // A price is definitive — no reason to probe again.
-      if (result.status === "OK" && result.price) return result;
+      if (result.status === "OK" && result.price) return { ...result, attempts: attemptsUsed };
 
       if (result.status !== "SOLD_OUT") sawError = true;
       lastResult = result;
@@ -289,10 +347,10 @@ export class PricingAuditor {
     // Only report SOLD_OUT when every attempt agreed. A mix of SOLD_OUT and ERROR means the
     // scraper was unhealthy, so surface that instead of asserting the dates are unavailable.
     if (sawError && lastResult.status === "SOLD_OUT") {
-      return { price: null, status: "ERROR", error: "Inconsistent probes (SOLD_OUT/ERROR)" };
+      return { price: null, status: "ERROR", error: "Inconsistent probes (SOLD_OUT/ERROR)", attempts: attemptsUsed };
     }
 
-    return lastResult;
+    return { ...lastResult, attempts: attemptsUsed };
   }
 
   private static async scrapeOnce(property: string, channel: string, url: string, nights: number, benchmark?: number): Promise<ScrapeResult> {
