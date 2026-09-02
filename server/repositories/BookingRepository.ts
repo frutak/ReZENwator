@@ -89,23 +89,54 @@ export class BookingRepository {
     await Logger.bookingAction(id, "status_change", `Status updated to ${status}`);
   }
 
+  /**
+   * Keeps `depositReturnedAt` in step with whatever is being written to
+   * `depositStatus`.
+   *
+   * The stamp used to live inside `updateDepositStatus` alone — and that method
+   * has no caller in the dashboard at all. The modal saves the whole form
+   * through `updateBookingDetails`, and the matcher writes the column through
+   * `updateBookingPayment`; both set `depositStatus` directly, so a kaucja
+   * returned from the UI was `returned` with no date against it. Nine bookings
+   * (4500 zł) ended up that way, and the free-cashflow view — which reads the
+   * date, not the status — never saw that money leave.
+   *
+   * So the rule belongs to the column, not to one entry point: every write of
+   * `depositStatus` goes through here. A booking that is `returned` has a
+   * cash-out date; one that is not, has none.
+   *
+   * The date is stamped the first time the status becomes `returned` and is not
+   * moved afterwards — the modal sends the full form on every save, so re-saving
+   * an already-returned booking must not walk its cash-out date forward into the
+   * current month.
+   */
+  static async withDepositReturnStamp<T extends { depositStatus?: DepositStatus | null }>(
+    id: number,
+    details: T,
+    executor?: DbExecutor
+  ): Promise<T & { depositReturnedAt?: Date | null }> {
+    if (!details.depositStatus) return details;
+
+    // Leaving the returned state clears the cash-out date.
+    if (details.depositStatus !== "returned") return { ...details, depositReturnedAt: null };
+
+    const db = executor ?? (await getDb());
+    if (!db) return details;
+
+    const [current] = await db
+      .select({ at: bookings.depositReturnedAt })
+      .from(bookings)
+      .where(eq(bookings.id, id))
+      .limit(1);
+
+    if (current?.at) return details;
+    return { ...details, depositReturnedAt: new Date() };
+  }
+
   static async updateDepositStatus(id: number, depositStatus: DepositStatus) {
     const db = await getDb();
     if (!db) return;
-    const updates: { depositStatus: DepositStatus; depositReturnedAt?: Date | null } = { depositStatus };
-    if (depositStatus === "returned") {
-      // Stamp the cash-out date the first time it becomes returned; don't move
-      // it if it's already returned and merely re-saved.
-      const [current] = await db
-        .select({ at: bookings.depositReturnedAt })
-        .from(bookings)
-        .where(eq(bookings.id, id))
-        .limit(1);
-      if (!current?.at) updates.depositReturnedAt = new Date();
-    } else {
-      // Leaving the returned state clears the cash-out date.
-      updates.depositReturnedAt = null;
-    }
+    const updates = await this.withDepositReturnStamp(id, { depositStatus });
     await db.update(bookings).set(updates).where(eq(bookings.id, id));
     await Logger.bookingAction(id, "status_change", `Deposit status updated to ${depositStatus}`);
   }
@@ -536,6 +567,10 @@ export class BookingRepository {
     const db = executor ?? (await getDb());
     if (!db) return;
 
+    // The modal saves the whole form, kaucja included, so this is the path a
+    // returned deposit actually takes. See withDepositReturnStamp.
+    details = await this.withDepositReturnStamp(id, details, executor);
+
     // Check for cleaning conflicts if dates or property change
     if (details.checkIn || details.checkOut || details.property) {
       const current = await this.getBookingById(id);
@@ -617,7 +652,10 @@ export class BookingRepository {
   }, executor?: DbExecutor) {
     const db = executor ?? await getDb();
     if (!db) return;
-    await db.update(bookings).set(data).where(eq(bookings.id, id));
+    // The matcher writes depositStatus too — reverting a match can take a kaucja
+    // back out of `returned`, and the date has to go with it.
+    const updates = await this.withDepositReturnStamp(id, data, executor);
+    await db.update(bookings).set(updates).where(eq(bookings.id, id));
   }
 
   static async findOverlapCandidates(property: Property, checkIn: Date, checkOut: Date) {
