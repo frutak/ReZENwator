@@ -523,8 +523,17 @@ export class BookingRepository {
       );
   }
 
-  static async updateBookingDetails(id: number, details: Partial<typeof bookings.$inferInsert>) {
-    const db = await getDb();
+  /**
+   * Pass `executor` to write inside a transaction the caller owns — the refund
+   * flow does, so the price cut and the transfer that records it commit or fail
+   * together.
+   */
+  static async updateBookingDetails(
+    id: number,
+    details: Partial<typeof bookings.$inferInsert>,
+    executor?: DbExecutor
+  ) {
+    const db = executor ?? (await getDb());
     if (!db) return;
 
     // Check for cleaning conflicts if dates or property change

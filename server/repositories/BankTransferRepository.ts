@@ -137,11 +137,17 @@ export class BankTransferRepository {
    *
    * Either way the money must not be applied — a caller that ignores
    * `inserted: false` double-counts the transfer.
+   *
+   * Pass `executor` to enlist in a transaction the caller owns. The refund flow
+   * does: the row is the idempotency gate, so it has to be written and the
+   * booking adjusted in one commit, or a crash between them leaves a refund
+   * recorded that the price never reflected.
    */
   static async insertTransfer(
-    transfer: InsertBankTransfer
+    transfer: InsertBankTransfer,
+    executor?: DbExecutor
   ): Promise<{ inserted: boolean; duplicateOf?: BankTransfer }> {
-    const db = await getDb();
+    const db = executor ?? (await getDb());
     if (!db) throw new Error("Database not initialized");
 
     const [result] = await db.insert(bankTransfers).ignore().values(transfer);

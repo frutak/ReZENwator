@@ -42,6 +42,7 @@ import {
   RefreshCw,
   Activity,
   Clock,
+  Undo2,
 } from "lucide-react";
 import { format, addDays, setHours, setMinutes } from "date-fns";
 import { Booking } from "@shared/types";
@@ -140,6 +141,50 @@ export default function BookingDetailModal({
     },
     onError: (e) => toast.error(`Failed to delete: ${e.message}`),
   });
+
+  const [refundOpen, setRefundOpen] = useState(false);
+  const [refundForm, setRefundForm] = useState({
+    amount: "",
+    date: format(new Date(), "yyyy-MM-dd"),
+    reason: "",
+  });
+
+  const refund = trpc.bookings.refund.useMutation({
+    onSuccess: (res) => {
+      if (res.duplicate) {
+        toast.error(
+          res.duplicateOfTransferId
+            ? `Already recorded as transfer #${res.duplicateOfTransferId}`
+            : "This refund is already recorded"
+        );
+        return;
+      }
+      utils.bookings.list.invalidate();
+      utils.bookings.stats.invalidate();
+      utils.transfers.listMatched.invalidate();
+      toast.success(`Refunded — price is now ${res.totalPrice} PLN, paid ${res.amountPaid} PLN`);
+      setRefundOpen(false);
+      // The server has just rewritten three of the fields this form holds.
+      // Closing is the point: left open, a Save would write the pre-refund
+      // price straight back over the correction.
+      onClose();
+    },
+    onError: (e) => toast.error(`Refund failed: ${e.message}`),
+  });
+
+  const submitRefund = () => {
+    const amount = parseFloat(refundForm.amount.replace(",", "."));
+    if (!(amount > 0)) {
+      toast.error("Enter the refunded amount");
+      return;
+    }
+    refund.mutate({
+      id: booking.id!,
+      amount,
+      refundDate: new Date(`${refundForm.date}T12:00:00`),
+      reason: refundForm.reason.trim() || undefined,
+    });
+  };
 
   const [form, setForm] = useState({
     property: booking.property ?? "Sadoles",
@@ -647,6 +692,108 @@ export default function BookingDetailModal({
                 <span className="text-[10px] font-bold uppercase text-emerald-700 dark:text-emerald-400">Balance due (Net)</span>
                 <span className="text-base font-black text-emerald-700 dark:text-emerald-400">{toBePaid} PLN</span>
               </div>
+
+              {/* A price cut after the guest has paid is two events: the stay is
+                  worth less, and money goes back out. Editing the price alone
+                  records only the first, and the second surfaces days later as
+                  a balance-mismatch alert. This does both in one step. */}
+              {!isNew && (
+                <AlertDialog open={refundOpen} onOpenChange={setRefundOpen}>
+                  <AlertDialogTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="w-full h-9 text-xs font-bold gap-2 border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800 dark:border-rose-900 dark:text-rose-400 dark:hover:bg-rose-950"
+                      disabled={parseFloat(form.amountPaid || "0") <= 0}
+                    >
+                      <Undo2 className="h-3.5 w-3.5" />
+                      Refund to guest
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Refund part of the price</AlertDialogTitle>
+                      <AlertDialogDescription asChild>
+                        <div className="space-y-1">
+                          <p>
+                            Lowers the price by this amount and records the money leaving the
+                            account as a transfer back to the guest, so the booking's balance
+                            stays reconciled.
+                          </p>
+                          <p className="text-[11px]">
+                            The kaucja is separate — return it by setting the deposit status.
+                            Saving this closes the booking; reopen it to see the new figures.
+                          </p>
+                        </div>
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+
+                    <div className="space-y-3 py-1">
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className={labelClass}>Amount refunded</label>
+                          <div className="relative">
+                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-muted-foreground">PLN</span>
+                            <input
+                              autoFocus
+                              className={inputClass}
+                              value={refundForm.amount}
+                              onChange={(e) => setRefundForm((p) => ({ ...p, amount: e.target.value }))}
+                              placeholder="0.00"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className={labelClass}>Date sent</label>
+                          <input
+                            type="date"
+                            className={inputClass}
+                            value={refundForm.date}
+                            onChange={(e) => setRefundForm((p) => ({ ...p, date: e.target.value }))}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className={labelClass}>Reason (optional)</label>
+                        <input
+                          className={inputClass}
+                          value={refundForm.reason}
+                          onChange={(e) => setRefundForm((p) => ({ ...p, reason: e.target.value }))}
+                          placeholder="e.g. obniżka ceny po ustaleniu z gościem"
+                        />
+                      </div>
+                      <div className="p-2.5 rounded-lg bg-muted/40 border text-[11px] space-y-0.5">
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Total price</span>
+                          <span className="font-bold">
+                            {(parseFloat(form.totalPrice || "0")).toFixed(2)} →{" "}
+                            {(parseFloat(form.totalPrice || "0") - (parseFloat(refundForm.amount.replace(",", ".")) || 0)).toFixed(2)} PLN
+                          </span>
+                        </div>
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">Amount paid</span>
+                          <span className="font-bold">
+                            {(parseFloat(form.amountPaid || "0")).toFixed(2)} →{" "}
+                            {(parseFloat(form.amountPaid || "0") - (parseFloat(refundForm.amount.replace(",", ".")) || 0)).toFixed(2)} PLN
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <AlertDialogFooter>
+                      <AlertDialogCancel disabled={refund.isPending}>Cancel</AlertDialogCancel>
+                      <Button
+                        type="button"
+                        onClick={submitRefund}
+                        disabled={refund.isPending}
+                        className="bg-rose-600 hover:bg-rose-700 text-white"
+                      >
+                        {refund.isPending ? "Recording..." : "Record refund"}
+                      </Button>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              )}
 
               {form.channel === "booking" && (form.animalsCount || 0) > 0 && (
                 <div className="p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-100 dark:border-amber-800 flex justify-between items-center">

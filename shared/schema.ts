@@ -100,3 +100,19 @@ export const calculatePriceSchema = z.object({
   guestCount: z.number().optional(),
   animalsCount: z.number().optional(),
 });
+
+/**
+ * A refund paid back to the guest out of an already-settled booking.
+ *
+ * Lowering the price by hand is only half the correction: the money that went
+ * back to the guest left the account too, and nothing recorded it. The booking
+ * then said it had received less than the transfers matched to it added up to,
+ * which is exactly the shape the reconciliation check reports. `amount` is the
+ * refunded sum as a positive figure; the transfer it writes is the negative one.
+ */
+export const refundBookingSchema = z.object({
+  id: z.number(),
+  amount: z.number().positive(),
+  refundDate: z.coerce.date().optional(),
+  reason: z.string().max(200).optional(),
+});

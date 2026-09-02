@@ -1,10 +1,25 @@
 import { BookingRepository } from "../repositories/BookingRepository";
+import { BankTransferRepository, transferContentKey } from "../repositories/BankTransferRepository";
 import { PricingService } from "./PricingService";
 import { Logger } from "../_core/logger";
+import { getDb, type DbExecutor } from "../db";
 import { sendGuestEmail, sendAlertEmail } from "../_core/email";
 import { format } from "date-fns";
 import { type Property } from "@shared/config";
 import { normalizeBookingDates, calculateTotalGuests, normalizeDecimalFields } from "@shared/utils";
+
+export interface RefundParams {
+  bookingId: number;
+  /** The refunded sum, as a positive figure. */
+  amount: number;
+  /** When the money left the account. Defaults to now. */
+  refundDate?: Date;
+  /** Free text, kept on the transfer row and in the activity log. */
+  reason?: string;
+}
+
+/** Money is stored to the grosz; every figure written back is rounded to it. */
+const round2 = (n: number) => Math.round(n * 100) / 100;
 
 export interface CreateBookingParams {
   property: Property;
@@ -142,5 +157,148 @@ export class BookingService {
     await Logger.bookingAction(id, "manual_edit", "Updated booking details");
     
     return { success: true };
+  }
+
+  /**
+   * Pays part of a settled booking back to the guest.
+   *
+   * A price cut after the fact is two events, not one: the stay is worth less,
+   * *and* money left the account. Editing the price by hand only records the
+   * first, and the second then shows up as a reconciliation finding — the
+   * booking claims to have received less than the transfers matched to it add
+   * up to. That is precisely the gap this closes, in one step:
+   *
+   *   totalPrice  −= amount   the stay is worth less
+   *   hostRevenue  = totalPrice − commission   (the modal's own rule)
+   *   amountPaid  −= amount   the guest is not holding that money any more
+   *   bank_transfers += one row of −amount, matched to this booking
+   *
+   * Both sides of `amountPaid − (Σ transfers − returned kaucja)` move by the
+   * same amount, so a booking that reconciled before still reconciles after.
+   * The negative row also reaches the cashflow view, which reads transfers, so
+   * the month the refund was paid is a month of lower inflow rather than an
+   * unexplained one.
+   *
+   * The kaucja is *not* touched. It comes back to the guest through
+   * `depositStatus`, which the reconciliation query already subtracts; adding it
+   * here as well would take it off the booking twice. A refund made in the same
+   * bank transfer as the kaucja return is still recorded as its own row — the
+   * two are separate obligations that happened to travel together.
+   *
+   * The transfer row is written first and is the idempotency gate: its content
+   * key makes a repeat of the same refund (same booking, day, amount and reason)
+   * collide, and the price cut is rolled back with it. Without that, a
+   * double-click discounts the stay twice.
+   */
+  static async refundToGuest(params: RefundParams) {
+    const amount = round2(params.amount);
+    if (!(amount > 0)) throw new Error("Refund amount must be greater than zero");
+
+    const booking = await BookingRepository.getBookingById(params.bookingId);
+    if (!booking) throw new Error("Booking not found");
+
+    const totalPrice = parseFloat(String(booking.totalPrice ?? "0"));
+    const commission = parseFloat(String(booking.commission ?? "0"));
+    const amountPaid = parseFloat(String(booking.amountPaid ?? "0"));
+
+    if (!(totalPrice > 0)) {
+      throw new Error("Booking has no price to refund from");
+    }
+    // A cent of slack: these are decimals read back as floats.
+    if (amount > totalPrice + 0.005) {
+      throw new Error(`Refund of ${amount.toFixed(2)} exceeds the price of ${totalPrice.toFixed(2)}`);
+    }
+    // Refunding more than ever arrived is not a refund. A price cut before the
+    // guest has paid is an edit of the price, with no money moving and so no
+    // transfer to record.
+    if (amount > amountPaid + 0.005) {
+      throw new Error(`Refund of ${amount.toFixed(2)} exceeds the ${amountPaid.toFixed(2)} received on this booking`);
+    }
+
+    const refundDate = params.refundDate ?? new Date();
+    const reason = params.reason?.trim();
+    const newTotalPrice = round2(totalPrice - amount);
+    const newAmountPaid = round2(amountPaid - amount);
+    const newHostRevenue = round2(newTotalPrice - commission);
+
+    const transferRow = {
+      // Negative: the money went the other way. Everything that sums transfers
+      // — reconciliation, cashflow — then subtracts it without a special case.
+      amount: String((-amount).toFixed(2)),
+      currency: booking.currency ?? "PLN",
+      senderName: booking.guestName || "Gość",
+      transferTitle: reason ? `Zwrot: ${reason}` : `Zwrot części ceny (#${params.bookingId})`,
+      transferDate: refundDate,
+      accountNumber: "",
+    };
+    const contentKey = transferContentKey(transferRow);
+
+    const insert = {
+      ...transferRow,
+      externalId: `refund-${contentKey.slice(0, 32)}`,
+      contentKey,
+      source: "manual" as const,
+      // Already attributed: a refund is raised against one booking by name, so
+      // it never passes through the pending queue waiting to be matched.
+      status: "matched" as const,
+      matchedBookingId: params.bookingId,
+    };
+
+    const bookingUpdate = {
+      totalPrice: newTotalPrice.toFixed(2),
+      hostRevenue: newHostRevenue.toFixed(2),
+      amountPaid: newAmountPaid.toFixed(2),
+    };
+
+    const writes = async (tx?: DbExecutor) => {
+      const { inserted, duplicateOf } = await BankTransferRepository.insertTransfer(insert, tx);
+      if (!inserted) {
+        return { duplicate: true as const, duplicateOfTransferId: duplicateOf?.id ?? null };
+      }
+      await BookingRepository.updateBookingDetails(params.bookingId, bookingUpdate, tx);
+      return { duplicate: false as const, duplicateOfTransferId: null };
+    };
+
+    const db = await getDb();
+    let outcome: { duplicate: boolean; duplicateOfTransferId: number | null };
+
+    if (db) {
+      let result!: { duplicate: boolean; duplicateOfTransferId: number | null };
+      await db.transaction(async (tx: DbExecutor) => {
+        result = await writes(tx);
+        // Nothing was written, so there is nothing to roll back — returning
+        // normally keeps the duplicate an answer rather than an error.
+      });
+      outcome = result;
+    } else {
+      // No DB configured (dev) — best-effort, non-transactional.
+      outcome = await writes();
+    }
+
+    if (outcome.duplicate) {
+      return {
+        success: false as const,
+        duplicate: true as const,
+        duplicateOfTransferId: outcome.duplicateOfTransferId,
+      };
+    }
+
+    // Post-commit: an activity entry must not describe a write a rollback erased.
+    await Logger.bookingAction(
+      params.bookingId,
+      "manual_edit",
+      `Refunded ${amount.toFixed(2)} ${booking.currency ?? "PLN"} to guest`,
+      `${reason ? `${reason}. ` : ""}Price ${totalPrice.toFixed(2)} → ${newTotalPrice.toFixed(2)}, ` +
+        `paid ${amountPaid.toFixed(2)} → ${newAmountPaid.toFixed(2)}, ` +
+        `recorded as an outgoing transfer on ${format(refundDate, "yyyy-MM-dd")}`
+    );
+
+    return {
+      success: true as const,
+      duplicate: false as const,
+      totalPrice: bookingUpdate.totalPrice,
+      hostRevenue: bookingUpdate.hostRevenue,
+      amountPaid: bookingUpdate.amountPaid,
+    };
   }
 }

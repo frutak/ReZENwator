@@ -35,6 +35,7 @@ import {
   bookingFilterSchema, 
   updateBookingDetailsSchema, 
   createBookingSchema, 
+  refundBookingSchema, 
   submitBookingSchema, 
   calculatePriceSchema 
 } from "@shared/schema";
@@ -249,6 +250,24 @@ const bookingRouter = router({
     .mutation(async ({ input }) => {
       const { id, ...details } = input;
       return BookingService.updateBookingDetails(id, details);
+    }),
+
+  /**
+   * Pays part of a booking back to the guest: cuts the price and records the
+   * outgoing money as a transfer, so the two never come apart. See
+   * BookingService.refundToGuest. `protected` rather than `admin` for the same
+   * reason `updateDetails` is — it changes figures the same people already edit
+   * by hand, only without leaving the transfers behind.
+   */
+  refund: protectedProcedure
+    .input(refundBookingSchema)
+    .mutation(async ({ input }) => {
+      return BookingService.refundToGuest({
+        bookingId: input.id,
+        amount: input.amount,
+        refundDate: input.refundDate,
+        reason: input.reason,
+      });
     }),
 
   create: protectedProcedure
