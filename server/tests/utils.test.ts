@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { parseDMY, parseDotDate, parseAirbnbDate, parseAirbnbFullDate, parseBookingComDate } from "../_core/utils/date";
 import { parsePrice } from "../_core/utils/currency";
 import { format } from "date-fns";
@@ -6,6 +6,10 @@ import { format } from "date-fns";
 const formatDate = (d: Date | undefined) => d ? format(d, "yyyy-MM-dd") : undefined;
 
 describe("Date Utilities", () => {
+  // Only the Airbnb cases below pin the clock; the rest are unaffected either
+  // way, and leaving fake timers running would leak into the next file.
+  afterEach(() => vi.useRealTimers());
+
   describe("parseDMY", () => {
     it("parses valid DMY dates with different separators", () => {
       expect(formatDate(parseDMY("28-03-2026"))).toBe("2026-03-28");
@@ -33,10 +37,46 @@ describe("Date Utilities", () => {
       expect(date?.getDate()).toBe(27);
     });
 
-    it("handles year rollover correctly", () => {
-      const date = parseAirbnbDate("27 Jun");
-      expect(date).toBeDefined();
-      // Logic in parseAirbnbDate increments year if date is > 180 days in past
+    /**
+     * Airbnb never puts a year on the stay dates — a confirmation says "Fri 3
+     * Apr" and nothing else — so the year has to be inferred from when the mail
+     * arrived. A date more than six months in the past is read as next year's,
+     * on the reasoning that a confirmation is for a stay yet to happen.
+     *
+     * That makes the answer depend on today, which is worth stating plainly:
+     * the same three words are 2026 in February and 2027 in October, and both
+     * readings are right. The clock is pinned here for exactly that reason.
+     * Fixtures that assert a full date for these mails are asserting the day
+     * they were written down, and go off by a year as soon as it passes.
+     */
+    it("reads a year-less date as this year while the stay is still ahead", () => {
+      vi.useFakeTimers().setSystemTime(new Date("2026-02-01T12:00:00"));
+      expect(formatDate(parseAirbnbDate("Tue 10 Mar"))).toBe("2026-03-10");
+    });
+
+    it("rolls a year-less date forward once it is well past", () => {
+      // The cutoff is 180 days after the date itself — for 10 March 2026 that
+      // is 6 September. A day before, the stay is still read as this year's.
+      vi.useFakeTimers().setSystemTime(new Date("2026-09-05T12:00:00"));
+      expect(formatDate(parseAirbnbDate("Tue 10 Mar"))).toBe("2026-03-10");
+
+      // A day after, the same words mean next March. This is the transition
+      // that broke the Azra Yildiz fixture.
+      vi.useFakeTimers().setSystemTime(new Date("2026-09-07T12:00:00"));
+      expect(formatDate(parseAirbnbDate("Tue 10 Mar"))).toBe("2027-03-10");
+    });
+
+    it("keeps a stay that crosses New Year in order", () => {
+      // The two dates are resolved independently, so this is where a year rule
+      // gets caught being wrong: read both as the current year and checkout
+      // lands eleven months before check-in.
+      vi.useFakeTimers().setSystemTime(new Date("2026-12-20T12:00:00"));
+      const checkIn = parseAirbnbDate("Wed 30 Dec")!;
+      const checkOut = parseAirbnbDate("Sat 2 Jan")!;
+
+      expect(formatDate(checkIn)).toBe("2026-12-30");
+      expect(formatDate(checkOut)).toBe("2027-01-02");
+      expect(checkOut.getTime()).toBeGreaterThan(checkIn.getTime());
     });
 
     it("parses Airbnb format with year 'Thu, 17 Jun 2027'", () => {
