@@ -1022,6 +1022,18 @@ const transferRouter = router({
         const transfer = await BankTransferRepository.getTransferByIdForUpdate(input.transferId, tx);
         if (!transfer) throw new Error('Transfer not found');
 
+        // A split payout's money is already on the books, carried by its
+        // children. The parent is not `matched`, so `claimMatch` would take it
+        // without complaint and put the whole amount on one booking while the
+        // children keep crediting their shares to theirs — the same money
+        // counted twice. Nothing in the UI offers a split parent, but this
+        // endpoint is reachable on its own.
+        if (transfer.status === 'split') {
+          throw new Error(
+            `Transfer #${input.transferId} is split across several bookings; re-match its parts instead`
+          );
+        }
+
         const previousBookingId =
           transfer.status === 'matched' && transfer.matchedBookingId ? transfer.matchedBookingId : null;
 

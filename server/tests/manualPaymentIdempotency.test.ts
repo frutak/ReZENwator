@@ -159,6 +159,27 @@ describe("transfers.manualMatch", () => {
     expect(applyTransferMatch).not.toHaveBeenCalled();
   });
 
+  it("refuses a payout that has been split across bookings", async () => {
+    // A split parent is not `matched` — its children are — so `claimMatch`
+    // happily takes it, and the whole 3762.00 would land on one booking while
+    // the children still credit 1797.40 and 1964.60 to theirs. The same money,
+    // counted twice. The UI cannot reach this (a split parent is in neither the
+    // pending nor the matched list), but the endpoint can.
+    (BankTransferRepository.getTransferByIdForUpdate as any).mockResolvedValue({
+      ...pendingTransfer,
+      amount: "3762.00",
+      status: "split",
+      matchedBookingId: null,
+    });
+
+    await expect(
+      adminCaller().transfers.manualMatch({ transferId: 57, bookingId: 172 })
+    ).rejects.toThrow(/split/);
+
+    expect(BankTransferRepository.claimMatch).not.toHaveBeenCalled();
+    expect(applyTransferMatch).not.toHaveBeenCalled();
+  });
+
   it("leaves both bookings untouched when crediting the new one fails", async () => {
     // The window this whole design exists for: the money has been taken off the
     // old booking and the transfer already claims to belong to the new one, when
