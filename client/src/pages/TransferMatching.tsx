@@ -42,9 +42,28 @@ export default function TransferMatching() {
     { enabled: !!selectedTransfer }
   );
 
+  // Null for effectively every transfer — a portal only rarely pays for two
+  // stays in one go. See MatchingEngine.findCombinedPayout.
+  const { data: combined } = trpc.transfers.getCombinedMatch.useQuery(
+    { transferId: selectedTransfer?.id },
+    { enabled: !!selectedTransfer }
+  );
+
   const manualMatch = trpc.transfers.manualMatch.useMutation({
     onSuccess: () => {
       toast.success(t("transfers.success_match"));
+      setMatchingOpen(false);
+      setSelectedTransfer(null);
+      utils.transfers.listPending.invalidate();
+      utils.transfers.listMatched.invalidate();
+      utils.bookings.list.invalidate();
+    },
+    onError: (err) => toast.error(err.message),
+  });
+
+  const matchSplit = trpc.transfers.matchSplit.useMutation({
+    onSuccess: () => {
+      toast.success(t("transfers.success_split"));
       setMatchingOpen(false);
       setSelectedTransfer(null);
       utils.transfers.listPending.invalidate();
@@ -255,6 +274,58 @@ export default function TransferMatching() {
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
               </div>
+
+              {combined && (
+                <div className="rounded-xl border-2 border-primary/40 bg-primary/5 p-4 space-y-3">
+                  <div>
+                    <h3 className="font-bold flex items-center gap-2">
+                      <LinkIcon className="h-4 w-4 text-primary" />
+                      {t("transfers.combined_title")}
+                    </h3>
+                    <p className="text-sm text-muted-foreground mt-1">{t("transfers.combined_hint")}</p>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {combined.allocations.map((a) => (
+                      <div key={a.bookingId} className="flex items-center justify-between gap-4 rounded-lg bg-background/70 px-3 py-2">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-sm truncate">{getGuestName(a.booking as any)}</div>
+                          <div className="text-xs text-muted-foreground">
+                            {a.booking.property} • {format(new Date(a.booking.checkIn), "dd.MM.yyyy")} — {format(new Date(a.booking.checkOut), "dd.MM.yyyy")}
+                          </div>
+                        </div>
+                        <span className="font-bold whitespace-nowrap">
+                          {a.amount.toLocaleString("pl-PL", { minimumFractionDigits: 2 })} PLN
+                        </span>
+                      </div>
+                    ))}
+                    <div className="flex items-center justify-between gap-4 px-3 pt-1 text-sm font-bold border-t">
+                      <span>{t("transfers.combined_total")}</span>
+                      <span>
+                        {combined.allocations
+                          .reduce((sum, a) => sum + a.amount, 0)
+                          .toLocaleString("pl-PL", { minimumFractionDigits: 2 })} PLN
+                      </span>
+                    </div>
+                  </div>
+
+                  <ul className="text-xs text-muted-foreground list-disc pl-4 space-y-0.5">
+                    {combined.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+                  </ul>
+
+                  <Button
+                    className="w-full gap-2"
+                    disabled={matchSplit.isPending}
+                    onClick={() => matchSplit.mutate({
+                      transferId: selectedTransfer.id,
+                      allocations: combined.allocations.map((a) => ({ bookingId: a.bookingId, amount: a.amount })),
+                    })}
+                  >
+                    <CheckCircle2 className="h-4 w-4" />
+                    {t("transfers.combined_confirm")}
+                  </Button>
+                </div>
+              )}
 
               <div className="space-y-2">
                 <h3 className="text-sm font-semibold text-muted-foreground px-1">{t("transfers.close_matches")}</h3>

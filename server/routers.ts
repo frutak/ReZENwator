@@ -16,7 +16,7 @@ import { TRPCError } from "@trpc/server";
 import { pollAllICalFeeds, pollICalFeed } from "./workers/icalPoller";
 import { pollEmails } from "./workers/emailPoller";
 import { processGuestReplyDrafts } from "./workers/guestReplyWorker";
-import { findMatchingBookings, applyTransferMatch, revertTransferMatch } from "./workers/bookingMatcher";
+import { findMatchingBookings, findCombinedPayout, applyTransferMatch, revertTransferMatch } from "./workers/bookingMatcher";
 import { updateAllPropertyRatings } from "./workers/ratingScraper";
 import { PricingAuditor } from "./workers/pricingAuditor";
 import { PricingAuditRepository } from "./repositories/PricingAuditRepository";
@@ -27,7 +27,6 @@ import { Logger } from "./_core/logger";
 import { PricingService } from "./services/PricingService";
 import { BookingService } from "./services/BookingService";
 import { BankTransferRepository, CASHFLOW_START_MONTH, transferContentKey } from "./repositories/BankTransferRepository";
-import { MatchingEngine } from "./services/MatchingEngine";
 import { MonthlyAdjustmentRepository } from "./repositories/MonthlyAdjustmentRepository";
 import { type ParsedBankData } from "./workers/emailParsers";
 import { PROPERTIES, CHANNELS, STATUSES, DEPOSIT_STATUSES, CLEANING_STAFF } from "@shared/config";
@@ -935,6 +934,21 @@ const userRouter = router({
 
 // ─── Transfer router ──────────────────────────────────────────────────────────
 
+/** A stored transfer row in the shape the matching code expects. */
+function asParsedTransfer(t: {
+  amount: string; currency: string; senderName: string;
+  transferTitle: string; transferDate: Date; accountNumber: string | null;
+}): ParsedBankData {
+  return {
+    amount: parseFloat(t.amount),
+    currency: t.currency,
+    senderName: t.senderName,
+    transferTitle: t.transferTitle,
+    transferDate: t.transferDate,
+    accountNumber: t.accountNumber ?? '',
+  };
+}
+
 const transferRouter = router({
   listPending: protectedProcedure
     .query(async () => {
@@ -951,56 +965,40 @@ const transferRouter = router({
     .query(async ({ input }) => {
       const transfer = await BankTransferRepository.getTransferById(input.transferId);
       if (!transfer) throw new Error('Transfer not found');
-      
-      const parsed: ParsedBankData = {
-        amount: parseFloat(transfer.amount),
-        currency: transfer.currency,
-        senderName: transfer.senderName,
-        transferTitle: transfer.transferTitle,
-        transferDate: transfer.transferDate,
-        accountNumber: transfer.accountNumber ?? '',
-      };
 
-      const windowStart = new Date(transfer.transferDate);
-      windowStart.setFullYear(windowStart.getFullYear() - 1);
-      const windowEnd = new Date(transfer.transferDate);
-      windowEnd.setFullYear(windowEnd.getFullYear() + 1);
-      
-      const tTitle = transfer.transferTitle.toUpperCase();
-      const tSender = transfer.senderName.toUpperCase();
-      
-      const isAirbnbPayout = tTitle.includes('AIRBNB') || tSender.includes('PAYONEER') || tSender.includes('AIRBNB');
-      const isBookingPayout = tTitle.includes('BOOKING.COM') || tSender.includes('BOOKING.COM') || tTitle.includes('BOOKING') || tSender.includes('BOOKING');
-      const isPortalPayout = isAirbnbPayout || isBookingPayout;
+      // Deliberately the same call the auto-matcher makes. This used to build
+      // its own candidate set with a narrower window and no property filter,
+      // and so answered a different question than the matcher did.
+      return findMatchingBookings(asParsedTransfer(transfer));
+    }),
 
-      let candidates: any[] = [];
-      if (isPortalPayout) {
-         candidates = await BookingRepository.findPortalPayoutCandidates(isAirbnbPayout ? 'airbnb' : 'booking', windowStart, windowEnd);
-      } else {
-         candidates = await BookingRepository.findDirectTransferCandidates(windowStart, windowEnd);
-      }
+  /**
+   * Whether this payout covers several bookings at once.
+   *
+   * A separate query rather than part of `getMatches` because it answers a
+   * different question — not "which booking is this?" but "is this one payment
+   * at all?" — and because it is null for effectively every transfer, so the
+   * matching list should not have to carry it.
+   */
+  getCombinedMatch: protectedProcedure
+    .input(z.object({ transferId: z.number() }))
+    .query(async ({ input }) => {
+      const transfer = await BankTransferRepository.getTransferById(input.transferId);
+      if (!transfer) throw new Error('Transfer not found');
+      if (transfer.status !== 'pending') return null;
 
-      return MatchingEngine.scoreCandidates(parsed, candidates as any, !!isPortalPayout);
+      return findCombinedPayout(asParsedTransfer(transfer));
     }),
 
   manualMatch: adminProcedure
     .input(z.object({ transferId: z.number(), bookingId: z.number() }))
     .mutation(async ({ input }) => {
-      const asParsed = (t: { amount: string; currency: string; senderName: string; transferTitle: string; transferDate: Date; accountNumber: string | null }): ParsedBankData => ({
-        amount: parseFloat(t.amount),
-        currency: t.currency,
-        senderName: t.senderName,
-        transferTitle: t.transferTitle,
-        transferDate: t.transferDate,
-        accountNumber: t.accountNumber ?? '',
-      });
-
       const db = await getDb();
       if (!db) {
         // No database configured (dev) — nothing to be atomic about.
         const transfer = await BankTransferRepository.getTransferById(input.transferId);
         if (!transfer) throw new Error('Transfer not found');
-        await applyTransferMatch(input.bookingId, asParsed(transfer), 100, { transferId: input.transferId });
+        await applyTransferMatch(input.bookingId, asParsedTransfer(transfer), 100, { transferId: input.transferId });
         return { success: true };
       }
 
@@ -1040,7 +1038,7 @@ const transferRouter = router({
           if (reverted) afterCommit.push(reverted);
         }
 
-        const applied = await applyTransferMatch(input.bookingId, asParsed(transfer), 100, { transferId: input.transferId }, tx);
+        const applied = await applyTransferMatch(input.bookingId, asParsedTransfer(transfer), 100, { transferId: input.transferId }, tx);
         if (applied) afterCommit.push(applied);
       });
 
@@ -1050,6 +1048,90 @@ const transferRouter = router({
 
       return { success: true };
     }),
+  /**
+   * Applies one payout to the several bookings it actually covers.
+   *
+   * The transfer is not re-pointed at a list of bookings — it is split. The
+   * parent keeps the bank line and becomes `split`; one child row per booking
+   * carries that booking's share and is matched to it in the ordinary way. Past
+   * this point nothing downstream knows a batch happened: reverting, counting
+   * and reconciling all see plain one-to-one transfers, which is the whole
+   * reason for doing it this way rather than making `matchedBookingId` a list.
+   *
+   * The shares must add up to the payout exactly. A split that loses or invents
+   * money would reconcile against itself — `findUnreconciled` compares
+   * `amountPaid` with the transfers behind it, and both sides would move
+   * together — so this is the only place the arithmetic can be caught.
+   *
+   * All of it commits together, for the same reason `manualMatch` does: three
+   * bookings credited and a fourth write lost is worse than nothing happening.
+   */
+  matchSplit: adminProcedure
+    .input(z.object({
+      transferId: z.number(),
+      allocations: z
+        .array(z.object({ bookingId: z.number().int().positive(), amount: z.number().positive() }))
+        .min(2),
+    }))
+    .mutation(async ({ input }) => {
+      const bookingIds = new Set(input.allocations.map(a => a.bookingId));
+      if (bookingIds.size !== input.allocations.length) {
+        throw new Error('The same booking appears twice in the split');
+      }
+
+      const db = await getDb();
+      if (!db) throw new Error('Database not initialized');
+
+      const afterCommit: Array<() => Promise<void>> = [];
+      let alreadySplit = false;
+
+      await db.transaction(async (tx: DbExecutor) => {
+        const transfer = await BankTransferRepository.getTransferByIdForUpdate(input.transferId, tx);
+        if (!transfer) throw new Error('Transfer not found');
+
+        if (transfer.status === 'split') { alreadySplit = true; return; }
+        if (transfer.status !== 'pending') {
+          throw new Error(`Transfer #${input.transferId} is ${transfer.status}; unmatch it before splitting`);
+        }
+
+        const total = input.allocations.reduce((sum, a) => sum + a.amount, 0);
+        const amount = parseFloat(transfer.amount);
+        if (Math.abs(total - amount) > 0.01) {
+          throw new Error(
+            `Split does not add up: ${total.toFixed(2)} allocated against a payout of ${amount.toFixed(2)}`
+          );
+        }
+
+        // Marks the parent `split`, and refuses if anything already did — the
+        // same interlock as `claimMatch`, against a double-click crediting
+        // every booking in the batch twice.
+        if (!await BankTransferRepository.claimSplit(input.transferId, tx)) {
+          alreadySplit = true;
+          return;
+        }
+
+        for (const allocation of input.allocations) {
+          const child = await BankTransferRepository.upsertSplitChild(
+            transfer, allocation.bookingId, allocation.amount, tx
+          );
+          const applied = await applyTransferMatch(
+            allocation.bookingId,
+            { ...asParsedTransfer(transfer), amount: allocation.amount },
+            100,
+            { transferId: child.id },
+            tx
+          );
+          if (applied) afterCommit.push(applied);
+        }
+      });
+
+      if (alreadySplit) return { success: true, alreadySplit: true };
+
+      for (const effect of afterCommit) await effect();
+
+      return { success: true };
+    }),
+
   markIrrelevant: adminProcedure
     .input(z.object({ transferId: z.number() }))
     .mutation(async ({ input }) => {

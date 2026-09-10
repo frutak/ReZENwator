@@ -580,13 +580,39 @@ export const bankTransfers = mysqlTable("bank_transfers", {
   transferDate: datetime("transferDate").notNull(),
   accountNumber: varchar("accountNumber", { length: 64 }),
   currency: varchar("currency", { length: 8 }).default("PLN").notNull(),
-  status: mysqlEnum("status", ["pending", "matched", "ignored"]).default("pending").notNull(),
+  /**
+   * `split` is the parent of a combined portal payout — see `parentTransferId`.
+   * It is the real bank line, kept for the audit trail, but the money it
+   * carries is accounted for by its children, so every consumer that sums
+   * money (`getMonthlyCashflow`, `findUnreconciled`) filters on `matched` and
+   * skips it by construction.
+   */
+  status: mysqlEnum("status", ["pending", "matched", "ignored", "split"]).default("pending").notNull(),
   matchedBookingId: int("matchedBookingId"),
+  /**
+   * The bank line this row was carved out of, for a payout covering more than
+   * one booking.
+   *
+   * Booking.com batches its payouts per property: two stays in the same
+   * property whose payout dates fall in the same run are sent as one transfer.
+   * That arrived for the first time on 2026-09-09 — 3762.00 PLN covering
+   * bookings #85 (1797.40) and #91 (1964.60), both Hacjenda — and there is no
+   * one booking it belongs to.
+   *
+   * Rather than teach every reader of `matchedBookingId` about a one-to-many
+   * link, the parent is marked `split` and one child row per booking carries
+   * its share. Each child is then an ordinary transfer: one row, one booking,
+   * one amount, which is what `revertTransferMatch`, `claimMatch`, the cashflow
+   * sum and the reconciliation check all already assume. Null on every row that
+   * is a bank line in its own right.
+   */
+  parentTransferId: int("parentTransferId"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
 }, (table) => [
   index("idx_transfer_status").on(table.status),
   index("idx_transfer_date").on(table.transferDate),
+  index("idx_transfer_parent").on(table.parentTransferId),
 ]);
 
 export type BankTransfer = typeof bankTransfers.$inferSelect;

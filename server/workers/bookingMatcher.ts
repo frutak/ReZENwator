@@ -13,12 +13,55 @@ import { BankTransferRepository } from "../repositories/BankTransferRepository";
 import { getDb, type DbExecutor } from "../db";
 import type { ParsedBankData } from "./emailParsers";
 import { sendAlertEmail } from "../_core/email";
-import { levenshtein, normalizeName } from "../_core/utils/string";
+import { normalizeName } from "../_core/utils/string";
 import { Logger } from "../_core/logger";
-import { ENV } from "../_core/env";
 import { type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
-import { MatchingEngine, type MatchResult } from "../services/MatchingEngine";
+import { MatchingEngine, payoutProperty, type MatchResult, type CombinedPayoutMatch } from "../services/MatchingEngine";
 import { calculateBalanceDue, calculateAmountsDue } from "@shared/utils";
+
+/**
+ * The bookings a transfer could possibly belong to, and whether it is a portal
+ * payout at all.
+ *
+ * Shared by the auto-matcher and the manual-matching screen, which used to
+ * decide this separately and did not agree: the screen looked a year either
+ * side of the transfer instead of five, and never applied the property filter,
+ * so it offered the owner the other property's stays. Two answers to "which
+ * bookings is this about?" is one too many.
+ *
+ * Note that the property narrowing lives in `MatchingEngine` rather than here —
+ * `payoutProperty` reads it off the payout's own reference, and both the
+ * scoring and the combined-payout search apply it to whatever this returns.
+ */
+export async function loadTransferCandidates(
+  transfer: ParsedBankData,
+  testMode = false
+): Promise<{ candidates: any[]; isPortalPayout: boolean }> {
+  const tTitle = normalizeName(transfer.transferTitle || "").toUpperCase();
+  const tSender = normalizeName(transfer.senderName || "").toUpperCase();
+
+  const isAirbnbPayout = tTitle.includes("AIRBNB") || tSender.includes("PAYONEER") || tSender.includes("AIRBNB");
+
+  // A title carrying a configured Booking.com hotel ID is a Booking.com payout
+  // whatever the sender line happens to say.
+  const isBookingPayout = tTitle.includes("BOOKING.COM") || tSender.includes("BOOKING.COM") ||
+                          tTitle.includes("BOOKING") || tSender.includes("BOOKING") ||
+                          payoutProperty(transfer) !== null;
+
+  const isPortalPayout = isAirbnbPayout || isBookingPayout;
+
+  const windowStart = new Date(transfer.transferDate?.getTime() ?? Date.now());
+  windowStart.setFullYear(windowStart.getFullYear() - 5);
+  const windowEnd = new Date(transfer.transferDate?.getTime() ?? Date.now());
+  windowEnd.setFullYear(windowEnd.getFullYear() + 5);
+
+  const candidates = isPortalPayout
+    ? await BookingRepository.findPortalPayoutCandidates(
+        (isAirbnbPayout ? "airbnb" : "booking") as Channel, windowStart, windowEnd, testMode)
+    : await BookingRepository.findDirectTransferCandidates(windowStart, windowEnd, testMode);
+
+  return { candidates, isPortalPayout };
+}
 
 /**
  * Scores how well a bank transfer matches a candidate booking.
@@ -27,46 +70,27 @@ export async function findMatchingBookings(
   transfer: ParsedBankData,
   testMode = false
 ): Promise<MatchResult[]> {
-  const tTitle = normalizeName(transfer.transferTitle || "").toUpperCase();
-  const tSender = normalizeName(transfer.senderName || "").toUpperCase();
+  const { candidates, isPortalPayout } = await loadTransferCandidates(transfer, testMode);
+  const sortedResults = MatchingEngine.scoreCandidates(transfer, candidates as any, isPortalPayout);
 
-  // 1. Determine subsets based on source
-  const isAirbnbPayout = tTitle.includes("AIRBNB") || tSender.includes("PAYONEER") || tSender.includes("AIRBNB");
-  
-  const objectIdMatch = transfer.transferTitle?.match(/(\d{7,10})/);
-  const oid = objectIdMatch ? objectIdMatch[1] : null;
-  const isBookingPayout = tTitle.includes("BOOKING.COM") || tSender.includes("BOOKING.COM") ||
-                          tTitle.includes("BOOKING") || tSender.includes("BOOKING") ||
-                          (ENV.hacjendaBookingId && oid === ENV.hacjendaBookingId) || 
-                          (ENV.sadolesBookingId && oid === ENV.sadolesBookingId);
-
-  const isPortalPayout = isAirbnbPayout || isBookingPayout;
-
-  const windowStart = new Date(transfer.transferDate?.getTime() ?? Date.now());
-  windowStart.setFullYear(windowStart.getFullYear() - 5); 
-  const windowEnd = new Date(transfer.transferDate?.getTime() ?? Date.now());
-  windowEnd.setFullYear(windowEnd.getFullYear() + 5); 
-
-  let candidates: any[] = [];
-
-  if (isPortalPayout) {
-    const channel = isAirbnbPayout ? "airbnb" : "booking";
-    candidates = await BookingRepository.findPortalPayoutCandidates(channel as Channel, windowStart, windowEnd, testMode);
-
-    // Further filter Booking.com by property ID if possible
-    if (isBookingPayout && oid) {
-      if (ENV.hacjendaBookingId && oid === ENV.hacjendaBookingId) candidates = candidates.filter(c => c.channel !== "booking" || c.property === "Hacjenda");
-      else if (ENV.sadolesBookingId && oid === ENV.sadolesBookingId) candidates = candidates.filter(c => c.channel !== "booking" || c.property === "Sadoles");
-    }
-  } else {
-    // Guest direct transfer
-    candidates = await BookingRepository.findDirectTransferCandidates(windowStart, windowEnd, testMode);
-  }
-
-  const sortedResults = MatchingEngine.scoreCandidates(transfer, candidates as any, !!isPortalPayout);
-  
   if (testMode) return sortedResults;
   return sortedResults.slice(0, 5);
+}
+
+/**
+ * The bookings a single payout covers, when it covers more than one.
+ *
+ * Loads the same candidates the scorer sees and hands them to
+ * `MatchingEngine.findCombinedPayout`. Returns null in every case that is not
+ * an unambiguous batch, which is nearly all of them.
+ */
+export async function findCombinedPayout(
+  transfer: ParsedBankData,
+  testMode = false
+): Promise<CombinedPayoutMatch | null> {
+  const { candidates, isPortalPayout } = await loadTransferCandidates(transfer, testMode);
+  if (!isPortalPayout) return null;
+  return MatchingEngine.findCombinedPayout(transfer, candidates as any);
 }
 
 /**

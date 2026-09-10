@@ -248,6 +248,87 @@ export class BankTransferRepository {
     }>;
   }
 
+  /**
+   * Claims a combined payout for splitting.
+   *
+   * The parent keeps its amount, its sender and its Message-ID — it is the real
+   * bank line and the audit trail back to the notification — but stops being
+   * money in its own right: `split` is excluded from every sum, because
+   * `getMonthlyCashflow` and `findUnreconciled` both filter on `matched`, and
+   * from the pending queue, so it does not come back asking to be matched.
+   *
+   * Conditional on `pending` for the same reason `claimMatch` is conditional:
+   * two splits of the same transfer arriving together (a double-click, a client
+   * retry) would otherwise both create children and credit every booking twice.
+   * MySQL serialises the two writes on the row and the loser sees no rows
+   * affected.
+   */
+  static async claimSplit(transferId: number, executor: DbExecutor): Promise<boolean> {
+    const [result] = await executor
+      .update(bankTransfers)
+      .set({ status: "split", matchedBookingId: null })
+      .where(and(eq(bankTransfers.id, transferId), eq(bankTransfers.status, "pending")));
+
+    return result.affectedRows > 0;
+  }
+
+  /**
+   * Creates one booking's share of a combined payout.
+   *
+   * The child is an ordinary transfer in every way that matters downstream —
+   * one row, one booking, one amount — so reverting it, counting it in the
+   * cashflow and reconciling it against `amountPaid` all work with no special
+   * case. `parentTransferId` is what says it is not its own bank line.
+   *
+   * Both unique keys are derived from the parent and the booking rather than
+   * from the child's own content: the amounts within a batch can repeat (two
+   * identically priced stays paid out together), and a natural fingerprint
+   * would then collide between siblings and silently drop one. Derived this
+   * way they are stable, so re-running a split inserts nothing the second time
+   * and returns the child that already exists.
+   */
+  static async upsertSplitChild(
+    parent: BankTransfer,
+    bookingId: number,
+    amount: number,
+    executor: DbExecutor
+  ): Promise<BankTransfer> {
+    const suffix = `split:${parent.id}:${bookingId}`;
+
+    await executor
+      .insert(bankTransfers)
+      .ignore()
+      .values({
+        externalId: `${parent.externalId}#${suffix}`,
+        contentKey: createHash("sha256").update(`${parent.contentKey ?? parent.id}\u0000${suffix}`).digest("hex"),
+        source: parent.source,
+        amount: amount.toFixed(2),
+        senderName: parent.senderName,
+        transferTitle: parent.transferTitle,
+        transferDate: parent.transferDate,
+        accountNumber: parent.accountNumber,
+        currency: parent.currency,
+        status: "pending",
+        parentTransferId: parent.id,
+      });
+
+    const [child] = await executor
+      .select()
+      .from(bankTransfers)
+      .where(eq(bankTransfers.externalId, `${parent.externalId}#${suffix}`))
+      .limit(1);
+
+    if (!child) throw new Error(`Failed to create split child for booking #${bookingId}`);
+    return child;
+  }
+
+  /** The shares a combined payout was split into. */
+  static async getSplitChildren(parentId: number) {
+    const db = await getDb();
+    if (!db) return [];
+    return db.select().from(bankTransfers).where(eq(bankTransfers.parentTransferId, parentId));
+  }
+
   /** Looks a transfer up by its payment fingerprint. */
   static async findByContentKey(contentKey: string) {
     const db = await getDb();

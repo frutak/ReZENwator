@@ -1,4 +1,6 @@
 import { levenshtein, normalizeName } from "../_core/utils/string";
+import { ENV } from "../_core/env";
+import type { Property } from "@shared/config";
 import type { ParsedBankData } from "../workers/emailParsers";
 
 export interface CandidateBooking {
@@ -82,6 +84,34 @@ export function payoutSource(transfer: ParsedBankData): string | null {
 }
 
 /**
+ * Which property a Booking.com payout is for, read off its own reference.
+ *
+ * Every Booking.com payout title ends in the hotel ID — Hacjenda is 13416371,
+ * Sadoles 13324071 — as in "NO.0BW2CPZM38GEV9Z9/13416371." Across all 18
+ * payouts recorded so far it agrees with the matched booking's property every
+ * single time, which makes it the one piece of hard evidence a portal payout
+ * carries about where the money belongs. Everything else — amount, dates — is
+ * inference.
+ *
+ * The digits are read from after the slash rather than from anywhere in the
+ * title: the reference in front of it is alphanumeric and could hold a run of
+ * seven digits of its own, and picking that up would silently resolve to no
+ * property (harmless) or, far worse, to the wrong one.
+ *
+ * Returns null when the ID is absent or unrecognised, which is the signal to
+ * fall back to matching without it. That also keeps the whole mechanism inert
+ * until `SADOLES_BOOKING_ID` / `HACJENDA_BOOKING_ID` are configured.
+ */
+export function payoutProperty(transfer: ParsedBankData): Property | null {
+  const match = /\/\s*(\d{7,10})\b/.exec(transfer.transferTitle ?? "");
+  if (!match) return null;
+  const id = match[1];
+  if (ENV.hacjendaBookingId && id === ENV.hacjendaBookingId) return "Hacjenda";
+  if (ENV.sadolesBookingId && id === ENV.sadolesBookingId) return "Sadoles";
+  return null;
+}
+
+/**
  * How well a transfer's date fits the payout clock of the channel it came from.
  * Returns 0 for anything that is not a portal payout — a guest's own transfer is
  * still judged by its proximity to check-in.
@@ -110,31 +140,204 @@ function payoutTimingScore(
   return { score: 0 };
 }
 
+/**
+ * Is this payout still owed to this booking?
+ *
+ * Lifted out of the portal-payout branch of `scoreCandidates` so the
+ * combined-payout search applies exactly the same test. A batch is only ever
+ * assembled from bookings that a single payout could have been assembled from;
+ * the two must not disagree about which those are.
+ *
+ * A balance typed in by hand is a claim with no transfer behind it, so a
+ * booking whose `amountPaid` covers its revenue is only excluded when a
+ * transfer actually backs it — see the note on the Airbnb payout of 24.05.2026.
+ */
+function isPayoutOutstanding(candidate: CandidateBooking): boolean {
+  const revenue = parseFloat(String(candidate.hostRevenue || "0"));
+  if (!(revenue > 0)) return false;
+  const paid = parseFloat(String(candidate.amountPaid || "0"));
+  const isBacked = (candidate.matchedTransferCount ?? 1) > 0;
+  return !(paid >= revenue - 1.0 && isBacked);
+}
+
+/** One booking's share of a payout that covers several. */
+export interface PayoutAllocation {
+  bookingId: number;
+  amount: number;
+  booking: CandidateBooking;
+}
+
+export interface CombinedPayoutMatch {
+  allocations: PayoutAllocation[];
+  reasons: string[];
+}
+
+/**
+ * How many bookings one payout is allowed to cover.
+ *
+ * Booking.com batches per property and per payout run, so in practice this is
+ * two. Three is headroom; beyond that the search stops being evidence and
+ * starts being numerology — with enough parts some subset sums to almost any
+ * amount.
+ */
+const COMBINED_PAYOUT_MAX_PARTS = 3;
+
+/**
+ * How close the parts must add up. A batch is the portal adding its own
+ * figures, so it is exact to the grosz — 1797.40 + 1964.60 = 3762.00. This is
+ * a rounding allowance, deliberately not the 1% slack a single payout gets:
+ * fuzz is what turns a subset sum into a coincidence.
+ */
+const COMBINED_PAYOUT_TOLERANCE = 0.02;
+
+/** How far a part's own payout date may sit from the day the batch landed. */
+const COMBINED_PAYOUT_WINDOW_DAYS = 10;
+
+/**
+ * Above this many candidates the search is abandoned rather than widened.
+ * The payout window normally leaves one to three; a pool this large means the
+ * window failed to constrain anything, and a sum found in it would not be
+ * evidence of anything either.
+ */
+const COMBINED_PAYOUT_MAX_POOL = 12;
+
+/** Every combination of exactly `size` items, in index order. */
+function combinations<T>(items: T[], size: number): T[][] {
+  if (size === 0) return [[]];
+  const out: T[][] = [];
+  for (let i = 0; i <= items.length - size; i++) {
+    for (const rest of combinations(items.slice(i + 1), size - 1)) {
+      out.push([items[i], ...rest]);
+    }
+  }
+  return out;
+}
+
 export class MatchingEngine {
+  /**
+   * The bookings a payout could belong to: same channel, same property when the
+   * transfer names one, and still owed the money.
+   */
+  private static eligiblePayoutCandidates(
+    transfer: ParsedBankData,
+    candidates: CandidateBooking[],
+    source: string
+  ): CandidateBooking[] {
+    const property = payoutProperty(transfer);
+    return candidates.filter(
+      c => c.channel === source && (!property || c.property === property) && isPayoutOutstanding(c)
+    );
+  }
+
+  /**
+   * One payout, several bookings.
+   *
+   * Booking.com pays per property, per payout run: two stays in the same
+   * property whose payout dates fall in the same run go out as a single
+   * transfer. On 2026-09-09 that happened for the first time in six years —
+   * 3762.00 PLN covering bookings #85 (1797.40) and #91 (1964.60), both
+   * Hacjenda. `scoreCandidates` compares the transfer against one booking's
+   * revenue at a time, so it had nothing to offer: the two stays it was
+   * actually made of did not appear in its top five at all, and the five it did
+   * offer were all the wrong property.
+   *
+   * The search is deliberately narrow, because a subset sum over a loose pool
+   * will find something in almost any set of numbers:
+   *
+   *   - only when no single booking accounts for the payout on its own. A
+   *     batch is what is left when the ordinary explanation fails, and this
+   *     alone rules out all 17 payouts that came before.
+   *   - only bookings the portal still owes, in the property the transfer
+   *     names, whose own payout dates sit within days of the day it landed.
+   *   - the parts must add up exactly, and there must be exactly one way to
+   *     make the total. Two ways is not a near miss, it is a guess, and the
+   *     owner is better served by an honest blank.
+   *
+   * Run over every Booking.com payout on record, those rules fire once: on the
+   * transfer that needs them, with the right pair, exact to the grosz.
+   *
+   * Nothing here applies the money. The result is a proposal for the owner to
+   * confirm, which is why an exact sum is allowed to be decisive without also
+   * having to survive the scoring model.
+   */
+  static findCombinedPayout(
+    transfer: ParsedBankData,
+    candidates: CandidateBooking[]
+  ): CombinedPayoutMatch | null {
+    const source = payoutSource(transfer);
+    if (!source || !transfer.transferDate || !(transfer.amount > 0)) return null;
+
+    const eligible = this.eligiblePayoutCandidates(transfer, candidates, source);
+
+    // A payout one booking explains on its own is not a batch.
+    const explainedAlone = eligible.some(c => {
+      const revenue = parseFloat(String(c.hostRevenue || "0"));
+      return Math.abs(transfer.amount - revenue) / revenue < 0.01;
+    });
+    if (explainedAlone) return null;
+
+    const pool = eligible.filter(c => {
+      const expected = expectedPayoutDate(source, c);
+      if (!expected) return false;
+      const diffDays = Math.abs(transfer.transferDate!.getTime() - expected.getTime()) / DAY_MS;
+      return diffDays <= COMBINED_PAYOUT_WINDOW_DAYS;
+    });
+    if (pool.length < 2 || pool.length > COMBINED_PAYOUT_MAX_POOL) return null;
+
+    const revenueOf = (c: CandidateBooking) => parseFloat(String(c.hostRevenue || "0"));
+
+    // Smallest batch first: a pair is a better account of the money than a
+    // triple that happens to reach the same total.
+    for (let size = 2; size <= Math.min(COMBINED_PAYOUT_MAX_PARTS, pool.length); size++) {
+      const exact = combinations(pool, size).filter(combo => {
+        const sum = combo.reduce((acc, c) => acc + revenueOf(c), 0);
+        return Math.abs(sum - transfer.amount) < COMBINED_PAYOUT_TOLERANCE;
+      });
+
+      // More than one way to reach the total is ambiguity, not a match.
+      if (exact.length !== 1) {
+        if (exact.length > 1) return null;
+        continue;
+      }
+
+      const combo = [...exact[0]].sort((a, b) => a.checkIn.getTime() - b.checkIn.getTime());
+      const parts = combo.map(c => revenueOf(c).toFixed(2)).join(" + ");
+      const property = payoutProperty(transfer);
+
+      return {
+        allocations: combo.map(c => ({ bookingId: c.id, amount: revenueOf(c), booking: c })),
+        reasons: [
+          `Combined ${source} payout: ${parts} = ${transfer.amount.toFixed(2)}`,
+          `${combo.length} stays still owed by the portal, paid out together`,
+          ...(property ? [`Payout reference names ${property}`] : []),
+        ],
+      };
+    }
+
+    return null;
+  }
+
   static scoreCandidates(transfer: ParsedBankData, candidates: CandidateBooking[], isPortalPayout: boolean): MatchResult[] {
     const results: MatchResult[] = [];
 
+    // The payout's own reference says which property it is for, and it is never
+    // wrong. Dropping the other property's stays here rather than letting them
+    // compete on price is what stops a Hacjenda payout being offered five
+    // Sadoles bookings that happen to cost about the same.
+    const property = payoutProperty(transfer);
+    const pool = property ? candidates.filter(c => c.property === property) : candidates;
+
     // Specialized matching for Portal Payouts (Airbnb/Booking.com)
     if (isPortalPayout) {
-      const matches = candidates
+      const matches = pool
         .filter(c => {
-          const cRevenue = parseFloat(String(c.hostRevenue || "0"));
-          const cPaid = parseFloat(String(c.amountPaid || "0"));
-
           // Skip a booking that is already fully paid, so a payout cannot be
-          // applied to it twice — but only when the money is actually there.
-          //
-          // A balance typed in by hand is a claim with no transfer behind it,
-          // and skipping those is how the Airbnb payout of 24.05.2026 ended up
-          // on the wrong stay: booking #77 had been marked paid manually, so it
-          // vanished from the candidates, leaving #76 as the only Hacjenda stay
-          // at the same price. Both were 1352 zł; nothing else could tell them
-          // apart. A booking whose balance has no transfer under it is exactly
-          // the one this payout is likely to belong to.
-          const isBacked = (c.matchedTransferCount ?? 1) > 0;
-          if (cRevenue > 0 && cPaid >= cRevenue - 1.0 && isBacked) return false;
+          // applied to it twice — see `isPayoutOutstanding`, which the
+          // combined-payout search shares so the two cannot drift apart.
+          if (!isPayoutOutstanding(c)) return false;
 
-          return cRevenue > 0 && Math.abs(transfer.amount - cRevenue) / cRevenue < 0.01;
+          const cRevenue = parseFloat(String(c.hostRevenue || "0"));
+          return Math.abs(transfer.amount - cRevenue) / cRevenue < 0.01;
         })
         .sort((a, b) => {
           const revA = parseFloat(String(a.hostRevenue || "0"));
@@ -167,7 +370,7 @@ export class MatchingEngine {
       }
     }
 
-    for (const candidate of candidates) {
+    for (const candidate of pool) {
       const match = this.scoreSingleCandidate(transfer, candidate);
       if (match.score >= 25) {
         results.push(match);
