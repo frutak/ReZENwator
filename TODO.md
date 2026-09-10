@@ -30,6 +30,27 @@ Booking #77 is the example that surfaced this: its payment was recorded by hand,
 so nothing backed the balance, and the real Airbnb payout drifted onto a
 neighbouring stay.
 
+### Undoing a split payout
+
+A payout covering several bookings is recorded by splitting it: the parent
+transfer becomes `split` and a child row carries each booking's share
+(`transfers.matchSplit`). There is no way back. Nothing un-splits a transfer —
+the parent appears in neither the pending nor the matched list, so the screen
+offers no handle on it, and `manualMatch` refuses it outright rather than
+crediting one booking the full amount while the children still credit their
+shares.
+
+That is the safe behaviour, not the complete one. Confirming a split against
+the wrong bookings currently needs a guarded script: revert each child with
+`revertTransferMatch`, delete the children, put the parent back to `pending`.
+
+Why it has not been built: the proposal is only ever offered when the parts add
+up to the payout exactly, in one unambiguous way, in the property the transfer
+names — the search refuses to guess rather than presenting a coin flip. So a
+wrong split needs the owner to confirm an arithmetically exact coincidence.
+Worth building if that ever happens, or alongside anything else that needs to
+walk `parentTransferId`; not worth speculative UI before then.
+
 ### Read the guest/portal split from tagged transfers
 
 `calculateAmountsDue` splits what is still owed between the guest and the portal

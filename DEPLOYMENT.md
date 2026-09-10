@@ -60,6 +60,15 @@ GMAIL_APP_PASSWORD=your-app-specific-password
 # Application
 NODE_ENV=production
 PORT=3000
+
+# Booking.com property (hotel) IDs — optional, but strongly recommended.
+# Every Booking.com payout notification ends its title with the hotel ID, e.g.
+# "NO.0BW2CPZM38GEV9Z9/13416371.". It is the only thing on the transfer that
+# says which property the money is for, so setting these keeps a payout from
+# being offered bookings from the other property. Find them in the payout
+# titles themselves, or in the Booking.com extranet URL.
+SADOLES_BOOKING_ID=
+HACJENDA_BOOKING_ID=
 ```
 
 > **Security note:** Restrict permissions on the `.env` file:
@@ -80,6 +89,15 @@ This compiles the React frontend and bundles the Express server into the `dist/`
 ---
 
 ## Step 5 — Create a systemd Service
+
+> **The names below are examples, not the running deployment.** This guide
+> installs a single `rezenwator` service under `/opt/rezenwator`. The author's
+> own machine instead runs **two** units from `/opt/rental-manager`:
+> `rental-admin` (the dashboard and background workers, `pnpm start`) and
+> `rental-portal` (the public booking portal, `pnpm run start:portal`). If you
+> are working on that machine rather than following this guide from scratch,
+> `systemctl list-units 'rental-*'` is the authority — `rezenwator` is only the
+> `package.json` name and matches no unit there.
 
 Create a service file so the application starts automatically on boot and restarts on failure:
 
