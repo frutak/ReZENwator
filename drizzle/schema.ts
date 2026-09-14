@@ -276,6 +276,8 @@ export const guestReplyDrafts = mysqlTable("guest_reply_drafts", {
    * `scheduled` — draft ready, auto-send after `sendAfter`.
    * `pending` — needs the owner (ambiguous match, missing facts, blocked intent).
    * `sending` — claimed by the send worker; guards against double delivery.
+   * `failed` — drafting did not produce a draft; the next drafting pass retries
+   * it until `draftAttempts` runs out (see `guestReplyWorker`).
    */
   status: mysqlEnum("status", [
     "new",
@@ -289,6 +291,13 @@ export const guestReplyDrafts = mysqlTable("guest_reply_drafts", {
   ])
     .default("new")
     .notNull(),
+  /**
+   * Drafting passes that have picked this email up. The model occasionally
+   * returns an incomplete object for a message it answers fine on the next try,
+   * so a failure is retried — but a message that fails every time must not call
+   * the model every half hour forever.
+   */
+  draftAttempts: int("draftAttempts").default(0).notNull(),
 
   // Draft — populated by the drafting pass, all null until then.
   /** Categorised intent, drives the auto-send blocklist. */

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { processGuestReplyDrafts } from "../workers/guestReplyWorker";
+import { processGuestReplyDrafts, MAX_DRAFT_ATTEMPTS } from "../workers/guestReplyWorker";
 import { GuestReplyRepository } from "../repositories/GuestReplyRepository";
 import { BookingRepository } from "../repositories/BookingRepository";
 import { generateReplyDraft } from "../services/ReplyDraftService";
@@ -24,6 +24,7 @@ const row = (over: Record<string, unknown> = {}) => ({
   inboundFrom: "jan@example.com",
   inboundSubject: "Pytanie",
   inboundBody: "O której możemy przyjechać?",
+  draftAttempts: 0,
   ...over,
 });
 
@@ -115,8 +116,54 @@ describe("processGuestReplyDrafts", () => {
     expect(sendDraftForApproval).not.toHaveBeenCalled();
     expect(GuestReplyRepository.update).toHaveBeenCalledWith(
       10,
-      expect.objectContaining({ status: "failed" })
+      expect.objectContaining({ status: "failed", errorMessage: expect.stringContaining("ponowię") })
     );
+  });
+
+  it("asks for failed drafts from the last week, within the attempt limit", async () => {
+    (GuestReplyRepository.findPendingDrafting as any).mockResolvedValue([]);
+
+    await processGuestReplyDrafts();
+
+    const options = (GuestReplyRepository.findPendingDrafting as any).mock.calls[0][0];
+    expect(options.maxAttempts).toBe(MAX_DRAFT_ATTEMPTS);
+    const ageDays = (Date.now() - options.retryReceivedSince.getTime()) / 86_400_000;
+    expect(ageDays).toBeCloseTo(7, 1);
+  });
+
+  it("counts the attempt before calling the model", async () => {
+    (GuestReplyRepository.findPendingDrafting as any).mockResolvedValue([row({ draftAttempts: 2 })]);
+    // Recorded rather than asserted inside the mock: a throw there would be
+    // caught by the worker as an ordinary failure and the test would still pass.
+    let countedBeforeModel = false;
+    (generateReplyDraft as any).mockImplementation(async () => {
+      countedBeforeModel = (GuestReplyRepository.update as any).mock.calls.some(
+        (c: any[]) => c[0] === 10 && c[1].draftAttempts === 3
+      );
+      return null;
+    });
+
+    await processGuestReplyDrafts();
+
+    expect(generateReplyDraft).toHaveBeenCalledTimes(1);
+    expect(countedBeforeModel).toBe(true);
+    expect(GuestReplyRepository.update).toHaveBeenCalledWith(
+      10,
+      expect.objectContaining({ status: "failed", errorMessage: expect.stringContaining(`Próba 3/${MAX_DRAFT_ATTEMPTS}`) })
+    );
+  });
+
+  it("stops promising a retry on the last attempt", async () => {
+    (GuestReplyRepository.findPendingDrafting as any).mockResolvedValue([
+      row({ draftAttempts: MAX_DRAFT_ATTEMPTS - 1 }),
+    ]);
+    (generateReplyDraft as any).mockResolvedValue(null);
+
+    await processGuestReplyDrafts();
+
+    const failed = (GuestReplyRepository.update as any).mock.calls.find((c: any[]) => c[1].status === "failed");
+    expect(failed[1].errorMessage).toContain("ostatnia");
+    expect(failed[1].errorMessage).not.toContain("ponowię");
   });
 
   it("keeps going after one row fails", async () => {

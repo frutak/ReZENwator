@@ -1,4 +1,4 @@
-import { startOfDay } from "date-fns";
+import { startOfDay, subDays } from "date-fns";
 import { BookingRepository } from "../repositories/BookingRepository";
 import { GuestReplyRepository } from "../repositories/GuestReplyRepository";
 import { generateReplyDraft, looksAutomated } from "../services/ReplyDraftService";
@@ -16,11 +16,34 @@ export interface GuestReplyDraftSummary {
 }
 
 /**
+ * Passes one guest email gets before it is left to the owner. The pass runs
+ * after every email poll, so five attempts span about two and a half hours —
+ * enough to ride out a model that returned a malformed object once, or a short
+ * outage, without calling the model every half hour for a message that never
+ * works.
+ */
+export const MAX_DRAFT_ATTEMPTS = 5;
+
+/**
+ * Failed drafts older than this are not retried. Matches the poller's rolling
+ * 7-day window, and keeps drafts that failed before retries existed from
+ * suddenly reaching the owner.
+ */
+export const DRAFT_RETRY_WINDOW_DAYS = 7;
+
+function failureMessage(reason: string, attempt: number): string {
+  return attempt < MAX_DRAFT_ATTEMPTS
+    ? `${reason} Próba ${attempt}/${MAX_DRAFT_ATTEMPTS} — ponowię przy następnym sprawdzeniu poczty.`
+    : `${reason} Próba ${attempt}/${MAX_DRAFT_ATTEMPTS} — to była ostatnia, odpowiedz ręcznie.`;
+}
+
+/**
  * Turns recorded guest emails into drafted replies.
  *
  * Runs as a pass separate from the poller so that a slow or unavailable model
  * never delays reading the mailbox, and so a failure here can be retried
- * without re-fetching mail.
+ * without re-fetching mail. It is: a `failed` draft is picked up again by the
+ * next pass, up to `MAX_DRAFT_ATTEMPTS`.
  *
  * Nothing reaches the guest. Every draft lands in `pending` and is mailed to the
  * owner for review — the auto-send path arrives with the approval UI, and until
@@ -29,13 +52,22 @@ export interface GuestReplyDraftSummary {
 export async function processGuestReplyDrafts(limit = 20): Promise<GuestReplyDraftSummary> {
   const summary: GuestReplyDraftSummary = { considered: 0, drafted: 0, skipped: 0, failed: 0, details: [] };
 
-  const pending = await GuestReplyRepository.findPendingDrafting(limit);
+  const pending = await GuestReplyRepository.findPendingDrafting({
+    limit,
+    maxAttempts: MAX_DRAFT_ATTEMPTS,
+    retryReceivedSince: subDays(new Date(), DRAFT_RETRY_WINDOW_DAYS),
+  });
   console.log(`[GuestReplyWorker] ${pending.length} inbound emails awaiting a draft.`);
 
   for (const row of pending) {
     summary.considered++;
+    const attempt = row.draftAttempts + 1;
 
     try {
+      // Counted before any work, so an attempt that dies halfway — a crash, a
+      // restart mid-generation — still uses up its turn.
+      await GuestReplyRepository.update(row.id, { draftAttempts: attempt });
+
       // An out-of-office bounce is not a guest asking a question. The poller
       // records it because it cannot see headers; this is where it stops.
       if (looksAutomated(row.inboundSubject ?? "", row.inboundBody ?? "")) {
@@ -66,7 +98,7 @@ export async function processGuestReplyDrafts(limit = 20): Promise<GuestReplyDra
       if (!booking) {
         await GuestReplyRepository.update(row.id, {
           status: "failed",
-          errorMessage: `Rezerwacja #${row.bookingId} już nie istnieje.`,
+          errorMessage: failureMessage(`Rezerwacja #${row.bookingId} już nie istnieje.`, attempt),
         });
         summary.failed++;
         continue;
@@ -94,7 +126,7 @@ export async function processGuestReplyDrafts(limit = 20): Promise<GuestReplyDra
       if (!outcome) {
         await GuestReplyRepository.update(row.id, {
           status: "failed",
-          errorMessage: "Model nie zwrócił poprawnego draftu — szczegóły w logach.",
+          errorMessage: failureMessage("Model nie zwrócił poprawnego draftu — szczegóły w logach.", attempt),
         });
         summary.failed++;
         summary.details.push(`#${row.id}: generowanie nieudane`);
@@ -162,9 +194,13 @@ export async function processGuestReplyDrafts(limit = 20): Promise<GuestReplyDra
       summary.failed++;
       summary.details.push(`#${row.id}: błąd — ${String(err)}`);
       try {
-        await GuestReplyRepository.update(row.id, { status: "failed", errorMessage: String(err) });
+        await GuestReplyRepository.update(row.id, {
+          status: "failed",
+          errorMessage: failureMessage(String(err), attempt),
+        });
       } catch {
-        // The row stays `new` and the next run retries it. Nothing else to do.
+        // The row keeps its status and the next run retries it, within the same
+        // attempt limit. Nothing else to do.
       }
     }
   }

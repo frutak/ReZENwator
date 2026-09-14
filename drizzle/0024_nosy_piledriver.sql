@@ -1,0 +1,1 @@
+ALTER TABLE `guest_reply_drafts` ADD `draftAttempts` int DEFAULT 0 NOT NULL;

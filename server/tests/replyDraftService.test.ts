@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   stripQuotedText,
   looksAutomated,
@@ -207,6 +207,20 @@ describe("generateReplyDraft", () => {
   it("returns null when the model answers with prose instead of JSON", async () => {
     setLlmProvider(fakeProvider("Jasne, napiszę im że mogą przyjechać od 16!"));
     expect(await call()).toBeNull();
+  });
+
+  it("logs what the model actually wrote when validation fails", async () => {
+    const { proposedAnimalsCount, ...withoutField } = VALID_OUTPUT as any;
+    const raw = JSON.stringify({ ...withoutField, notes: "Proponuję 1 zwierzaka w rezerwacji" });
+    setLlmProvider(fakeProvider(raw));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      expect(await call()).toBeNull();
+      expect(errorSpy).toHaveBeenCalledWith("[ReplyDraftService] Raw model output:", raw);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 

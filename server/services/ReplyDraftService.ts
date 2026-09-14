@@ -240,6 +240,9 @@ export async function generateReplyDraft(input: {
   const parsed = DraftOutputSchema.safeParse(extractJsonObject(result.text));
   if (!parsed.success) {
     console.error("[ReplyDraftService] Model output failed validation:", parsed.error.issues);
+    // The issues say which field was wrong but not what the model wrote instead
+    // — often the answer is sitting in another field, which only the raw text shows.
+    console.error("[ReplyDraftService] Raw model output:", result.text.slice(0, 8000));
     return null;
   }
 

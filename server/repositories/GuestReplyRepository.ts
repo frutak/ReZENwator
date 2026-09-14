@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, isNotNull, ne } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, lt, ne, or } from "drizzle-orm";
 import { getDb } from "../db";
 import { bookings, guestReplyDrafts, type InsertGuestReplyDraft } from "../../drizzle/schema";
 
@@ -120,16 +120,32 @@ export class GuestReplyRepository {
    *
    * Oldest first on purpose: if several arrive at once, the guest who wrote
    * first is answered first, and a backlog drains in the order it formed.
+   *
+   * Includes `failed` drafts, so a failure is retried by the next pass — but
+   * only recent ones: a draft for an email that failed weeks ago would reach
+   * the owner long after the guest stopped waiting. Both statuses stop once
+   * `maxAttempts` is used up.
    */
-  static async findPendingDrafting(limit = 20) {
+  static async findPendingDrafting(options: { limit: number; maxAttempts: number; retryReceivedSince: Date }) {
     const db = await getDb();
     if (!db) return [];
     return db
       .select()
       .from(guestReplyDrafts)
-      .where(eq(guestReplyDrafts.status, "new"))
+      .where(
+        and(
+          lt(guestReplyDrafts.draftAttempts, options.maxAttempts),
+          or(
+            eq(guestReplyDrafts.status, "new"),
+            and(
+              eq(guestReplyDrafts.status, "failed"),
+              gte(guestReplyDrafts.receivedAt, options.retryReceivedSince)
+            )
+          )
+        )
+      )
       .orderBy(guestReplyDrafts.receivedAt)
-      .limit(limit);
+      .limit(options.limit);
   }
 
   static async update(id: number, fields: Partial<typeof guestReplyDrafts.$inferInsert>) {
