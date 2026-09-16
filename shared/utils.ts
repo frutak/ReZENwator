@@ -120,7 +120,18 @@ export function calculateAmountsDue(booking: BookingAmounts): AmountsDue {
   const twoStepPortal =
     (booking.channel === "slowhop" || booking.channel === "alohacamp") && reservationFee > 0;
   const guestSettlesWithPortal = booking.channel === "airbnb" || booking.channel === "booking";
-  const staySettled = booking.status === "paid" || booking.status === "finished";
+  // `portal_paid` belongs here too: it means the portal collected the whole
+  // stay itself. On Alohacamp that is the "opłacona w całości" shape of the
+  // confirmation, which leaves no zaliczka behind, so what is still outstanding
+  // is the portal's payout rather than anything the guest owes. Without this a
+  // fully-prepaid Alohacamp booking asked the guest for the entire hostRevenue
+  // for as long as the payout was in flight — the Maria Satsiuk (#172)
+  // overcharge in a different disguise. Airbnb and Booking.com are unaffected;
+  // `guestSettlesWithPortal` already zeroes their guest.
+  const staySettled =
+    booking.status === "paid" ||
+    booking.status === "finished" ||
+    booking.status === "portal_paid";
 
   // `amountPaid` is a single figure that does not record who paid it, so the
   // guest's share is read from what they were asked for and whether the booking

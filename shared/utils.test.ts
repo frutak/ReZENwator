@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalizeBookingDates, calculateTotalGuests, normalizeDecimalFields, calculateBalanceDue } from "./utils";
+import { normalizeBookingDates, calculateTotalGuests, normalizeDecimalFields, calculateBalanceDue, calculateAmountsDue } from "./utils";
 
 describe("shared/utils", () => {
   describe("normalizeBookingDates", () => {
@@ -88,6 +88,45 @@ describe("shared/utils", () => {
 
     it("never reports a negative balance", () => {
       expect(calculateBalanceDue({ ...alohacamp, amountPaid: "9999.00" })).toBe(0);
+    });
+  });
+
+  describe("a stay the portal collected in full", () => {
+    // Alohacamp sends two shapes of confirmation, and only one leaves a zaliczka
+    // behind. "opłacona w całości" means the portal holds the entire stay and
+    // owes the owner a single payout — booking #113 (Suchocki) settled exactly
+    // so: no reservationFee, one transfer of 2446.50.
+    const prepaidInFull = {
+      channel: "alohacamp",
+      status: "portal_paid",
+      totalPrice: "3000.00",
+      hostRevenue: "2446.50",
+      reservationFee: null,
+      amountPaid: "0.00",
+      depositAmount: "500.00",
+      depositStatus: "pending",
+    };
+
+    it("asks that guest for the kaucja only, never for the payout in flight", () => {
+      const due = calculateAmountsDue(prepaidInFull);
+      expect(due.guestStayDue).toBe(0);
+      expect(due.guestDue).toBeCloseTo(500, 2);
+      // Still owed — by Alohacamp, not by the guest.
+      expect(due.portalDue).toBeCloseTo(2446.5, 2);
+      expect(due.accountDue).toBeCloseTo(2946.5, 2);
+    });
+
+    it("keeps asking a two-step Alohacamp guest for their own balance", () => {
+      // #181: 675 zaliczka went to the portal, so the remaining 2025 is the
+      // guest's to pay and must not be swept up by the fix above.
+      const twoStep = {
+        ...prepaidInFull,
+        status: "confirmed",
+        totalPrice: "2700.00",
+        hostRevenue: "2201.85",
+        reservationFee: "675.00",
+      };
+      expect(calculateAmountsDue(twoStep).guestStayDue).toBeCloseTo(2025, 2);
     });
   });
 

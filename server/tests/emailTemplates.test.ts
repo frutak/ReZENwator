@@ -322,6 +322,29 @@ describe("Email Template Dynamic Population", () => {
     expect(sentHtml).not.toContain("2700 zł oraz");
   });
 
+  it("asks a fully prepaid Alohacamp guest only for the kaucja", async () => {
+    // The other Alohacamp shape: "opłacona w całości", so no zaliczka and the
+    // booking sits at portal_paid until the payout lands. The guest has already
+    // paid the portal everything — the reminder must not bill them again.
+    const prepaidInFull = {
+      ...mockBooking,
+      channel: "alohacamp" as const,
+      status: "portal_paid" as const,
+      totalPrice: "3000.00",
+      reservationFee: "0.00",
+      commission: "553.50",
+      hostRevenue: "2446.50",
+      amountPaid: "0.00",
+      depositStatus: "pending" as const,
+    };
+
+    await sendGuestEmail("arrival_reminder", prepaidInFull, { isEarlyArrival: false });
+
+    const sentHtml = sendMailMock.mock.calls[0][0].html;
+    expect(sentHtml).toContain("przelew depozytu 500 zł");
+    expect(sentHtml).not.toContain("2446");
+  });
+
   it("asks only for the kaucja once the stay itself is settled", async () => {
     const settled = {
       ...mockBooking,
