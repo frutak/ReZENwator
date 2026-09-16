@@ -9,6 +9,7 @@ import { GuestEmailRepository } from "../repositories/GuestEmailRepository";
 import { PortalRepository } from "../repositories/PortalRepository";
 import { getGuestName } from "../_core/utils/booking";
 import { calculateAmountsDue } from "@shared/utils";
+import { isGuestEmailMissing } from "@shared/config";
 import { exec } from "child_process";
 import { promisify } from "util";
 import fs from "fs/promises";
@@ -494,12 +495,12 @@ export async function sendConsolidatedAlertEmail(data: {
   if (data.bookingsMissingData.length > 0) {
     html += `
       <h4 style="color:#9f1239;margin-bottom:8px">🚨 Bookings Missing Essential Data (Action Required)</h4>
-      <p style="font-size:12px;color:#6b7280;margin-top:-4px">Guest email or name is missing. Reminder emails will NOT be sent until fixed (for Airbnb, we allow missing emails and send messages to admin).</p>
+      <p style="font-size:12px;color:#6b7280;margin-top:-4px">Guest email or name is missing. Reminder emails will NOT be sent until fixed (for Airbnb and Alohacamp, we allow missing emails and send messages to admin).</p>
       <ul style="font-size:14px;margin-top:0">
         ${data.bookingsMissingData.map(b => {
           const name = getGuestName(b);
           const isNameMissing = name === "Unknown guest";
-          const isEmailMissing = !b.guestEmail && b.channel !== "airbnb";
+          const isEmailMissing = isGuestEmailMissing(b);
           return `
           <li>
             <strong>${b.property}</strong>: ${name} (${fmtDate(b.checkIn)} - ${fmtDate(b.checkOut)}) 

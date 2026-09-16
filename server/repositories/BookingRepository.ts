@@ -3,7 +3,7 @@ import { format, startOfDay, differenceInCalendarMonths, startOfMonth, addMonths
 import { getDb, type DbExecutor } from "../db";
 import { bookings, bookingActivities, expenses, monthlyAdjustments } from "../../drizzle/schema";
 import { Logger } from "../_core/logger";
-import { PROPERTIES, type Property, type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
+import { PROPERTIES, CHANNELS_WITHOUT_GUEST_EMAIL, type Property, type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
 import { CleaningService } from "../services/CleaningService";
 import { CASHFLOW_START_MONTH } from "./BankTransferRepository";
 
@@ -331,10 +331,11 @@ export class BookingRepository {
               or(isNull(bookings.guestName), eq(bookings.guestName, "")),
               or(isNull(bookings.companyName), eq(bookings.companyName, ""))
             ),
-            // Email check (except Airbnb)
+            // Email check (except the channels that hand over no address —
+            // Airbnb and Alohacamp; see CHANNELS_WITHOUT_GUEST_EMAIL)
             and(
               or(isNull(bookings.guestEmail), eq(bookings.guestEmail, "")),
-              ne(bookings.channel, "airbnb")
+              notInArray(bookings.channel, [...CHANNELS_WITHOUT_GUEST_EMAIL])
             )
           ),
           inArray(bookings.status, ["confirmed", "portal_paid", "paid", "pending"]),

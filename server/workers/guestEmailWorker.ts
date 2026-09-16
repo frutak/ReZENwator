@@ -4,6 +4,7 @@ import { sendGuestEmail, getRecipientForEmail } from "../_core/email";
 import { Logger } from "../_core/logger";
 import type { GuestEmailType } from "../_core/email";
 import { addDays, isBefore, isAfter, subDays, startOfDay, format } from "date-fns";
+import { isGuestEmailMissing } from "@shared/config";
 
 export interface GuestEmailSummary {
   sentCount: number;
@@ -33,8 +34,9 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
       }
 
       // Skip bookings with missing essential data (name or email)
-      // Exception: Airbnb bookings don't have guest email, so we allow them
-      const isMissingEssential = !booking.guestName || (!booking.guestEmail && booking.channel !== "airbnb");
+      // Exception: Airbnb and Alohacamp hand over no guest address, so those are
+      // allowed through — their mail is addressed to the owner instead.
+      const isMissingEssential = !booking.guestName || isGuestEmailMissing(booking);
       if (isMissingEssential) {
         console.log(`[GuestEmailWorker] Skipping booking #${booking.id} due to missing essential data (Name: ${booking.guestName || "Missing"}, Email: ${booking.guestEmail || "Missing"})`);
         continue;
@@ -107,7 +109,7 @@ export async function processGuestEmails(): Promise<GuestEmailSummary> {
 
       const isDataMissing = !booking.guestCountry || 
                            !booking.guestName || 
-                           (!booking.guestEmail && booking.channel !== "airbnb") ||
+                           isGuestEmailMissing(booking) ||
                            (!["airbnb", "booking"].includes(booking.channel) && booking.totalPrice === null);
 
       if (isDataMissing && !isSent("missing_data_alert")) {

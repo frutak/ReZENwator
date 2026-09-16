@@ -4,6 +4,7 @@ import type { Booking } from "../../drizzle/schema";
 import { predictFirstName, getGuestName } from "../_core/utils";
 import { ENV } from "../_core/env";
 import { calculateAmountsDue } from "@shared/utils";
+import { contactsGuestViaPortal, isGuestEmailMissing } from "@shared/config";
 
 export type GuestEmailType =
   | "booking_pending"
@@ -197,7 +198,10 @@ export class EmailTemplateService {
           company: "company trip"
         };
 
-        const bookingEmailDisplay = booking.guestEmail || (booking.channel === "airbnb" ? "Airbnb - no guest email" : "---");
+        // No address on Airbnb/Alohacamp: this copy of the booking goes to the
+        // owner, who pastes it into the portal's own messenger.
+        const portalName = booking.channel.charAt(0).toUpperCase() + booking.channel.slice(1);
+        const bookingEmailDisplay = booking.guestEmail || (contactsGuestViaPortal(booking.channel) ? `${portalName} - no guest email, reply via portal chat` : "---");
 
         const bookingDetailsPL = `
           <div style="background-color: #f3f4f6; padding: 15px; border-radius: 8px; margin: 20px 0;">
@@ -287,7 +291,7 @@ export class EmailTemplateService {
         const missingFields = [];
         if (!booking.guestCountry) missingFields.push("Country");
         if (displayName === "Unknown guest") missingFields.push("Guest Name / Company Name");
-        if (!booking.guestEmail && booking.channel !== "airbnb") missingFields.push("Email");
+        if (isGuestEmailMissing(booking)) missingFields.push("Email");
         if (!["airbnb", "booking"].includes(booking.channel) && booking.totalPrice === null) missingFields.push("Total Price");
         
         return {

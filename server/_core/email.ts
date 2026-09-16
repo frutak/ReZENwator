@@ -7,6 +7,7 @@ import { PdfGeneratorService } from "../services/PdfGeneratorService";
 import { EmailTemplateService, type GuestEmailType, type EmailTemplate } from "../services/EmailTemplateService";
 import { GuestEmailRepository } from "../repositories/GuestEmailRepository";
 import { getGuestName } from "./utils/booking";
+import { isGuestEmailMissing } from "@shared/config";
 
 export { type GuestEmailType, type EmailTemplate };
 
@@ -39,7 +40,7 @@ export async function sendGuestEmail(type: GuestEmailType, booking: Booking, ext
   // (unless it's specifically a missing_data_alert which is intended for the admin)
   // For business or production bookings, we allow companyName instead of guestName
   const displayName = getGuestName(booking);
-  const isMissingEssential = (!displayName || displayName === "Unknown guest") || (!booking.guestEmail && booking.channel !== "airbnb");
+  const isMissingEssential = (!displayName || displayName === "Unknown guest") || isGuestEmailMissing(booking);
   
   if (type !== "missing_data_alert" && isMissingEssential) {
     console.log(`[Email] Skipping guest email ${type} for booking #${booking.id} due to missing essential data (Display Name: ${displayName}, Email: ${booking.guestEmail || "Missing"})`);
