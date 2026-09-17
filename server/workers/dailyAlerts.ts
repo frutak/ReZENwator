@@ -398,6 +398,13 @@ export async function sendConsolidatedAlertEmail(data: {
     `;
   }
 
+  // Sources whose failure is not worth an error badge. Ratings barely move — Sadoles
+  // has collected one Alohacamp review in three years — so a missed weekly scrape just
+  // means yesterday's number is still on screen. It is reported as a warning and kept
+  // out of the error count so a real failure never hides behind it.
+  const NON_CRITICAL_SOURCES = new Set(["Rating Scraper"]);
+  const isNonCritical = (source: string) => NON_CRITICAL_SOURCES.has(source);
+
   // --- APP HEALTH / ERRORS ---
   html += `<h3 style="color:#1e40af;margin-top:0">🛠️ App Health (last 24h)</h3>`;
 
@@ -422,24 +429,51 @@ export async function sendConsolidatedAlertEmail(data: {
         <div style="display:grid;grid-template-columns: 1fr 1fr;gap:8px;font-size:12px">
           ${data.latestSyncs.map(s => {
             const isOk = s.success === "true";
-            const color = isOk ? "#15803d" : "#9f1239";
-            const icon = isOk ? "✅" : "❌";
-            return `<div style="color:${color}"><strong>${icon} ${s.source}</strong>: ${isOk ? "Healthy" : "Failing"}</div>`;
+            const warnOnly = !isOk && isNonCritical(s.source);
+            const color = isOk ? "#15803d" : warnOnly ? "#b45309" : "#9f1239";
+            const icon = isOk ? "✅" : warnOnly ? "⚠️" : "❌";
+            const label = isOk ? "Healthy" : warnOnly ? "Stale (not critical)" : "Failing";
+            return `<div style="color:${color}"><strong>${icon} ${s.source}</strong>: ${label}</div>`;
           }).join("")}
         </div>
       </div>
     `;
   }
 
-  if (data.failedSyncs.length === 0 && data.failedGuestEmails.length === 0) {
+  const criticalFailedSyncs = data.failedSyncs.filter(fs => !isNonCritical(fs.source));
+  const nonCriticalFailedSyncs = data.failedSyncs.filter(fs => isNonCritical(fs.source));
+
+  if (criticalFailedSyncs.length === 0 && data.failedGuestEmails.length === 0) {
     html += `<p style="font-size:14px;color:#15803d">✅ System is healthy. No major errors recorded.</p>`;
-  } else {
-    if (data.failedSyncs.length > 0) {
-      const persistedFailures = data.failedSyncs.filter(fs => {
+  }
+
+  if (nonCriticalFailedSyncs.length > 0) {
+    // Grouped by source: a stale scraper is one line of context, not a list of attempts.
+    const warnBySource: Record<string, any[]> = {};
+    nonCriticalFailedSyncs.forEach(f => {
+      if (!warnBySource[f.source]) warnBySource[f.source] = [];
+      warnBySource[f.source].push(f);
+    });
+
+    html += `
+      <h4 style="color:#b45309;margin-bottom:8px">⚠️ Warnings (nothing broken)</h4>
+      <ul style="font-size:13px;margin-top:0;color:#b45309">
+        ${Object.entries(warnBySource).map(([source, fails]) => {
+          // findFailedSyncs has no ORDER BY, so pick the newest attempt explicitly.
+          const newest = fails.reduce((a, b) => (new Date(b.createdAt) > new Date(a.createdAt) ? b : a));
+          return `<li><strong>${source}</strong>: ${newest.errorMessage || "Unknown issue"} (${fails.length} attempt(s), latest ${fmt(newest.createdAt)}). Previous values are still shown; it retries on the next scheduled run.</li>`;
+        }).join("")}
+      </ul>
+    `;
+  }
+
+  if (criticalFailedSyncs.length > 0 || data.failedGuestEmails.length > 0) {
+    if (criticalFailedSyncs.length > 0) {
+      const persistedFailures = criticalFailedSyncs.filter(fs => {
         const latest = data.latestSyncs.find(ls => ls.source === fs.source);
         return latest && latest.success === "false";
       });
-      const resolvedFailures = data.failedSyncs.filter(fs => {
+      const resolvedFailures = criticalFailedSyncs.filter(fs => {
         const latest = data.latestSyncs.find(ls => ls.source === fs.source);
         return latest && latest.success === "true";
       });
@@ -590,7 +624,9 @@ export async function sendConsolidatedAlertEmail(data: {
   `;
 
   const totalItems = data.stalePending.length + data.upcomingUnpaid.length + data.upcomingPendingDeposits.length + data.depositsToReturn.length + data.stalePortalPaid.length + data.bookingsMissingData.length + data.unreconciled.length;
-  const totalErrors = data.failedSyncs.length + data.failedGuestEmails.length;
+  // Warnings (see NON_CRITICAL_SOURCES) are deliberately excluded: the subject counts
+  // things that need acting on, and a stale rating is not one of them.
+  const totalErrors = data.failedSyncs.filter(fs => !NON_CRITICAL_SOURCES.has(fs.source)).length + data.failedGuestEmails.length;
   // Called out in the subject: it is the one item that is worthless if read late.
   const notesFlag = data.arrivalNotes.length > 0 ? `📝 ${data.arrivalNotes.length} notatki do przyjazdów — ` : "";
   // Same reasoning as the arrival notes: a balance that does not match its

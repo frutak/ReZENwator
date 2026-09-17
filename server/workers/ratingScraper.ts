@@ -83,18 +83,19 @@ async function scrapeWithPlaywright(url: string): Promise<{ rating: number; coun
   return null;
 }
 
-async function scrapePortal(property: "Sadoles" | "Hacjenda", url: string, portal: "booking" | "airbnb" | "slowhop" | "alohacamp" | "google"): Promise<{ rating: number; count: number } | null> {
-  // Google is served by the official Places API, not scraped — `url` is a Place ID here.
-  if (portal === "google") {
-    return scrapeGooglePlaces(url);
-  }
+// Portals whose page ships a complete JSON-LD aggregateRating in the server-rendered
+// HTML, so a plain HTTP GET (~0.5s) answers what Playwright needs ~9s and a browser for.
+// Booking and Airbnb are NOT in here: they serve WAF/captcha to a bare HTTP client.
+const HTTP_FIRST_PORTALS = new Set(["alohacamp"]);
 
-  // 1. Try Playwright first (most robust, handles JS, Stealth, and generic fallbacks)
-  const pwResult = await scrapeWithPlaywright(url);
-  if (pwResult) return pwResult;
-
-  // 2. Fallback to axios if Playwright fails
-  try {
+/**
+ * Scrape a rating out of the server-rendered HTML with a plain HTTP GET.
+ * Returns null when the page loads but holds no rating we recognise, so the caller
+ * can fall through to the browser; throws only when the fetch itself fails (network
+ * error, WAF, captcha), because that is worth reporting verbatim.
+ */
+async function scrapeWithHttp(url: string, portal: "booking" | "airbnb" | "slowhop" | "alohacamp"): Promise<{ rating: number; count: number } | null> {
+  {
     const { data: html } = await axios.get(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -173,11 +174,49 @@ async function scrapePortal(property: "Sadoles" | "Hacjenda", url: string, porta
         return { rating: parseFloat(ratingMatch[1].replace(",", ".")), count: parseInt(countMatch[1], 10) };
       }
     }
-  } catch (error) {
-    throw new Error(`[${portal}] ${(error as any).message}`);
   }
-  
-  throw new Error(`[${portal}] Could not find rating data in response`);
+
+  // Page loaded, but nothing we recognise — let the caller try the browser.
+  return null;
+}
+
+async function scrapePortal(property: "Sadoles" | "Hacjenda", url: string, portal: "booking" | "airbnb" | "slowhop" | "alohacamp" | "google"): Promise<{ rating: number; count: number } | null> {
+  // Google is served by the official Places API, not scraped — `url` is a Place ID here.
+  if (portal === "google") {
+    return scrapeGooglePlaces(url);
+  }
+
+  // Alohacamp puts the whole aggregateRating in its server-rendered HTML, so the cheap
+  // HTTP path goes first there and the browser is only the fallback. Everywhere else
+  // Playwright leads, because a bare GET gets a WAF page instead of a rating.
+  const httpFirst = HTTP_FIRST_PORTALS.has(portal);
+  let httpError: string | null = null;
+
+  const runHttp = async () => {
+    try {
+      return await scrapeWithHttp(url, portal);
+    } catch (error) {
+      httpError = (error as any).message;
+      console.warn(`[RatingScraper] HTTP scrape failed for ${portal}: ${httpError}`);
+      return null;
+    }
+  };
+
+  if (httpFirst) {
+    const httpResult = await runHttp();
+    if (httpResult) return httpResult;
+
+    const pwResult = await scrapeWithPlaywright(url);
+    if (pwResult) return pwResult;
+  } else {
+    const pwResult = await scrapeWithPlaywright(url);
+    if (pwResult) return pwResult;
+
+    const httpResult = await runHttp();
+    if (httpResult) return httpResult;
+  }
+
+  throw new Error(`[${portal}] ${httpError ?? "Could not find rating data in response"}`);
 }
 
 export async function updateAllPropertyRatings() {
