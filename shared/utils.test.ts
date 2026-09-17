@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { normalizeBookingDates, calculateTotalGuests, normalizeDecimalFields, calculateBalanceDue, calculateAmountsDue } from "./utils";
+import { normalizeBookingDates, calculateTotalGuests, normalizeDecimalFields, calculateBalanceDue, calculateAmountsDue, bookingEarnings } from "./utils";
 
 describe("shared/utils", () => {
   describe("normalizeBookingDates", () => {
@@ -144,6 +144,29 @@ describe("shared/utils", () => {
       expect(output.commission).toBe("100.00");
       expect(output.hostRevenue).toBeNull();
       expect(output.other).toBe("");
+    });
+  });
+
+  describe("bookingEarnings", () => {
+    it("takes commission from the payout, not the column, when the column was left at 0", () => {
+      // Portal cut baked into hostRevenue, commission never written.
+      expect(bookingEarnings({ totalPrice: "2000.00", commission: "0.00", hostRevenue: "1690.00" }))
+        .toEqual({ totalPrice: 2000, commission: 310, hostRevenue: 1690 });
+    });
+
+    it("agrees with a consistent row", () => {
+      expect(bookingEarnings({ totalPrice: "1000.00", commission: "155.00", hostRevenue: "845.00" }))
+        .toEqual({ totalPrice: 1000, commission: 155, hostRevenue: 845 });
+    });
+
+    it("falls back to the commission column when no payout is recorded", () => {
+      expect(bookingEarnings({ totalPrice: "1000.00", commission: "155.00", hostRevenue: null }))
+        .toEqual({ totalPrice: 1000, commission: 155, hostRevenue: 845 });
+    });
+
+    it("treats an unpriced row as zero", () => {
+      expect(bookingEarnings({ totalPrice: null, commission: "0.00", hostRevenue: null }))
+        .toEqual({ totalPrice: 0, commission: 0, hostRevenue: 0 });
     });
   });
 });

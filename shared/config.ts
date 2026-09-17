@@ -9,6 +9,13 @@ export type Property = typeof PROPERTIES[number];
 export const CHANNELS = ["slowhop", "airbnb", "booking", "alohacamp", "direct"] as const;
 export type Channel = typeof CHANNELS[number];
 
+/**
+ * First month the bookings table is the full record. Earlier months come from
+ * the owner's spreadsheet (historical_revenue / historical_costs); from here on
+ * they are ignored so nothing is counted twice.
+ */
+export const HISTORY_CUTOVER_MONTH = "2026-01";
+
 export const STATUSES = ["pending", "confirmed", "portal_paid", "paid", "finished", "cancelled"] as const;
 export type BookingStatus = typeof STATUSES[number];
 

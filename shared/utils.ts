@@ -168,3 +168,26 @@ export function calculateBalanceDue(booking: BookingAmounts, includeDeposit = fa
   const due = calculateAmountsDue(booking);
   return includeDeposit ? due.accountDue : due.stayDue;
 }
+
+/**
+ * How a booking's price splits between the owner and the portal.
+ *
+ * `hostRevenue` is what the portal actually pays out, so it is the authority;
+ * commission is whatever it leaves of the price. The stored `commission` column
+ * is only a fallback for a row with no payout recorded. Trusting the column
+ * first overstated the monthly profit: a hand-entered portal stay can carry the
+ * payout in `hostRevenue` while `commission` stays at its 0.00 default, and then
+ * `totalPrice - commission` counts the portal's cut as income.
+ */
+export function bookingEarnings(booking: {
+  totalPrice: string | number | null;
+  commission: string | number | null;
+  hostRevenue: string | number | null;
+}): { totalPrice: number; commission: number; hostRevenue: number } {
+  const totalPrice = parseFloat(String(booking.totalPrice ?? "0")) || 0;
+  const hasPayout = booking.hostRevenue !== null && booking.hostRevenue !== "";
+  const hostRevenue = hasPayout
+    ? parseFloat(String(booking.hostRevenue)) || 0
+    : totalPrice - (parseFloat(String(booking.commission ?? "0")) || 0);
+  return { totalPrice, commission: totalPrice - hostRevenue, hostRevenue };
+}

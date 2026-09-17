@@ -1,9 +1,10 @@
 import { and, desc, eq, gte, lte, ne, inArray, or, sql, isNull, isNotNull, lt, notInArray, getTableColumns } from "drizzle-orm";
 import { format, startOfDay, differenceInCalendarMonths, startOfMonth, addMonths, differenceInCalendarDays, eachWeekendOfInterval, isAfter, startOfYear, endOfYear } from "date-fns";
 import { getDb, type DbExecutor } from "../db";
-import { bookings, bookingActivities, expenses, monthlyAdjustments } from "../../drizzle/schema";
+import { bookings, bookingActivities, expenses, monthlyAdjustments, historicalRevenue, historicalCosts } from "../../drizzle/schema";
 import { Logger } from "../_core/logger";
-import { PROPERTIES, CHANNELS_WITHOUT_GUEST_EMAIL, type Property, type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
+import { PROPERTIES, HISTORY_CUTOVER_MONTH, CHANNELS_WITHOUT_GUEST_EMAIL, type Property, type Channel, type BookingStatus, type DepositStatus } from "@shared/config";
+import { bookingEarnings } from "@shared/utils";
 import { CleaningService } from "../services/CleaningService";
 import { CASHFLOW_START_MONTH } from "./BankTransferRepository";
 
@@ -958,6 +959,7 @@ export class BookingRepository {
         count: 0,
         totalNights: 0,
         extraCleaning: 0,
+        historical: false,
       };
     }
 
@@ -975,9 +977,7 @@ export class BookingRepository {
       }
 
       const cleaningFee = CleaningService.calculateCleaningFee(booking as any, previousBooking as any);
-      const totalPrice = parseFloat(String(booking.totalPrice || "0"));
-      const commission = parseFloat(String(booking.commission || "0"));
-      const hostRevenue = parseFloat(String(booking.hostRevenue || "0"));
+      const { totalPrice, commission, hostRevenue } = bookingEarnings(booking);
       const nights = Math.max(1, differenceInCalendarDays(new Date(booking.checkOut), new Date(booking.checkIn)));
 
       resultsByMonth[monthKey].totalPrice += totalPrice;
@@ -988,13 +988,15 @@ export class BookingRepository {
       resultsByMonth[monthKey].totalNights += nights;
     }
 
-    // 6. Aggregate expenses
+    // 6. Aggregate expenses. Before the cutover the spreadsheet's cost block is
+    //    the record (step 7b); a bill whose period reaches back into those months
+    //    would count the same utilities twice, so only its later months land.
     for (const expense of allExpenses) {
       const amount = parseFloat(String(expense.amount));
       if (expense.type === "purchase") {
         const pDate = new Date(expense.paymentDate);
         const monthKey = `${pDate.getFullYear()}-${String(pDate.getMonth() + 1).padStart(2, '0')}`;
-        if (resultsByMonth[monthKey]) resultsByMonth[monthKey].purchaseCosts += amount;
+        if (resultsByMonth[monthKey] && monthKey >= HISTORY_CUTOVER_MONTH) resultsByMonth[monthKey].purchaseCosts += amount;
       } else if (expense.type === "utility" && expense.startDate && expense.endDate) {
         const start = startOfMonth(new Date(expense.startDate));
         const end = startOfMonth(new Date(expense.endDate));
@@ -1003,7 +1005,7 @@ export class BookingRepository {
         for (let i = 0; i < monthCount; i++) {
           const uDate = addMonths(start, i);
           const monthKey = `${uDate.getFullYear()}-${String(uDate.getMonth() + 1).padStart(2, '0')}`;
-          if (resultsByMonth[monthKey]) resultsByMonth[monthKey].utilityCosts += monthlyAmount;
+          if (resultsByMonth[monthKey] && monthKey >= HISTORY_CUTOVER_MONTH) resultsByMonth[monthKey].utilityCosts += monthlyAmount;
         }
       }
     }
@@ -1027,10 +1029,13 @@ export class BookingRepository {
       }
     }
 
+    // 7b. Months before the app kept bookings come from the owner's spreadsheet.
+    await this.addHistoricalMonths(resultsByMonth, targetYear, filters);
+
     // 8. Calculate final profit
     for (const key in resultsByMonth) {
       const m = resultsByMonth[key];
-      m.profit = m.totalPrice - m.commission - m.cleaningCosts - m.utilityCosts - m.purchaseCosts;
+      m.profit = m.hostRevenue - m.cleaningCosts - m.utilityCosts - m.purchaseCosts;
     }
 
     // 9. Weekend Stats (Optimized Range)
@@ -1070,6 +1075,75 @@ export class BookingRepository {
       monthlyData: Object.values(resultsByMonth).sort((a, b) => a.month.localeCompare(b.month)),
       weekendStats
     };
+  }
+
+  /**
+   * Folds historical_revenue / historical_costs into the monthly results for
+   * months before HISTORY_CUTOVER_MONTH, and flags those months `historical`.
+   *
+   * Costs have no channel. Under a channel filter, cleaning follows that
+   * channel's share of the property's revenue that month (cleaning scales with
+   * stays, and stays with revenue); utilities and other costs are added whole,
+   * exactly as the expenses table is for booking-era months.
+   */
+  private static async addHistoricalMonths(
+    resultsByMonth: Record<string, any>,
+    targetYear: number,
+    filters: { property?: Property; channel?: Channel }
+  ) {
+    if (`${targetYear}-01` >= HISTORY_CUTOVER_MONTH) return;
+    const db = await getDb();
+    if (!db) return;
+
+    const inYear = (col: any) => and(
+      sql`${col} LIKE ${`${targetYear}-%`}`,
+      lt(col, HISTORY_CUTOVER_MONTH),
+    );
+    const revenueRows = await db.select().from(historicalRevenue).where(and(
+      inYear(historicalRevenue.month),
+      filters.property ? eq(historicalRevenue.property, filters.property) : undefined,
+    ));
+    const costRows = await db.select().from(historicalCosts).where(and(
+      inYear(historicalCosts.month),
+      filters.property ? eq(historicalCosts.property, filters.property) : undefined,
+    ));
+
+    const propertyMonthTotal = new Map<string, number>();
+    const channelMonthTotal = new Map<string, number>();
+    for (const r of revenueRows) {
+      const key = `${r.property}|${r.month}`;
+      const total = parseFloat(String(r.totalPrice));
+      propertyMonthTotal.set(key, (propertyMonthTotal.get(key) ?? 0) + total);
+      if (filters.channel && r.channel !== filters.channel) continue;
+      channelMonthTotal.set(key, (channelMonthTotal.get(key) ?? 0) + total);
+
+      const m = resultsByMonth[r.month];
+      if (!m) continue;
+      const { totalPrice, commission, hostRevenue } = bookingEarnings(r);
+      m.totalPrice += totalPrice;
+      m.commission += commission;
+      m.hostRevenue += hostRevenue;
+      m.historical = true;
+    }
+
+    for (const c of costRows) {
+      const m = resultsByMonth[c.month];
+      if (!m) continue;
+      let amount = parseFloat(String(c.amount));
+      if (c.category === "cleaning") {
+        if (filters.channel) {
+          const key = `${c.property}|${c.month}`;
+          const all = propertyMonthTotal.get(key) ?? 0;
+          amount = all > 0 ? amount * (channelMonthTotal.get(key) ?? 0) / all : 0;
+        }
+        m.cleaningCosts += amount;
+      } else if (c.category === "utilities") {
+        m.utilityCosts += amount;
+      } else {
+        m.purchaseCosts += amount;
+      }
+      m.historical = true;
+    }
   }
 
   private static calculateWeekendOccupancy(bookings: any[], start: Date, end: Date, properties: Property[]) {

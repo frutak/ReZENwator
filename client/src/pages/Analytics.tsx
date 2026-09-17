@@ -27,10 +27,10 @@ import {
   SelectTrigger, 
   SelectValue 
 } from "@/components/ui/select";
-import { PROPERTIES, CHANNELS } from "@shared/config";
+import { PROPERTIES, CHANNELS, HISTORY_CUTOVER_MONTH } from "@shared/config";
 import { format, parse } from "date-fns";
 import { pl, enUS } from "date-fns/locale";
-import { TrendingUp, Filter, Wallet, BarChart3, PiggyBank, AlertCircle } from "lucide-react";
+import { TrendingUp, Filter, Wallet, BarChart3, PiggyBank, AlertCircle, History } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { toast } from "sonner";
 
@@ -124,6 +124,7 @@ export default function Analytics() {
         count: found ? (found.count || 0) : 0,
         totalNights: found ? (found.totalNights || 0) : 0,
         extraCleaning: found ? safeNum(found.extraCleaning) : 0,
+        historical: found ? !!found.historical : false,
       };
     });
 
@@ -140,6 +141,7 @@ export default function Analytics() {
       count: monthlyItems.reduce((s, i) => s + i.count, 0),
       totalNights: monthlyItems.reduce((s, i) => s + i.totalNights, 0),
       extraCleaning: monthlyItems.reduce((s, i) => s + i.extraCleaning, 0),
+      historical: false,
     };
 
     return [...monthlyItems, totalItem];
@@ -205,6 +207,10 @@ export default function Analytics() {
     return {
       totalRevenue,
       totalBookings,
+      // Spreadsheet months carry money but no stays, nights or calendar, so
+      // per-booking and weekend figures would read as a misleading 0.
+      hasHistory: monthlyData.some((d) => d?.historical),
+      historyOnly: monthlyData.some((d) => d?.historical) && totalBookings === 0,
       totalNights,
       totalProfit,
       avgBooking: totalBookings > 0 ? Math.round(totalRevenue / totalBookings) : 0,
@@ -243,7 +249,7 @@ export default function Analytics() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {[2024, 2025, 2026, 2027].map(y => (
+                  {Array.from({ length: new Date().getFullYear() + 2 - 2021 }, (_, i) => 2021 + i).map(y => (
                     <SelectItem key={y} value={String(y)}>{y}</SelectItem>
                   ))}
                 </SelectContent>
@@ -293,6 +299,13 @@ export default function Analytics() {
           </div>
         </div>
 
+        {stats.hasHistory && !isCashflow && (
+          <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+            <History className="h-4 w-4 mt-0.5 shrink-0" />
+            <p>{t("dashboard.history_note").replace("{cutover}", HISTORY_CUTOVER_MONTH)}</p>
+          </div>
+        )}
+
         {/* Stats Summary - Row 1 */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <Card className={(metric === 'profit' || metric === 'summary') ? 'ring-2 ring-primary shadow-lg scale-[1.02] transition-all' : 'hover:bg-muted/30 transition-all'}>
@@ -327,7 +340,7 @@ export default function Analytics() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-xl font-bold">{stats.totalBookings}</div>
+              <div className="text-xl font-bold">{stats.historyOnly ? "—" : stats.totalBookings}</div>
               <p className="text-[10px] text-muted-foreground">{t("dashboard.total")} {t("dashboard.bookings").toLowerCase()}</p>
             </CardContent>
           </Card>
@@ -339,7 +352,7 @@ export default function Analytics() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="text-xl font-bold">{stats.avgBooking.toLocaleString()} PLN</div>
+              <div className="text-xl font-bold">{stats.historyOnly ? "—" : `${stats.avgBooking.toLocaleString()} PLN`}</div>
               <p className="text-[10px] text-muted-foreground">{t("dashboard.total")} / {t("dashboard.bookings_count").toLowerCase()}</p>
             </CardContent>
           </Card>
@@ -349,13 +362,13 @@ export default function Analytics() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <Card className="hover:bg-muted/30 transition-all"><CardHeader className="pb-2"><CardTitle className="text-xs font-medium">{t("dashboard.avg_nightly_price")}</CardTitle></CardHeader>
             <CardContent>
-              <div className="text-xl font-bold">{stats.avgNightly.toLocaleString()} PLN</div>
+              <div className="text-xl font-bold">{stats.historyOnly ? "—" : `${stats.avgNightly.toLocaleString()} PLN`}</div>
               <p className="text-[10px] text-muted-foreground">{t("dashboard.total")} / {stats.totalNights} {t("common.nights")}</p>
             </CardContent>
           </Card>
           <Card className="hover:bg-muted/30 transition-all"><CardHeader className="pb-2"><CardTitle className="text-xs font-medium">{t("dashboard.booked_weekends_past")}</CardTitle></CardHeader>
             <CardContent>
-              <div className="text-xl font-bold">{Math.round(weekendStats.pastYear || 0)}%</div>
+              <div className="text-xl font-bold">{stats.historyOnly ? "—" : `${Math.round(weekendStats.pastYear || 0)}%`}</div>
               <p className="text-[10px] text-muted-foreground">{year} {t("dashboard.analytics").toLowerCase()}</p>
             </CardContent>
           </Card>
@@ -534,6 +547,9 @@ export default function Analytics() {
                     <tr key={row.month} className="hover:bg-slate-50 transition-colors group">
                       <td className="px-6 py-4 font-semibold text-slate-700 dark:text-slate-300">
                         {format(parse(row.month, "yyyy-MM", new Date()), "MMMM yyyy", { locale: language === "PL" ? pl : enUS })}
+                        {row.historical && (
+                          <span className="ml-2 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium uppercase text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">{t("dashboard.history_badge")}</span>
+                        )}
                       </td>
                       <td className="px-4 py-4 text-right font-mono text-xs text-slate-600">{row.totalPrice.toLocaleString()} PLN</td>
                       <td className="px-4 py-4 text-right">

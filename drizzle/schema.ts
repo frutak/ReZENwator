@@ -10,6 +10,7 @@ import {
   index,
   uniqueIndex,
   json,
+  boolean,
 } from "drizzle-orm/mysql-core";
 
 /**
@@ -666,3 +667,61 @@ export const processedEmails = mysqlTable("processed_emails", {
 ]);
 
 export type ProcessedEmail = typeof processedEmails.$inferSelect;
+
+/**
+ * Revenue from before the app kept bookings, per property, month and channel.
+ *
+ * Imported from the owner's own revenue spreadsheet by a local, uncommitted
+ * script. These are deliberately NOT dummy bookings: a
+ * booking row feeds the calendar, the iCal export, the cleaning schedule,
+ * reconciliation and guest mail, and none of that should see a month-sized
+ * lump. getAnalytics merges these rows only for months before
+ * HISTORY_CUTOVER_MONTH; from then on real bookings are the source.
+ *
+ * Money follows the bookings convention: totalPrice = hostRevenue + commission.
+ * `commissionEstimated` marks a split the spreadsheet did not state outright.
+ */
+export const historicalRevenue = mysqlTable("historical_revenue", {
+  id: int("id").autoincrement().primaryKey(),
+  property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).notNull(),
+  month: varchar("month", { length: 7 }).notNull(), // "YYYY-MM"
+  channel: mysqlEnum("channel", ["slowhop", "airbnb", "booking", "alohacamp", "direct"]).notNull(),
+  /** Family / at-cost stays (the spreadsheet's "unoff"), the history twin of type = internal. */
+  internal: boolean("internal").default(false).notNull(),
+  totalPrice: decimal("totalPrice", { precision: 10, scale: 2 }).notNull(),
+  commission: decimal("commission", { precision: 10, scale: 2 }).default("0.00").notNull(),
+  hostRevenue: decimal("hostRevenue", { precision: 10, scale: 2 }).notNull(),
+  commissionEstimated: boolean("commissionEstimated").default(false).notNull(),
+  source: varchar("source", { length: 64 }).default("historia.csv").notNull(),
+  notes: text("notes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("idx_hist_rev_key").on(table.property, table.month, table.channel, table.internal),
+]);
+
+export type HistoricalRevenue = typeof historicalRevenue.$inferSelect;
+export type InsertHistoricalRevenue = typeof historicalRevenue.$inferInsert;
+
+/**
+ * Costs for the same pre-app months, per property, month and category.
+ * `estimated` is true where the spreadsheet had no figure and the import
+ * derived one.
+ */
+export const historicalCosts = mysqlTable("historical_costs", {
+  id: int("id").autoincrement().primaryKey(),
+  property: mysqlEnum("property", ["Sadoles", "Hacjenda"]).notNull(),
+  month: varchar("month", { length: 7 }).notNull(), // "YYYY-MM"
+  category: mysqlEnum("category", ["cleaning", "utilities", "other"]).notNull(),
+  amount: decimal("amount", { precision: 10, scale: 2 }).notNull(),
+  estimated: boolean("estimated").default(false).notNull(),
+  source: varchar("source", { length: 64 }).default("historia.csv").notNull(),
+  notes: text("notes"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+}, (table) => [
+  uniqueIndex("idx_hist_cost_key").on(table.property, table.month, table.category),
+]);
+
+export type HistoricalCost = typeof historicalCosts.$inferSelect;
+export type InsertHistoricalCost = typeof historicalCosts.$inferInsert;
