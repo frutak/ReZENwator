@@ -80,4 +80,12 @@ describe("planFor", () => {
     expect(planFor("Sadoles", night("2026-12-31"))).toBe("S8: New Year");
     expect(planFor("Sadoles", night("2027-06-11"))).toBe("S4: Mid Weekend");
   });
+
+  it("keeps 2026 low-season weekends on the holdover plan, and 2027 on the new one", () => {
+    expect(planFor("Sadoles", night("2026-11-13"))).toBe("S2: Low Weekend 2026");
+    expect(planFor("Sadoles", night("2026-12-23"))).toBe("S2: Low Weekend 2026");
+    expect(planFor("Sadoles", night("2026-12-31"))).toBe("S8: New Year");
+    expect(planFor("Sadoles", night("2027-01-01"))).toBe("S2: Low Weekend");
+    expect(planFor("Hacjenda", night("2026-11-13"))).toBe("H3: Standard");
+  });
 });

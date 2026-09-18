@@ -30,6 +30,17 @@ export const HACJENDA_PLAN: Record<Season | "special" | "newYear", { weekday: st
   newYear: "H7: New Year",
 };
 
+/**
+ * Plans that keep their old price for nights before a date. A price change on a
+ * plan reaches every night assigned to it; a holdover keeps the nights still on
+ * sale at the old price. First use: the 2026 low-season weekends stayed at 900
+ * when S2 went to 1,100 from 2027, because the portals kept their 2026 prices
+ * and direct must stay the cheapest channel.
+ */
+export const PLAN_HOLDOVERS: { plan: string; before: string; holdover: string }[] = [
+  { plan: "S2: Low Weekend", before: "2027-01-01", holdover: "S2: Low Weekend 2026" },
+];
+
 const utc = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d));
 const key = (d: Date) => d.toISOString().slice(0, 10);
 
@@ -148,5 +159,7 @@ export function planFor(property: "Sadoles" | "Hacjenda", night: Date): string {
   if (kind === "newYear") return plans.newYear as string;
   if (kind === "special") return plans.special as string;
   const s = plans[season(night)] as { weekday: string; weekend: string };
-  return kind === "weekend" ? s.weekend : s.weekday;
+  const name = kind === "weekend" ? s.weekend : s.weekday;
+  const held = PLAN_HOLDOVERS.find((h) => h.plan === name && key(night) < h.before);
+  return held ? held.holdover : name;
 }
