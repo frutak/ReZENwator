@@ -1,222 +1,98 @@
-import { getDb } from "../server/db.ts";
-import { pricingPlans, calendarPricing, propertySettings } from "../drizzle/schema.ts";
-import { eq, and, sql } from "drizzle-orm";
-import { addDays, format, isSameDay } from "date-fns";
-
 /**
- * Calculates Easter Sunday for a given year using the Meeus/Jones/Butcher algorithm.
+ * Assigns a pricing plan to every night in `calendar_pricing`, following the rules
+ * in server/services/pricingCalendar.ts.
+ *
+ * Only the calendar is touched. Plan prices and property settings (fixed fee,
+ * discounts) are edited in the admin Pricing page; this script used to reset them
+ * to hard-coded values on every run, silently undoing changes made there.
+ *
+ * Past nights are left alone — they describe what was sold, and the revenue
+ * analysis reads their plans as seasons. By default the run starts today.
+ *
+ * Dry run by default: prints every night whose plan would change. Pass --apply to
+ * write, in one transaction.
+ *
+ * Usage:
+ *   npx tsx scripts/populate_pricing.ts                    # dry run from today
+ *   npx tsx scripts/populate_pricing.ts --apply
+ *   npx tsx scripts/populate_pricing.ts --from=2027-01-01 --to=2027-12-31
  */
-function getEaster(year: number): Date {
-  const a = year % 19;
-  const b = Math.floor(year / 100);
-  const c = year % 100;
-  const d = Math.floor(b / 4);
-  const e = b % 4;
-  const f = Math.floor((b + 8) / 25);
-  const g = Math.floor((b - f + 1) / 3);
-  const h = (19 * a + b - d - g + 15) % 30;
-  const i = Math.floor(c / 4);
-  const k = c % 4;
-  const l = (32 + 2 * e + 2 * i - h - k) % 7;
-  const m = Math.floor((a + 11 * h + 22 * l) / 451);
-  const month = Math.floor((h + l - 7 * m + 114) / 31);
-  const day = ((h + l - 7 * m + 114) % 31) + 1;
-  return new Date(Date.UTC(year, month - 1, day));
+import "dotenv/config";
+import { getDb } from "../server/db";
+import { pricingPlans, calendarPricing } from "../drizzle/schema";
+import { sql } from "drizzle-orm";
+import { planFor } from "../server/services/pricingCalendar";
+
+const PROPERTIES = ["Sadoles", "Hacjenda"] as const;
+const DAY = 86_400_000;
+
+function arg(name: string): string | null {
+  const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
+  return hit ? hit.slice(name.length + 3) : null;
 }
 
-function getPolishHolidays(year: number) {
-  const easter = getEaster(year);
-  const easterMonday = addDays(easter, 1);
-  const corpusChristi = addDays(easter, 60);
+const toUtcDay = (iso: string) => new Date(`${iso}T00:00:00Z`);
+const iso = (d: Date) => d.toISOString().slice(0, 10);
 
-  return {
-    newYear: new Date(Date.UTC(year, 0, 1)),
-    epiphany: new Date(Date.UTC(year, 0, 6)),
-    easter,
-    easterMonday,
-    may1: new Date(Date.UTC(year, 4, 1)),
-    may3: new Date(Date.UTC(year, 4, 3)),
-    corpusChristi,
-    assumption: new Date(Date.UTC(year, 7, 15)),
-    allSaints: new Date(Date.UTC(year, 10, 1)),
-    independence: new Date(Date.UTC(year, 10, 11)),
-    christmas1: new Date(Date.UTC(year, 11, 25)),
-    christmas2: new Date(Date.UTC(year, 11, 26)),
-  };
-}
+async function main() {
+  const apply = process.argv.includes("--apply");
+  const today = iso(new Date());
+  const from = toUtcDay(arg("from") ?? today);
+  // Default horizon: two years from 1 January, as the calendar has always been filled.
+  const to = toUtcDay(arg("to") ?? `${new Date().getUTCFullYear() + 2}-01-31`);
+  if (iso(from) < today && !process.argv.includes("--allow-past")) {
+    throw new Error(`--from ${iso(from)} is in the past; pass --allow-past if you really mean to rewrite sold nights`);
+  }
 
-function getSeason(date: Date): "Low" | "Mixed" | "High" {
-  const month = date.getUTCMonth(); // 0-indexed
-  if ([0, 1, 2, 9, 10, 11].includes(month)) return "Low";
-  if ([3, 4, 5, 8].includes(month)) return "Mixed";
-  return "High";
-}
-
-async function populate() {
   const db = await getDb();
   if (!db) throw new Error("No DB");
 
-  console.log("Cleaning old assignments...");
-  await db.delete(calendarPricing);
+  const plans = await db.select().from(pricingPlans);
+  const idOf = new Map(plans.map((p) => [`${p.property}|${p.name}`, p.id]));
+  const nameOf = new Map(plans.map((p) => [p.id, p.name]));
 
-  console.log("Populating Pricing Plans...");
+  const existing = await db
+    .select({ property: calendarPricing.property, date: sql<string>`DATE_FORMAT(${calendarPricing.date}, '%Y-%m-%d')`, planId: calendarPricing.planId })
+    .from(calendarPricing)
+    .where(sql`${calendarPricing.date} >= ${iso(from)} AND ${calendarPricing.date} <= ${iso(to)}`);
+  const current = new Map(existing.map((r) => [`${r.property}|${r.date}`, r.planId]));
 
-  await db.insert(propertySettings).values([
-    { property: "Sadoles", fixedBookingPrice: 800 },
-    { property: "Hacjenda", fixedBookingPrice: 800 },
-  ]).onDuplicateKeyUpdate({ set: { fixedBookingPrice: 800 } });
-
-  const sadolesPlans = [
-    { name: "S1: Low Weekday", nightlyPrice: 500, minStay: 1 },
-    { name: "S2: Low Weekend", nightlyPrice: 900, minStay: 2 },
-    { name: "S3: Mid Weekday", nightlyPrice: 700, minStay: 1 },
-    { name: "S4: Mid Weekend", nightlyPrice: 1100, minStay: 2 },
-    { name: "S5: High Weekday", nightlyPrice: 900, minStay: 2 },
-    { name: "S6: High Weekend", nightlyPrice: 1700, minStay: 2 },
-    { name: "S7: Special Holiday", nightlyPrice: 1700, minStay: 3 },
-    { name: "S8: New Year", nightlyPrice: 4000, minStay: 2 },
-  ];
-
-  const hacjendaPlans = [
-    { name: "H1: Low Weekday", nightlyPrice: 300, minStay: 1 },
-    { name: "H2: Mid Weekday", nightlyPrice: 500, minStay: 1 },
-    { name: "H3: Standard", nightlyPrice: 600, minStay: 1 },
-    { name: "H4: Mid Weekend", nightlyPrice: 750, minStay: 1 },
-    { name: "H5: High Weekend", nightlyPrice: 900, minStay: 1 },
-    { name: "H6: Special Holiday", nightlyPrice: 900, minStay: 3 },
-    { name: "H7: New Year", nightlyPrice: 4000, minStay: 2 },
-  ];
-
-  const sadolesMap: Record<string, number> = {};
-  for (const p of sadolesPlans) {
-    const [res] = await db.insert(pricingPlans).values({ ...p, property: "Sadoles" }).onDuplicateKeyUpdate({
-      set: { nightlyPrice: p.nightlyPrice, minStay: p.minStay }
-    });
-    const id = (res as any).insertId || (await db.select().from(pricingPlans).where(and(eq(pricingPlans.property, "Sadoles"), eq(pricingPlans.name, p.name))).limit(1))[0].id;
-    sadolesMap[p.name] = id;
+  const rows: { property: (typeof PROPERTIES)[number]; date: Date; planId: number }[] = [];
+  const changes: string[] = [];
+  for (let t = from.getTime(); t <= to.getTime(); t += DAY) {
+    const night = new Date(t);
+    for (const property of PROPERTIES) {
+      const name = planFor(property, night);
+      const planId = idOf.get(`${property}|${name}`);
+      if (!planId) throw new Error(`No plan "${name}" for ${property}`);
+      const was = current.get(`${property}|${iso(night)}`);
+      if (was === planId) continue;
+      rows.push({ property, date: night, planId });
+      const weekday = night.toLocaleDateString("pl-PL", { weekday: "short", timeZone: "UTC" });
+      changes.push(`${property.padEnd(8)} ${iso(night)} ${weekday.padEnd(4)} ${was ? nameOf.get(was) : "(none)"} → ${name}`);
+    }
   }
 
-  const hacjendaMap: Record<string, number> = {};
-  for (const p of hacjendaPlans) {
-    const [res] = await db.insert(pricingPlans).values({ ...p, property: "Hacjenda" }).onDuplicateKeyUpdate({
-      set: { nightlyPrice: p.nightlyPrice, minStay: p.minStay }
-    });
-    const id = (res as any).insertId || (await db.select().from(pricingPlans).where(and(eq(pricingPlans.property, "Hacjenda"), eq(pricingPlans.name, p.name))).limit(1))[0].id;
-    hacjendaMap[p.name] = id;
+  console.log(`Range ${iso(from)} … ${iso(to)}: ${changes.length} night(s) change.`);
+  for (const c of changes) console.log("  " + c);
+
+  if (!apply) {
+    console.log("\nDry run — nothing written. Re-run with --apply.");
+    process.exit(0);
   }
 
-  console.log("Generating assignments for 2 years...");
-
-  const now = new Date();
-  const startDate = new Date(Date.UTC(now.getFullYear(), 0, 1));
-  const endDate = addDays(startDate, 365 * 2 + 31); 
-
-  let currentTs = startDate.getTime();
-  const endTs = endDate.getTime();
-  const oneDay = 24 * 60 * 60 * 1000;
-  
-  let batch: any[] = [];
-  let holidaysCache: Record<number, any> = {};
-  
-  while (currentTs <= endTs) {
-    const d = new Date(currentTs);
-    const year = d.getUTCFullYear();
-    if (!holidaysCache[year]) {
-      holidaysCache[year] = getPolishHolidays(year);
-    }
-    const holidays = holidaysCache[year];
-    const dayOfWeek = d.getUTCDay(); // 0 = Sun, 5 = Fri, 6 = Sat
-    
-    // --- SPECIAL HOLIDAY LOGIC ---
-    const isEaster = isSameDay(d, holidays.easter) || isSameDay(d, holidays.easterMonday);
-    
-    const isMay1to3 = (d >= holidays.may1 && d <= holidays.may3);
-    
-    let isMayWeekendAdjacency = false;
-    if (dayOfWeek === 5 || dayOfWeek === 6 || dayOfWeek === 0) {
-      if (isSameDay(addDays(d, 1), holidays.may1) || isSameDay(addDays(d, 2), holidays.may1)) {
-        isMayWeekendAdjacency = true;
-      }
-      if (isSameDay(addDays(d, -1), holidays.may3) || isSameDay(addDays(d, -2), holidays.may3)) {
-        isMayWeekendAdjacency = true;
-      }
-    }
-
-    const isMayHoliday = isMay1to3 || isMayWeekendAdjacency;
-    const isCorpusChristiSpan = (d >= holidays.corpusChristi && d <= addDays(holidays.corpusChristi, 3));
-    const isChristmas = (d.getUTCMonth() === 11 && (d.getUTCDate() === 24 || d.getUTCDate() === 25));
-
-    const isSpecial = isEaster || isMayHoliday || isCorpusChristiSpan || isChristmas;
-    const isNY = d.getUTCMonth() === 11 && d.getUTCDate() === 31;
-    
-    // --- WEEKEND LOGIC ---
-    const isPublicHoliday = Object.values(holidays).some(h => isSameDay(d, h as Date));
-    
-    // REVISED LOGIC FOR SUNDAY HOLIDAYS:
-    // If it's a Sunday (0) and a public holiday, but NOT a "Special Holiday" (like May 1-3 or Easter),
-    // it should probably be a Weekday plan if we want consistency.
-    // However, the user specifically asked about May 3rd. May 3rd IS a Special Holiday.
-    // If it's a Special Holiday, it gets S7/H6. 
-    // If it was just a regular Sunday holiday, it would get S4/H4 in the old logic.
-    
-    const isWeekendDay = dayOfWeek === 5 || dayOfWeek === 6 || isPublicHoliday;
-    
-    const season = getSeason(d);
-
-    let sPlan, hPlan;
-
-    if (isNY) {
-      sPlan = sadolesMap["S8: New Year"];
-      hPlan = hacjendaMap["H7: New Year"];
-    } else if (isSpecial) {
-      sPlan = sadolesMap["S7: Special Holiday"];
-      hPlan = hacjendaMap["H6: Special Holiday"];
-    } else if (isWeekendDay) {
-      if (season === "Low") {
-        sPlan = sadolesMap["S2: Low Weekend"];
-        hPlan = hacjendaMap["H3: Standard"];
-      } else if (season === "Mixed") {
-        sPlan = sadolesMap["S4: Mid Weekend"];
-        hPlan = hacjendaMap["H4: Mid Weekend"];
-      } else {
-        sPlan = sadolesMap["S6: High Weekend"];
-        hPlan = hacjendaMap["H5: High Weekend"];
-      }
-    } else {
-      if (season === "Low") {
-        sPlan = sadolesMap["S1: Low Weekday"];
-        hPlan = hacjendaMap["H1: Low Weekday"];
-      } else if (season === "Mixed") {
-        sPlan = sadolesMap["S3: Mid Weekday"];
-        hPlan = hacjendaMap["H2: Mid Weekday"];
-      } else {
-        sPlan = sadolesMap["S5: High Weekday"];
-        hPlan = hacjendaMap["H3: Standard"];
-      }
-    }
-
-    batch.push({ property: "Sadoles", date: d, planId: sPlan! });
-    batch.push({ property: "Hacjenda", date: d, planId: hPlan! });
-
-    if (batch.length >= 200) {
-      console.log(`Processing up to ${format(d, "yyyy-MM-dd")}...`);
-      await db.insert(calendarPricing).values(batch).onDuplicateKeyUpdate({
-        set: { planId: sql`VALUES(planId)` }
+  await db.transaction(async (tx) => {
+    for (let i = 0; i < rows.length; i += 200) {
+      await tx.insert(calendarPricing).values(rows.slice(i, i + 200)).onDuplicateKeyUpdate({
+        set: { planId: sql`VALUES(planId)` },
       });
-      batch = [];
     }
-
-    currentTs += oneDay;
-  }
-
-  if (batch.length > 0) {
-    await db.insert(calendarPricing).values(batch).onDuplicateKeyUpdate({
-      set: { planId: sql`VALUES(planId)` }
-    });
-  }
-
-  console.log("Done!");
+  });
+  console.log(`\nWritten ${rows.length} night(s).`);
   process.exit(0);
 }
 
-populate();
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
