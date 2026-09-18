@@ -21,8 +21,11 @@ export class PricingAuditRepository {
     const db = await getDb();
     if (!db) return null;
     
+    // A reading from before the epoch is no longer the portal's price, so it must not
+    // hold a range back from being probed again.
     const fourteenDaysAgo = new Date();
     fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
+    const since = new Date(Math.max(fourteenDaysAgo.getTime(), PricingAuditRepository.AUDIT_EPOCH.getTime()));
 
     const result = await db
       .select()
@@ -32,7 +35,7 @@ export class PricingAuditRepository {
           eq(priceAudits.property, property),
           eq(priceAudits.checkIn, checkIn),
           eq(priceAudits.checkOut, checkOut),
-          gte(priceAudits.dateScraped, fourteenDaysAgo)
+          gte(priceAudits.dateScraped, since)
         )
       )
       .orderBy(sql`${priceAudits.dateScraped} DESC`)
@@ -81,8 +84,13 @@ export class PricingAuditRepository {
    *
    * Move this forward whenever a scraper change invalidates what is already stored,
    * rather than widening the age window to sweep it out by accident.
+   *
+   * Moved to 19 Sep 2026: on 18 Sep both houses were repriced on every channel and on
+   * direct, and the owner kept adjusting portals through the day. Earlier readings
+   * compare old portal prices against the new price list; the rows stay in the table
+   * for history, but the dashboard and the re-probe skip ignore them.
    */
-  static readonly AUDIT_EPOCH = new Date("2026-07-28T00:00:00");
+  static readonly AUDIT_EPOCH = new Date("2026-09-19T00:00:00");
 
   /**
    * Current audit picture for a property: the newest observation of each stay whose

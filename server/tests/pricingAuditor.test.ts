@@ -195,7 +195,7 @@ describe("PricingAuditor.runDailyAudit", () => {
       expect(saved.some(a => a.checkIn.toISOString().startsWith("2026-12-31"))).toBe(true);
     });
 
-    it("honours the ten-probe ceiling", async () => {
+    it("honours the nightly ceiling of thirty probes", async () => {
       arrange({
         candidates: Array.from({ length: 20 }, (_, i) =>
           range(`2026-09-${String(i + 1).padStart(2, "0")}`, `2026-09-${String(i + 2).padStart(2, "0")}`)
@@ -204,7 +204,10 @@ describe("PricingAuditor.runDailyAudit", () => {
 
       await run();
 
-      expect(saved).toHaveLength(10);
+      // 20 candidates per property, 18 at most per property, 30 in all.
+      expect(saved).toHaveLength(30);
+      expect(saved.filter(a => a.property === "Sadoles").length).toBeLessThanOrEqual(18);
+      expect(saved.filter(a => a.property === "Hacjenda").length).toBeLessThanOrEqual(18);
     });
   });
 

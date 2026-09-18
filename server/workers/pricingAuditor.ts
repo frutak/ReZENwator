@@ -10,7 +10,15 @@ import { isNetworkMaintenanceWindow } from "../_core/maintenanceWindow";
 
 const execAsync = promisify(exec);
 
-const MAX_PROBES_PER_DAY = 10;
+/**
+ * Probes per nightly run, and the most one property may take. Raised from 10/7 on
+ * 18 Sep 2026, when every channel was repriced at once: at ten a night the audit
+ * needed weeks to re-read the calendar, and each probe costs well under a minute.
+ */
+const MAX_PROBES_PER_DAY = 30;
+const MAX_PROBES_PER_PROPERTY = 18;
+/** Random stays drawn per run; enough to keep the larger budget busy after the 14-day skip. */
+const WILDCARD_CANDIDATES = 40;
 const SCRAPE_ATTEMPTS = 3;
 const SCRAPE_RETRY_DELAY_MS = 5000;
 const PYTHON_VENV_PATH = "/home/frutak/price-checker/venv/bin/python3";
@@ -220,7 +228,6 @@ export class PricingAuditor {
 
     try {
       const properties: ("Sadoles" | "Hacjenda")[] = ["Sadoles", "Hacjenda"];
-      const MAX_PROBES = 10;
 
       // Every range this run has already written, as `property|checkIn|checkOut`.
       // `getRecentAudit` reads what is committed, so it cannot see a probe made
@@ -235,8 +242,6 @@ export class PricingAuditor {
 
       for (const property of shuffledProperties) {
         let propertyProbes = 0;
-        // We want roughly 5 per property, but can go up to 10 if needed to hit the total
-        const MAX_PER_PROPERTY = 7; 
         
         const availability = await BookingRepository.getAvailability(property);
         const isAvailable = (start: Date, end: Date) => {
@@ -259,8 +264,8 @@ export class PricingAuditor {
         const candidates = await this.generateCandidateDates(property);
 
         for (const { checkIn, checkOut, isMinStayTest } of candidates) {
-          if (probesCount >= MAX_PROBES) break;
-          if (propertyProbes >= MAX_PER_PROPERTY) break;
+          if (probesCount >= MAX_PROBES_PER_DAY) break;
+          if (propertyProbes >= MAX_PROBES_PER_PROPERTY) break;
 
           const key = rangeKey(property, checkIn, checkOut);
           if (probedThisRun.has(key)) continue;
@@ -505,7 +510,7 @@ export class PricingAuditor {
     }
 
     // 4. Random Wildcards (Priority 4)
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < WILDCARD_CANDIDATES; i++) {
       const d = addDays(today, Math.floor(Math.random() * 180) + 7);
       const duration = Math.floor(Math.random() * 3) + 2;
       const checkOut = addDays(d, duration);
